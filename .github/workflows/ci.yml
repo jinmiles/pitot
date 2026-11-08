@@ -1,7 +1,9 @@
 name: CI
 
+# Feature branches are checked through their pull request, so push runs only on main.
 on:
   push:
+    branches: [main]
   pull_request:
 
 permissions:
