@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  check:
+    name: fmt, clippy, test, dependency direction
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # Installs the toolchain, components, and target pinned in rust-toolchain.toml.
+      - name: Install toolchain
+        run: |
+          rustup toolchain install
+          rustc --version
+          cargo --version
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace
+
+      # pitot-bench must not depend on pitot-overlay; pitot-irsdk depends on neither.
+      - name: Dependency direction
+        shell: bash
+        run: |
+          set -euo pipefail
+          check() {
+            local pkg="$1"; shift
+            local tree
+            tree="$(cargo tree -p "$pkg" -e normal,build,dev --prefix none --format '{p}')"
+            for forbidden in "$@"; do
+              if grep -Eq "^${forbidden} v" <<<"$tree"; then
+                echo "::error::$pkg must not depend on $forbidden"
+                exit 1
+              fi
+            done
+            echo "$pkg: ok"
+          }
+          check pitot-bench pitot-overlay
+          check pitot-irsdk pitot-bench pitot-overlay
