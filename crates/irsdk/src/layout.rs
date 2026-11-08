@@ -332,17 +332,27 @@ impl Header {
     /// Variable headers are not checked here: readers check only the variables they use, so an unknown
     /// type in a future sim build does not reject the whole connection.
     pub fn validate(&self, available: usize) -> Result<(), LayoutError> {
+        self.validate_tables(available)?;
+        for index in 0..self.buffer_count()? {
+            self.buffer_range(index, available)?;
+        }
+        Ok(())
+    }
+
+    /// Same as [`Header::validate`] without the data buffer ranges, for files that may hold no records.
+    pub fn validate_tables(&self, available: usize) -> Result<(), LayoutError> {
         if self.ver != SDK_VERSION {
             return Err(LayoutError::UnsupportedVersion(self.ver));
         }
         if self.tick_rate <= 0 {
             return Err(out_of_range("tickRate"));
         }
+        if self.buf_len <= 0 {
+            return Err(out_of_range("bufLen"));
+        }
+        self.buffer_count()?;
         self.var_table_range(available)?;
         self.session_info_range(available)?;
-        for index in 0..self.buffer_count()? {
-            self.buffer_range(index, available)?;
-        }
         Ok(())
     }
 
@@ -490,6 +500,94 @@ impl VarHeader {
             .checked_mul(self.var_type()?.size())
             .ok_or(out_of_range("count"))?;
         checked_range(self.offset, len, "offset", buf_len)
+    }
+}
+
+/// Location and type of one variable inside a data buffer row, checked against the row length once.
+///
+/// Accessors return `None` when the requested type does not match, the index is past `count`, or the row
+/// is shorter than the length the field was checked against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Field {
+    offset: usize,
+    var_type: VarType,
+    count: usize,
+}
+
+impl Field {
+    /// Resolves `var` for rows of `buf_len` bytes.
+    pub fn new(var: &VarHeader, buf_len: usize) -> Result<Self, LayoutError> {
+        let range = var.value_range(buf_len)?;
+        let var_type = var.var_type()?;
+        Ok(Self {
+            offset: range.start,
+            var_type,
+            count: range.len() / var_type.size(),
+        })
+    }
+
+    pub const fn offset(&self) -> usize {
+        self.offset
+    }
+
+    pub const fn var_type(&self) -> VarType {
+        self.var_type
+    }
+
+    /// Number of elements; greater than one for arrays.
+    pub const fn count(&self) -> usize {
+        self.count
+    }
+
+    pub const fn byte_len(&self) -> usize {
+        self.count * self.var_type.size()
+    }
+
+    /// The same field at another offset, for rows that store fields in a different order.
+    pub const fn with_offset(self, offset: usize) -> Self {
+        Self { offset, ..self }
+    }
+
+    pub fn f32(&self, row: &[u8], index: usize) -> Option<f32> {
+        self.element(row, index, VarType::Float)
+            .map(f32::from_le_bytes)
+    }
+
+    pub fn f64(&self, row: &[u8], index: usize) -> Option<f64> {
+        self.element(row, index, VarType::Double)
+            .map(f64::from_le_bytes)
+    }
+
+    pub fn i32(&self, row: &[u8], index: usize) -> Option<i32> {
+        self.element(row, index, VarType::Int)
+            .map(i32::from_le_bytes)
+    }
+
+    pub fn bitfield(&self, row: &[u8], index: usize) -> Option<u32> {
+        self.element(row, index, VarType::BitField)
+            .map(u32::from_le_bytes)
+    }
+
+    pub fn bool(&self, row: &[u8], index: usize) -> Option<bool> {
+        self.element::<1>(row, index, VarType::Bool)
+            .map(|[b]| b != 0)
+    }
+
+    pub fn char(&self, row: &[u8], index: usize) -> Option<u8> {
+        self.element::<1>(row, index, VarType::Char).map(|[b]| b)
+    }
+
+    fn element<const N: usize>(
+        &self,
+        row: &[u8],
+        index: usize,
+        expected: VarType,
+    ) -> Option<[u8; N]> {
+        if self.var_type != expected || index >= self.count {
+            return None;
+        }
+        let at = self.offset.checked_add(index.checked_mul(N)?)?;
+        row.get(at..at.checked_add(N)?)?.try_into().ok()
     }
 }
 
@@ -885,5 +983,47 @@ mod tests {
             "sessionRecordCount at 140"
         );
         assert_eq!(DiskSubHeader::read(&bytes), Ok(sub));
+    }
+
+    #[test]
+    fn validate_tables_allows_missing_buffers() {
+        let mut header = sample_header();
+        header.var_buf[0].buf_offset = 464;
+        assert_eq!(header.validate_tables(464), Ok(()));
+        assert_eq!(header.validate(464), Err(out_of_range("varBuf.bufOffset")));
+        header.buf_len = 0;
+        assert_eq!(header.validate_tables(464), Err(out_of_range("bufLen")));
+    }
+
+    #[test]
+    fn field_reads_typed_values() {
+        let mut row = [0u8; 32];
+        row[0..4].copy_from_slice(&0.75f32.to_le_bytes());
+        for (n, v) in [1.5f64, 2.5, 3.5].into_iter().enumerate() {
+            row[8 + 8 * n..16 + 8 * n].copy_from_slice(&v.to_le_bytes());
+        }
+        let field = |ty, offset, count| {
+            Field::new(&VarHeader::new(ty, offset, count, "V").expect("valid"), 32)
+                .expect("in range")
+        };
+        let throttle = field(VarType::Float, 0, 1);
+        assert_eq!(throttle.f32(&row, 0), Some(0.75));
+        assert_eq!(throttle.f32(&row, 1), None, "index past count");
+        assert_eq!(throttle.f64(&row, 0), None, "type mismatch");
+        let laps = field(VarType::Double, 8, 3);
+        assert_eq!((laps.count(), laps.byte_len()), (3, 24));
+        assert_eq!(laps.f64(&row, 2), Some(3.5));
+        assert_eq!(laps.f64(&row[..20], 2), None, "short row");
+        row[4] = 1;
+        assert_eq!(field(VarType::Bool, 4, 1).bool(&row, 0), Some(true));
+        assert_eq!(field(VarType::Int, 0, 1).with_offset(8).offset(), 8);
+        let unknown = VarHeader {
+            raw_type: 7,
+            ..VarHeader::new(VarType::Int, 0, 1, "V").expect("valid")
+        };
+        assert_eq!(
+            Field::new(&unknown, 32),
+            Err(LayoutError::InvalidVarType(7))
+        );
     }
 }
