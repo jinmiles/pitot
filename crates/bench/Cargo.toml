@@ -1,0 +1,10 @@
+[package]
+name = "pitot-bench"
+description = "Benchmark harness that measures every overlay, including Pitot, the same way."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+pitot-irsdk.workspace = true
