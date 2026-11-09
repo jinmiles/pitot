@@ -36,5 +36,5 @@ so a table can set just `x` and `y`. Unknown widgets or fields are errors, so ty
 Monitors are counted left to right, then top to bottom, by their top-left corner. That order does not change
 when Windows renumbers displays.
 
-A configuration change rebuilds the overlay windows and widgets. The connection to the sim and its data
-pipeline keep running.
+A configuration change rebuilds the overlay windows, widgets, and composition layers. The GPU device, the
+connection to the sim, and the data pipeline keep running, so reloading does not grow memory.
