@@ -18,6 +18,16 @@ pub fn config_file() -> Option<PathBuf> {
     config_dir().map(|dir| dir.join("config.toml"))
 }
 
+/// The current run's log, inside [`config_dir`].
+pub fn log_file() -> Option<PathBuf> {
+    config_dir().map(|dir| dir.join("pitot.log"))
+}
+
+/// The previous run's log, inside [`config_dir`].
+pub fn previous_log_file() -> Option<PathBuf> {
+    config_dir().map(|dir| dir.join("pitot.previous.log"))
+}
+
 /// Written on first run; kept in sync with [`Config::default`] by a test.
 pub const DEFAULT_TOML: &str = r#"# Pitot overlay configuration. Changes apply when the file is saved.
 #

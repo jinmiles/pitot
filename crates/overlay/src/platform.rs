@@ -18,6 +18,7 @@ use windows::Win32::Storage::FileSystem::{
     FindFirstChangeNotificationW, FindNextChangeNotification,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::SystemInformation::GetLocalTime;
 use windows::Win32::System::Threading::{
     CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, CreateWaitableTimerExW, SetWaitableTimer,
     TIMER_ALL_ACCESS,
@@ -67,6 +68,32 @@ fn last_error(call: &'static str) -> PlatformError {
 }
 
 /// Opts the process into per-monitor DPI awareness, so window and monitor coordinates are physical pixels.
+/// Local wall-clock time, for log lines.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LocalTime {
+    pub year: u16,
+    pub month: u16,
+    pub day: u16,
+    pub hour: u16,
+    pub minute: u16,
+    pub second: u16,
+    pub millis: u16,
+}
+
+pub fn local_time() -> LocalTime {
+    // SAFETY: GetLocalTime only fills the SYSTEMTIME it returns and cannot fail.
+    let t = unsafe { GetLocalTime() };
+    LocalTime {
+        year: t.wYear,
+        month: t.wMonth,
+        day: t.wDay,
+        hour: t.wHour,
+        minute: t.wMinute,
+        second: t.wSecond,
+        millis: t.wMilliseconds,
+    }
+}
+
 pub fn enable_dpi_awareness() {
     // SAFETY: plain process-wide setting with a predefined context value. It fails harmlessly when already
     // set, for example by a manifest.

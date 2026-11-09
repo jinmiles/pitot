@@ -7,6 +7,7 @@
 //! - [`app`]: the render thread's schedule and main loop (Windows).
 //! - [`widgets`]: the widget trait and widgets.
 //! - [`config`]: the hot-reloaded TOML configuration.
+//! - [`log`]: the log file (Windows).
 //!
 //! Planned modules:
 //! - `text`: glyph atlas for digits and symbols, cached DirectWrite layouts (M3).
@@ -16,6 +17,8 @@
 #[cfg(windows)]
 pub mod app;
 pub mod config;
+#[cfg(windows)]
+pub mod log;
 pub mod pipeline;
 #[cfg(windows)]
 pub mod platform;

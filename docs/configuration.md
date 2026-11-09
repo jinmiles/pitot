@@ -7,6 +7,13 @@ notification (no polling) and reloads 250 ms after the last write. A file that f
 reported with its line and column, and the previous configuration stays in use. The tray menu's
 *Reload configuration* forces a reload.
 
+## Log file
+
+The overlay logs to `%APPDATA%\Pitot\pitot.log` and keeps the previous run's log as `pitot.previous.log`. It
+records start and exit, configuration problems and reloads, sim connect and disconnect, and render device
+recovery, but never telemetry values, session info, or driver names. Release builds have no console window
+(quit from the tray icon); debug builds also print the log to the console.
+
 ## Format
 
 ```toml
