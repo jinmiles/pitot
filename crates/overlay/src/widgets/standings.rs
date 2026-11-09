@@ -286,7 +286,7 @@ impl Widget for StandingsWidget {
     }
 
     fn interval(&self) -> Duration {
-        Duration::from_millis(250)
+        Duration::from_millis(500)
     }
 
     fn update(&mut self, view: &mut View, _now: Instant, redraw: &mut [Redraw; MAX_LAYERS]) {

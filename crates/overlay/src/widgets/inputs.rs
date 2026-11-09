@@ -229,7 +229,7 @@ impl Widget for InputTraceWidget {
 
     fn interval(&self) -> Duration {
         // Every sample is drawn; a frame draws all samples queued since the last one.
-        Duration::from_secs_f64(1.0 / 30.0)
+        Duration::from_secs_f64(1.0 / 60.0)
     }
 
     fn update(&mut self, view: &mut View, _now: Instant, redraw: &mut [Redraw; MAX_LAYERS]) {
