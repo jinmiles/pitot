@@ -5,6 +5,7 @@
 
 mod inputs;
 mod relative;
+mod standings;
 mod status;
 mod text;
 
@@ -12,6 +13,7 @@ use std::time::{Duration, Instant};
 
 pub use inputs::InputTraceWidget;
 pub use relative::RelativeWidget;
+pub use standings::StandingsWidget;
 pub use status::StatusWidget;
 
 use crate::pipeline::{Display, View};

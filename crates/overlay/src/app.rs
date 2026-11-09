@@ -16,7 +16,9 @@ use crate::platform::{
     self, DirectoryWatch, Monitor, OverlayWindow, Timer, Tray, TrayCommand, Wake,
 };
 use crate::render::{Canvas, Layer, RenderError, Renderer, WindowTarget};
-use crate::widgets::{InputTraceWidget, MAX_LAYERS, Redraw, RelativeWidget, StatusWidget, Widget};
+use crate::widgets::{
+    InputTraceWidget, MAX_LAYERS, Redraw, RelativeWidget, StandingsWidget, StatusWidget, Widget,
+};
 
 /// Saving a file often takes several writes; reload once they settle.
 const RELOAD_DELAY: Duration = Duration::from_millis(250);
@@ -46,6 +48,7 @@ fn create_widget(name: &str, config: &WidgetConfig) -> Option<Box<dyn Widget>> {
         "status" => Some(Box::new(StatusWidget::new(config.opacity))),
         "inputs" => Some(Box::new(InputTraceWidget::new(config))),
         "relative" => Some(Box::new(RelativeWidget::new(config))),
+        "standings" => Some(Box::new(StandingsWidget::new(config))),
         _ => None,
     }
 }
