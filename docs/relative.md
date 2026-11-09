@@ -3,10 +3,12 @@
 Shows the three cars nearest on track ahead of the player, the player, and the three nearest behind, at 10 Hz by
 default.
 
-- **Gap**: from `CarIdxEstTime`, the sim's estimate of each car's time into the lap, as the difference to the
-  player normalized to half a lap either way, so cars across the start line are placed correctly. Without
-  estimated times, the distance difference times the player's lap time is used. As in the sim's own relative,
-  cars ahead show a negative gap and cars behind a positive one.
+- **Order and gap**: cars are placed by lap distance, normalized to half a lap either way, so cars across the start
+  line land on the correct side. The gap is that distance times the player's lap time. For cars of the player's
+  class, `CarIdxEstTime` (the sim's estimate of time into the lap) refines the gap when it agrees with the
+  distance. It is never compared across classes: each class's estimate follows its own pace, so a faster car
+  ahead on track can have a lower estimate than the player. As in the sim's own relative, cars ahead show a
+  negative gap and cars behind a positive one.
 - **Lap difference**: from `CarIdxLap`, corrected when one of the two cars has just crossed the line. Cars at
   least a lap ahead are shown in red, cars at least a lap behind in blue.
 - **Columns**: class color, car number, driver name, iRating, gap. Cars on pit road are dimmed and show `PIT`.
