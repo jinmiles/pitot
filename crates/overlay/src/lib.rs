@@ -6,15 +6,16 @@
 //! - [`render`]: D3D11, Direct2D, DirectWrite, and DirectComposition layers per widget (Windows).
 //! - [`app`]: the render thread's schedule and main loop (Windows).
 //! - [`widgets`]: the widget trait and widgets.
+//! - [`config`]: the hot-reloaded TOML configuration.
 //!
 //! Planned modules:
 //! - `text`: glyph atlas for digits and symbols, cached DirectWrite layouts (M3).
-//! - `config`: hot-reloaded TOML configuration (M3).
 //! - more widgets: input trace (M3); relative, standings, and fuel (M4).
 //! - `output`: Spout2 and optional local web output, active only when enabled (M6).
 
 #[cfg(windows)]
 pub mod app;
+pub mod config;
 pub mod pipeline;
 #[cfg(windows)]
 pub mod platform;

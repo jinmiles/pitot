@@ -17,20 +17,23 @@ pub struct StatusWidget {
     line: String,
     next: String,
     display: Display,
+    opacity: f32,
 }
 
 impl Default for StatusWidget {
     fn default() -> Self {
-        Self::new()
+        Self::new(0.82)
     }
 }
 
 impl StatusWidget {
-    pub fn new() -> Self {
+    /// `opacity` is the background opacity, 0 to 1.
+    pub fn new(opacity: f32) -> Self {
         Self {
             line: String::with_capacity(96),
             next: String::with_capacity(96),
             display: Display::Disconnected,
+            opacity,
         }
     }
 }
@@ -75,7 +78,10 @@ impl Widget for StatusWidget {
 
     fn draw(&self, canvas: &mut Canvas<'_>) {
         let (w, h) = (WIDTH as f32, HEIGHT as f32);
-        canvas.fill(Rect::new(0.0, 0.0, w, h), Color::rgb(0x10_1418, 0.82));
+        canvas.fill(
+            Rect::new(0.0, 0.0, w, h),
+            Color::rgb(0x10_1418, self.opacity),
+        );
         let accent = match self.display {
             Display::Driving => Color::rgb(0x3D_D68C, 1.0),
             Display::Idle => Color::rgb(0xF2_C14E, 1.0),

@@ -1,35 +1,99 @@
 //! The overlay's render thread: windows, widgets, and the schedule that drives them.
 //!
-//! The loop sleeps on a high-resolution waitable timer until the next widget is due (or a window message
-//! arrives), updates the due widgets, redraws only what they report as changed, and commits only when
-//! something was drawn. A rendering error, such as device loss, rebuilds the renderer and redraws everything.
+//! The loop sleeps on a high-resolution waitable timer until the next widget is due, the configuration
+//! directory changes, or a window message arrives. It updates the due widgets, redraws only what they report
+//! as changed, and commits only when something was drawn. A rendering error, such as device loss, rebuilds the
+//! renderer and redraws everything. A configuration change rebuilds windows and widgets; the data pipeline
+//! keeps running.
 
 use std::time::{Duration, Instant};
 
 use pitot_irsdk::live::{ReaderConfig, SdkNames};
 
+use crate::config::{self, Config, WidgetConfig};
 use crate::pipeline::{Pipeline, View};
-use crate::platform::{self, Monitor, OverlayWindow, ScreenRect, Timer, Tray, TrayCommand};
+use crate::platform::{
+    self, DirectoryWatch, Monitor, OverlayWindow, Timer, Tray, TrayCommand, Wake,
+};
 use crate::render::{Layer, RenderError, Renderer, WindowTarget};
 use crate::widgets::{Redraw, StatusWidget, Widget};
 
-/// Where a widget goes: a monitor index and a position in that monitor's pixels.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Placement {
-    pub monitor: usize,
-    pub x: i32,
-    pub y: i32,
-}
+/// Saving a file often takes several writes; reload once they settle.
+const RELOAD_DELAY: Duration = Duration::from_millis(250);
 
 struct Slot {
     widget: Box<dyn Widget>,
-    placement: Placement,
+    /// Index into `Layout::windows`.
+    window: usize,
+    x: i32,
+    y: i32,
+    interval: Duration,
     next_due: Instant,
     /// The widget must be fully redrawn, after creation, a rebuild, or a reset.
     stale: bool,
 }
 
-/// GPU objects that are rebuilt after device loss.
+/// Windows and widgets built from one configuration.
+struct Layout {
+    windows: Vec<OverlayWindow>,
+    slots: Vec<Slot>,
+}
+
+/// Builds the enabled widgets that exist so far. Widgets that are configured but not implemented yet are
+/// skipped.
+fn create_widget(name: &str, config: &WidgetConfig) -> Option<Box<dyn Widget>> {
+    match name {
+        "status" => Some(Box::new(StatusWidget::new(config.opacity))),
+        _ => None,
+    }
+}
+
+impl Layout {
+    fn build(config: &Config, monitors: &[Monitor]) -> Result<Self, platform::PlatformError> {
+        let rects: Vec<(i32, i32)> = monitors.iter().map(|m| (m.rect.x, m.rect.y)).collect();
+        let order = config::monitor_order(&rects);
+        let primary = monitors.iter().position(|m| m.primary).unwrap_or(0);
+        let mut windows: Vec<OverlayWindow> = Vec::new();
+        let mut window_monitors: Vec<usize> = Vec::new();
+        let mut slots = Vec::new();
+        let now = Instant::now();
+        for (name, widget_config) in config.widgets() {
+            if !widget_config.enabled {
+                continue;
+            }
+            let Some(widget) = create_widget(name, widget_config) else {
+                continue;
+            };
+            let monitor = widget_config
+                .monitor
+                .and_then(|i| order.get(i).copied())
+                .unwrap_or(primary);
+            let window = match window_monitors.iter().position(|&m| m == monitor) {
+                Some(index) => index,
+                None => {
+                    windows.push(OverlayWindow::create(monitors[monitor].rect)?);
+                    window_monitors.push(monitor);
+                    windows.len() - 1
+                }
+            };
+            let interval = widget_config
+                .rate_hz
+                .map_or(widget.interval(), |hz| Duration::from_secs_f32(1.0 / hz));
+            slots.push(Slot {
+                widget,
+                window,
+                x: widget_config.x,
+                y: widget_config.y,
+                interval,
+                next_due: now,
+                stale: true,
+            });
+        }
+        Ok(Self { windows, slots })
+    }
+}
+
+/// GPU objects that are rebuilt after device loss or a configuration change.
 struct Scene {
     renderer: Renderer,
     _targets: Vec<WindowTarget>,
@@ -37,26 +101,16 @@ struct Scene {
 }
 
 impl Scene {
-    fn build(windows: &[(usize, OverlayWindow)], slots: &[Slot]) -> Result<Self, RenderError> {
+    fn build(layout: &Layout) -> Result<Self, RenderError> {
         let mut renderer = Renderer::new()?;
-        let mut targets = Vec::with_capacity(windows.len());
-        for (_, window) in windows {
+        let mut targets = Vec::with_capacity(layout.windows.len());
+        for window in &layout.windows {
             targets.push(renderer.attach(window)?);
         }
-        let mut layers = Vec::with_capacity(slots.len());
-        for slot in slots {
-            let target = windows
-                .iter()
-                .position(|(monitor, _)| *monitor == slot.placement.monitor)
-                .unwrap_or(0);
+        let mut layers = Vec::with_capacity(layout.slots.len());
+        for slot in &layout.slots {
             let (w, h) = slot.widget.size();
-            layers.push(renderer.layer(
-                &targets[target],
-                slot.placement.x,
-                slot.placement.y,
-                w,
-                h,
-            )?);
+            layers.push(renderer.layer(&targets[slot.window], slot.x, slot.y, w, h)?);
         }
         renderer.commit_now()?;
         Ok(Self {
@@ -67,92 +121,90 @@ impl Scene {
     }
 }
 
-/// Picks the monitor for a placement: the requested index, else the primary monitor.
-fn monitor_index(monitors: &[Monitor], wanted: usize) -> usize {
-    if wanted < monitors.len() {
-        wanted
-    } else {
-        monitors.iter().position(|m| m.primary).unwrap_or(0)
-    }
-}
-
-/// Default layout until configuration exists: the status panel near the primary monitor's top-left corner.
-fn default_slots(monitors: &[Monitor]) -> Vec<Slot> {
-    let primary = monitors.iter().position(|m| m.primary).unwrap_or(0);
-    let now = Instant::now();
-    vec![Slot {
-        widget: Box::new(StatusWidget::new()),
-        placement: Placement {
-            monitor: primary,
-            x: 24,
-            y: 24,
-        },
-        next_due: now,
-        stale: true,
-    }]
+/// Loads the configuration file, falling back to defaults (and saying why) when it cannot be used.
+fn load_config() -> Config {
+    let Some(path) = config::config_file() else {
+        eprintln!("no APPDATA directory; using the default configuration");
+        return Config::default();
+    };
+    config::load_or_create(&path).unwrap_or_else(|e| {
+        eprintln!("{e}; using the default configuration");
+        Config::default()
+    })
 }
 
 /// Runs the overlay until Quit is chosen from the tray icon.
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     platform::enable_dpi_awareness();
+    let mut config = load_config();
+    let watch = config::config_dir().and_then(|dir| DirectoryWatch::new(&dir).ok());
     let monitors = platform::monitors();
     if monitors.is_empty() {
         return Err("no monitors found".into());
     }
-    let mut slots = default_slots(&monitors);
-    for slot in &mut slots {
-        slot.placement.monitor = monitor_index(&monitors, slot.placement.monitor);
-    }
-    // One window per monitor that has widgets.
-    let mut windows: Vec<(usize, OverlayWindow)> = Vec::new();
-    for slot in &slots {
-        let monitor = slot.placement.monitor;
-        if !windows.iter().any(|(m, _)| *m == monitor) {
-            let rect: ScreenRect = monitors[monitor].rect;
-            windows.push((monitor, OverlayWindow::create(rect)?));
-        }
-    }
+    let mut layout = Layout::build(&config, &monitors)?;
     let _tray = Tray::create()?;
-    let mut scene = Some(Scene::build(&windows, &slots)?);
+    let mut scene = Some(Scene::build(&layout)?);
     let (pipeline, mut view) = Pipeline::start(SdkNames::sim(), ReaderConfig::default())?;
     let timer = Timer::new()?;
+    let mut reload_at: Option<Instant> = None;
 
     loop {
         if !platform::pump_messages() {
             break;
         }
         if platform::take_tray_command() == Some(TrayCommand::Reload) {
-            // Configuration arrives with the config module; until then a reload redraws everything.
-            slots.iter_mut().for_each(|s| s.stale = true);
+            reload_at = Some(Instant::now());
+        }
+        if reload_at.is_some_and(|at| Instant::now() >= at) {
+            reload_at = None;
+            if let Some(path) = config::config_file() {
+                match config::load_or_create(&path) {
+                    Ok(fresh) if fresh == config => {}
+                    Ok(fresh) => {
+                        // Release GPU objects before their windows go away.
+                        scene = None;
+                        layout = Layout::build(&fresh, &platform::monitors())?;
+                        config = fresh;
+                    }
+                    Err(e) => eprintln!("{e}; keeping the previous configuration"),
+                }
+            }
         }
         let changes = view.poll();
         if changes.connection {
-            for slot in &mut slots {
+            for slot in &mut layout.slots {
                 slot.widget.reset();
                 slot.stale = true;
             }
         }
-        let now = Instant::now();
         if scene.is_none() {
-            scene = Scene::build(&windows, &slots).ok();
-            slots.iter_mut().for_each(|s| s.stale = true);
+            scene = Scene::build(&layout).ok();
+            layout.slots.iter_mut().for_each(|s| s.stale = true);
         }
+        let now = Instant::now();
         if let Some(current) = scene.as_mut()
-            && let Err(_lost) = frame(current, &mut slots, &mut view, now)
+            && frame(current, &mut layout.slots, &mut view, now).is_err()
         {
             // Rebuild on the next pass, after a short pause so a missing device does not spin.
             scene = None;
             timer.set(Duration::from_millis(500))?;
-            platform::wait(&timer, Duration::from_secs(1));
+            platform::wait(&timer, None, Duration::from_secs(1));
             continue;
         }
-        let next = slots
+        let mut next = layout
+            .slots
             .iter()
             .map(|s| s.next_due)
             .min()
             .unwrap_or(now + Duration::from_secs(1));
+        if let Some(at) = reload_at {
+            next = next.min(at);
+        }
         timer.set(next.saturating_duration_since(Instant::now()))?;
-        platform::wait(&timer, Duration::from_secs(1));
+        if platform::wait(&timer, watch.as_ref(), Duration::from_secs(1)) == Wake::Changed {
+            reload_at = Some(Instant::now() + RELOAD_DELAY);
+        }
     }
     drop(pipeline);
     Ok(())
@@ -172,7 +224,7 @@ fn frame(
         if !visible || (now < slot.next_due && !slot.stale) {
             continue;
         }
-        slot.next_due = now + slot.widget.interval();
+        slot.next_due = now + slot.interval;
         let redraw = match slot.widget.update(view, now) {
             _ if slot.stale => Redraw::All,
             redraw => redraw,
