@@ -2,7 +2,7 @@
 
 Shows throttle (green), brake (red, orange while ABS is active), clutch (blue, drawn as `1 - Clutch` so a
 pressed pedal is high), and steering (grey, half a turn either way) for the last few seconds, with live bars on
-the right.
+the right. The bars follow the pedals from left to right: clutch, brake, throttle, then the steering marker.
 
 ## How it draws
 

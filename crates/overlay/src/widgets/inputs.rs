@@ -36,13 +36,22 @@ fn steering_level(sample: &InputSample) -> f32 {
     0.5 - (sample.steering / PI).clamp(-1.0, 1.0) * 0.5
 }
 
+/// Live pedal bars from left to right, in the order of the pedals: clutch, brake, throttle.
+fn pedal_bars(sample: &InputSample) -> [(f32, Color); 3] {
+    [
+        (clutch_pedal(sample), CLUTCH),
+        (sample.brake, if sample.abs_active { ABS } else { BRAKE }),
+        (sample.throttle, THROTTLE),
+    ]
+}
+
 /// Live pedal levels rounded to what the bars can show, to skip redraws that change nothing.
 fn bar_levels(sample: &InputSample, height: f32) -> [i32; 5] {
     let px = |v: f32| (v.clamp(0.0, 1.0) * height) as i32;
     [
-        px(sample.throttle),
-        px(sample.brake),
         px(clutch_pedal(sample)),
+        px(sample.brake),
+        px(sample.throttle),
         px(steering_level(sample)),
         i32::from(sample.abs_active),
     ]
@@ -152,12 +161,7 @@ impl InputTraceWidget {
         let bar_w = 12.0;
         let gap = (bars.w - 4.0 * bar_w) / 5.0;
         let s = &self.latest;
-        let levels = [
-            (s.throttle, THROTTLE),
-            (s.brake, if s.abs_active { ABS } else { BRAKE }),
-            (clutch_pedal(s), CLUTCH),
-        ];
-        for (n, (level, color)) in levels.into_iter().enumerate() {
+        for (n, (level, color)) in pedal_bars(s).into_iter().enumerate() {
             let x = bars.x + gap + n as f32 * (bar_w + gap);
             canvas.fill(Rect::new(x, bars.y, bar_w, bars.h), TRACK);
             let fill = level.clamp(0.0, 1.0) * bars.h;
@@ -328,6 +332,25 @@ mod tests {
             other => panic!("expected two areas, got {other:?}"),
         }
         assert!(matches!(w.columns_area(10, 14), Redraw::Area(r) if r.x == 10.0 && r.w == 4.0));
+    }
+
+    #[test]
+    fn bars_follow_the_pedals() {
+        let sample = InputSample {
+            clutch: 0.0,
+            brake: 0.5,
+            throttle: 0.25,
+            ..InputSample::default()
+        };
+        let bars = pedal_bars(&sample);
+        assert_eq!(bars.map(|(level, _)| level), [1.0, 0.5, 0.25]);
+        let [clutch, brake, throttle] = bars.map(|(_, c)| c);
+        assert!(clutch.b > clutch.r && clutch.b > clutch.g, "clutch is blue");
+        assert!(brake.r > brake.g && brake.r > brake.b, "brake is red");
+        assert!(
+            throttle.g > throttle.r && throttle.g > throttle.b,
+            "throttle is green"
+        );
     }
 
     #[test]
