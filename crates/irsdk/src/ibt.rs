@@ -272,6 +272,11 @@ impl<R: Read + Seek> IbtReader<R> {
         self.next
     }
 
+    /// Moves the sequential position back to the first record.
+    pub fn rewind(&mut self) {
+        self.next = 0;
+    }
+
     /// Moves the sequential position to the first record at or after (`session_num`, `session_time`) and
     /// returns its index, or [`IbtReader::record_count`] when every record is earlier.
     ///

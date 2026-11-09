@@ -6,6 +6,34 @@ Code or logic ported from other projects is listed here with its original licens
 in the same commit as the code it covers. Licenses of Rust crate dependencies are collected separately for
 release builds.
 
+### irDashies
+
+- Source: https://github.com/tariknz/irdashies
+- License: MIT
+- Used in: `crates/bench/src/replay/irdt.rs`
+- Ported: the `.irdt` v1 telemetry tape layout (file header, record header, record kinds, and FNV-1a checksums),
+  reimplemented as a reader
+
+```text
+MIT License
+
+Copyright (c) 2024 Tarik Alani
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the Software without restriction, including without limitation
+the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and
+to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or substantial portions of
+the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO
+THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF
+CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
+IN THE SOFTWARE.
+```
+
 ### pyirsdk
 
 - Source: https://github.com/kutu/pyirsdk
