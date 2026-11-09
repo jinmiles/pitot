@@ -13,6 +13,10 @@ use windows::Win32::Foundation::{
 use windows::Win32::Graphics::Gdi::{
     EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFO, MONITORINFOEXW,
 };
+use windows::Win32::Storage::FileSystem::{
+    FILE_NOTIFY_CHANGE_FILE_NAME, FILE_NOTIFY_CHANGE_LAST_WRITE, FindCloseChangeNotification,
+    FindFirstChangeNotificationW, FindNextChangeNotification,
+};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::{
     CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, CreateWaitableTimerExW, SetWaitableTimer,
@@ -355,31 +359,77 @@ impl Drop for Timer {
     }
 }
 
+/// A change notification on a directory's file names and write times, for reloading configuration without
+/// polling.
+#[derive(Debug)]
+pub struct DirectoryWatch {
+    handle: HANDLE,
+}
+
+impl DirectoryWatch {
+    pub fn new(dir: &std::path::Path) -> Result<Self, PlatformError> {
+        let path = windows::core::HSTRING::from(dir.as_os_str());
+        // SAFETY: `path` is a NUL-terminated wide string that outlives the call.
+        let handle = unsafe {
+            FindFirstChangeNotificationW(
+                &path,
+                false,
+                FILE_NOTIFY_CHANGE_LAST_WRITE | FILE_NOTIFY_CHANGE_FILE_NAME,
+            )
+        }
+        .map_err(|e| error("FindFirstChangeNotificationW", &e))?;
+        Ok(Self { handle })
+    }
+
+    /// Re-arms the notification after it was signaled.
+    fn rearm(&self) {
+        // SAFETY: `handle` is a change notification owned by `self`.
+        let _ = unsafe { FindNextChangeNotification(self.handle) };
+    }
+}
+
+impl Drop for DirectoryWatch {
+    fn drop(&mut self) {
+        // SAFETY: closes the notification handle owned by `self`, once.
+        let _ = unsafe { FindCloseChangeNotification(self.handle) };
+    }
+}
+
 /// What ended a [`wait`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Wake {
     Timer,
+    /// The watched directory changed.
+    Changed,
     Messages,
     Timeout,
 }
 
-/// Sleeps until the timer fires, a window message arrives, or `timeout` passes.
-pub fn wait(timer: &Timer, timeout: Duration) -> Wake {
+/// Sleeps until the timer fires, the watched directory changes, a window message arrives, or `timeout`
+/// passes.
+pub fn wait(timer: &Timer, watch: Option<&DirectoryWatch>, timeout: Duration) -> Wake {
     let millis = u32::try_from(timeout.as_millis())
         .unwrap_or(u32::MAX - 1)
         .min(u32::MAX - 1);
-    // SAFETY: waits on a timer handle owned by `timer` and on this thread's message queue.
+    let both = [timer.handle, watch.map_or(timer.handle, |w| w.handle)];
+    let handles = if watch.is_some() {
+        &both[..]
+    } else {
+        &both[..1]
+    };
+    // SAFETY: waits on handles owned by `timer` and `watch`, and on this thread's message queue.
     let result = unsafe {
-        MsgWaitForMultipleObjectsEx(
-            Some(&[timer.handle]),
-            millis,
-            QS_ALLINPUT,
-            MWMO_INPUTAVAILABLE,
-        )
+        MsgWaitForMultipleObjectsEx(Some(handles), millis, QS_ALLINPUT, MWMO_INPUTAVAILABLE)
     };
     match result {
         WAIT_OBJECT_0 => Wake::Timer,
         WAIT_TIMEOUT => Wake::Timeout,
+        r if watch.is_some() && r.0 == WAIT_OBJECT_0.0 + 1 => {
+            if let Some(watch) = watch {
+                watch.rearm();
+            }
+            Wake::Changed
+        }
         _ => Wake::Messages,
     }
 }
