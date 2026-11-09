@@ -286,7 +286,8 @@ impl Renderer {
         }
     }
 
-    /// Creates a `width` x `height` layer at (`x`, `y`) in `window`.
+    /// Creates a `width` x `height` layer at (`x`, `y`) in `window`. A scrolling layer treats its surface as a
+    /// ring of columns and shows it through two visuals; see [`Renderer::scroll`].
     pub fn layer(
         &self,
         window: &WindowTarget,
@@ -294,10 +295,10 @@ impl Renderer {
         y: i32,
         width: u32,
         height: u32,
+        scrolling: bool,
     ) -> Result<Layer, RenderError> {
-        // SAFETY: COM calls on live device objects; the visual and surface are owned by `Layer`.
+        // SAFETY: COM calls on live device objects; the visuals and surface are owned by `Layer`.
         unsafe {
-            let visual = self.dcomp.CreateVisual().map_err(fail("CreateVisual"))?;
             let surface = self
                 .dcomp
                 .CreateSurface(
@@ -307,21 +308,62 @@ impl Renderer {
                     DXGI_ALPHA_MODE_PREMULTIPLIED,
                 )
                 .map_err(fail("CreateSurface"))?;
-            visual.SetContent(&surface).map_err(fail("SetContent"))?;
-            visual.SetOffsetX2(x as f32).map_err(fail("SetOffsetX"))?;
-            visual.SetOffsetY2(y as f32).map_err(fail("SetOffsetY"))?;
-            window
-                .root
-                .AddVisual(&visual, false, None::<&IDCompositionVisual>)
-                .map_err(fail("AddVisual"))?;
-            Ok(Layer {
-                visual,
+            let mut visuals = Vec::with_capacity(2);
+            for _ in 0..if scrolling { 2 } else { 1 } {
+                let visual = self.dcomp.CreateVisual().map_err(fail("CreateVisual"))?;
+                visual.SetContent(&surface).map_err(fail("SetContent"))?;
+                visual.SetOffsetX2(x as f32).map_err(fail("SetOffsetX"))?;
+                visual.SetOffsetY2(y as f32).map_err(fail("SetOffsetY"))?;
+                window
+                    .root
+                    .AddVisual(&visual, false, None::<&IDCompositionVisual>)
+                    .map_err(fail("AddVisual"))?;
+                visuals.push(visual);
+            }
+            let mut layer = Layer {
+                visuals,
                 surface,
+                x,
                 width,
                 height,
                 visible: true,
-            })
+            };
+            if scrolling {
+                self.place_scroll(&mut layer, 0)?;
+            }
+            Ok(layer)
         }
+    }
+
+    /// Shows a scrolling layer starting at column `head`: columns `head..width` on the left, then `0..head`.
+    /// Moving the head is a visual tree change; nothing is redrawn.
+    pub fn scroll(&mut self, layer: &mut Layer, head: u32) -> Result<(), RenderError> {
+        if layer.visuals.len() == 2 {
+            self.place_scroll(layer, head % layer.width.max(1))?;
+            self.dirty = true;
+        }
+        Ok(())
+    }
+
+    fn place_scroll(&self, layer: &mut Layer, head: u32) -> Result<(), RenderError> {
+        let (x, w, h) = (layer.x as f32, layer.width as f32, layer.height as f32);
+        let head = head as f32;
+        // Clips are in the visual's own (surface) coordinates, before its offset.
+        let parts = [(x - head, head, w), (x + w - head, 0.0, head)];
+        for (visual, (offset, from, to)) in layer.visuals.iter().zip(parts) {
+            let clip = D2D_RECT_F {
+                left: from,
+                top: 0.0,
+                right: to,
+                bottom: h,
+            };
+            // SAFETY: the visual is alive and owned by `layer`.
+            unsafe {
+                visual.SetOffsetX2(offset).map_err(fail("SetOffsetX"))?;
+                visual.SetClip2(&clip).map_err(fail("SetClip"))?;
+            }
+        }
+        Ok(())
     }
 
     /// Draws `area` of `layer` (the whole layer when `None`) with `paint`, which receives a canvas cleared to
@@ -374,6 +416,12 @@ impl Renderer {
                     brush: &self.brush,
                     formats: &self.formats,
                     text: &mut self.text,
+                    area: Rect::new(
+                        update.left as f32,
+                        update.top as f32,
+                        (update.right - update.left) as f32,
+                        (update.bottom - update.top) as f32,
+                    ),
                 };
                 paint(&mut canvas);
             }
@@ -389,11 +437,13 @@ impl Renderer {
         if layer.visible == visible {
             return Ok(());
         }
-        // SAFETY: the visual is alive; IDCompositionVisual3 is available on Windows 8.1 and later.
-        unsafe {
-            let visual: IDCompositionVisual3 =
-                layer.visual.cast().map_err(fail("IDCompositionVisual3"))?;
-            visual.SetVisible(visible).map_err(fail("SetVisible"))?;
+        for visual in &layer.visuals {
+            // SAFETY: the visual is alive; IDCompositionVisual3 is available on Windows 8.1 and later.
+            unsafe {
+                let visual: IDCompositionVisual3 =
+                    visual.cast().map_err(fail("IDCompositionVisual3"))?;
+                visual.SetVisible(visible).map_err(fail("SetVisible"))?;
+            }
         }
         layer.visible = visible;
         self.dirty = true;
@@ -425,11 +475,12 @@ pub struct WindowTarget {
     root: IDCompositionVisual2,
 }
 
-/// One widget's visual and surface.
+/// A surface shown by one visual, or by two for a scrolling layer.
 #[derive(Debug)]
 pub struct Layer {
-    visual: IDCompositionVisual2,
+    visuals: Vec<IDCompositionVisual2>,
     surface: IDCompositionSurface,
+    x: i32,
     width: u32,
     height: u32,
     visible: bool,
@@ -447,9 +498,15 @@ pub struct Canvas<'a> {
     brush: &'a ID2D1SolidColorBrush,
     formats: &'a Formats,
     text: &'a mut Vec<u16>,
+    area: Rect,
 }
 
 impl Canvas<'_> {
+    /// The area being redrawn, in layer pixels; drawing outside it is clipped.
+    pub fn area(&self) -> Rect {
+        self.area
+    }
+
     pub fn fill(&mut self, rect: Rect, color: Color) {
         // SAFETY: drawing calls on a device context inside BeginDraw/EndDraw with a live brush.
         unsafe {

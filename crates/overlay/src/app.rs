@@ -15,8 +15,8 @@ use crate::pipeline::{Pipeline, View};
 use crate::platform::{
     self, DirectoryWatch, Monitor, OverlayWindow, Timer, Tray, TrayCommand, Wake,
 };
-use crate::render::{Layer, RenderError, Renderer, WindowTarget};
-use crate::widgets::{Redraw, StatusWidget, Widget};
+use crate::render::{Canvas, Layer, RenderError, Renderer, WindowTarget};
+use crate::widgets::{InputTraceWidget, MAX_LAYERS, Redraw, StatusWidget, Widget};
 
 /// Saving a file often takes several writes; reload once they settle.
 const RELOAD_DELAY: Duration = Duration::from_millis(250);
@@ -44,6 +44,7 @@ struct Layout {
 fn create_widget(name: &str, config: &WidgetConfig) -> Option<Box<dyn Widget>> {
     match name {
         "status" => Some(Box::new(StatusWidget::new(config.opacity))),
+        "inputs" => Some(Box::new(InputTraceWidget::new(config))),
         _ => None,
     }
 }
@@ -97,7 +98,8 @@ impl Layout {
 /// survives configuration changes and is recreated only after device loss.
 struct Scene {
     _targets: Vec<WindowTarget>,
-    layers: Vec<Layer>,
+    /// Per slot, the widget's layers.
+    layers: Vec<Vec<Layer>>,
 }
 
 impl Scene {
@@ -108,8 +110,18 @@ impl Scene {
         }
         let mut layers = Vec::with_capacity(layout.slots.len());
         for slot in &layout.slots {
-            let (w, h) = slot.widget.size();
-            layers.push(renderer.layer(&targets[slot.window], slot.x, slot.y, w, h)?);
+            let mut widget_layers = Vec::new();
+            for spec in slot.widget.layers().into_iter().take(MAX_LAYERS) {
+                widget_layers.push(renderer.layer(
+                    &targets[slot.window],
+                    slot.x + spec.x,
+                    slot.y + spec.y,
+                    spec.width,
+                    spec.height,
+                    spec.scrolling,
+                )?);
+            }
+            layers.push(widget_layers);
         }
         renderer.commit_now()?;
         Ok(Self {
@@ -228,23 +240,34 @@ fn frame(
     now: Instant,
 ) -> Result<(), RenderError> {
     let display = view.display();
-    for (slot, layer) in slots.iter_mut().zip(scene.layers.iter_mut()) {
+    for (slot, layers) in slots.iter_mut().zip(scene.layers.iter_mut()) {
         let visible = slot.widget.visible(display);
-        renderer.set_visible(layer, visible)?;
+        for layer in layers.iter_mut() {
+            renderer.set_visible(layer, visible)?;
+        }
         if !visible || (now < slot.next_due && !slot.stale) {
             continue;
         }
         slot.next_due = now + slot.interval;
-        let redraw = match slot.widget.update(view, now) {
-            _ if slot.stale => Redraw::All,
-            redraw => redraw,
-        };
-        slot.stale = false;
+        let mut redraws = [Redraw::Nothing; MAX_LAYERS];
+        slot.widget.update(view, now, &mut redraws);
+        if slot.stale {
+            redraws = [Redraw::All; MAX_LAYERS];
+            slot.stale = false;
+        }
         let widget = &slot.widget;
-        match redraw {
-            Redraw::Nothing => {}
-            Redraw::All => renderer.draw(layer, None, |canvas| widget.draw(canvas))?,
-            Redraw::Area(area) => renderer.draw(layer, Some(area), |canvas| widget.draw(canvas))?,
+        for (index, (layer, redraw)) in layers.iter_mut().zip(redraws).enumerate() {
+            let draw = |canvas: &mut Canvas<'_>| widget.draw(index, canvas);
+            match redraw {
+                Redraw::Nothing => {}
+                Redraw::All => renderer.draw(layer, None, draw)?,
+                Redraw::Area(area) => renderer.draw(layer, Some(area), draw)?,
+                Redraw::Areas(a, b) => {
+                    renderer.draw(layer, Some(a), draw)?;
+                    renderer.draw(layer, Some(b), draw)?;
+                }
+            }
+            renderer.scroll(layer, widget.scroll(index))?;
         }
     }
     renderer.commit()?;
