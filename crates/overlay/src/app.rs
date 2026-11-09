@@ -9,6 +9,7 @@
 use std::time::{Duration, Instant};
 
 use pitot_irsdk::live::{ReaderConfig, SdkNames};
+use tracing::{debug, info, warn};
 
 use crate::config::{self, Config, WidgetConfig};
 use crate::pipeline::{Pipeline, View};
@@ -140,11 +141,11 @@ impl Scene {
 /// Loads the configuration file, falling back to defaults (and saying why) when it cannot be used.
 fn load_config() -> Config {
     let Some(path) = config::config_file() else {
-        eprintln!("no APPDATA directory; using the default configuration");
+        warn!("no APPDATA directory; using the default configuration");
         return Config::default();
     };
     config::load_or_create(&path).unwrap_or_else(|e| {
-        eprintln!("{e}; using the default configuration");
+        warn!("using the default configuration: {e}");
         Config::default()
     })
 }
@@ -155,6 +156,11 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut config = load_config();
     let watch = config::config_dir().and_then(|dir| DirectoryWatch::new(&dir).ok());
     let monitors = platform::monitors();
+    info!(
+        version = env!("CARGO_PKG_VERSION"),
+        monitors = monitors.len(),
+        "overlay started"
+    );
     if monitors.is_empty() {
         return Err("no monitors found".into());
     }
@@ -186,33 +192,45 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                         scene = None;
                         layout = Layout::build(&fresh, &platform::monitors())?;
                         config = fresh;
+                        info!("configuration reloaded");
                     }
-                    Err(e) => eprintln!("{e}; keeping the previous configuration"),
+                    Err(e) => warn!("keeping the previous configuration: {e}"),
                 }
             }
         }
         let changes = view.poll();
         if changes.connection {
+            if view.is_connected() {
+                info!("sim connected");
+            } else {
+                info!("sim disconnected");
+            }
             for slot in &mut layout.slots {
                 slot.widget.reset();
                 slot.stale = true;
             }
         }
         if renderer.is_none() {
-            renderer = Renderer::new().ok();
+            renderer = Renderer::new()
+                .inspect(|_| info!("render device rebuilt"))
+                .inspect_err(|e| debug!("render device not created: {e}"))
+                .ok();
         }
         if scene.is_none()
             && let Some(device) = renderer.as_mut()
         {
-            scene = Scene::build(device, &layout).ok();
+            scene = Scene::build(device, &layout)
+                .inspect_err(|e| debug!("scene not built: {e}"))
+                .ok();
             layout.slots.iter_mut().for_each(|s| s.stale = true);
         }
         let now = Instant::now();
         if let (Some(device), Some(current)) = (renderer.as_mut(), scene.as_mut())
-            && frame(device, current, &mut layout.slots, &mut view, now).is_err()
+            && let Err(e) = frame(device, current, &mut layout.slots, &mut view, now)
         {
             // Device loss: rebuild the device and the scene on the next pass, after a short pause so a missing
             // device does not spin.
+            warn!("render failed, rebuilding the device: {e}");
             scene = None;
             renderer = None;
             timer.set(Duration::from_millis(500))?;
