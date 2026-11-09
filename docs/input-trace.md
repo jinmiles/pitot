@@ -4,8 +4,9 @@ Shows throttle (green), brake (red, yellow while ABS is active), clutch (blue, d
 pressed pedal is high), and steering (grey, half a turn either way) for the last few seconds, with live bars on
 the right. The bars follow the pedals from left to right: clutch, brake, throttle. Right of them a white steering
 wheel icon turns by the actual wheel angle (`SteeringWheelAngle`, positive to the left), beyond half a turn as
-well. The icon is Tabler Icons' `steering-wheel`, drawn with Direct2D circles and lines so it stays sharp at any
-size and angle.
+well. An orange center marker at the top of the rim shows which way and how far the wheel is turned, as on a
+racing wheel. The icon is Tabler Icons' `steering-wheel` with that marker added, drawn with Direct2D circles and
+lines so it stays sharp at any size and angle.
 
 ## How it draws
 

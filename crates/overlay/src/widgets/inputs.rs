@@ -31,6 +31,7 @@ const ABS: Color = Color::rgb(0xFF_D23F, 1.0);
 const CLUTCH: Color = Color::rgb(0x4E_A6F2, 1.0);
 const STEERING: Color = Color::rgb(0xC8_CCD2, 0.8);
 const WHEEL: Color = Color::rgb(0xF0_F2F5, 1.0);
+const WHEEL_MARK: Color = Color::rgb(0xFF_8A3D, 1.0);
 const GRID: Color = Color::rgb(0xFF_FFFF, 0.08);
 const TRACK: Color = Color::rgb(0xFF_FFFF, 0.10);
 
@@ -55,6 +56,10 @@ const ICON_SPOKES: [((f32, f32), (f32, f32)); 3] = [
     ((-2.0, 0.0), (-8.75, -2.0)),
     ((2.0, 0.0), (8.75, -2.0)),
 ];
+/// Center marker at the top of the rim (not part of the icon), so the wheel's turn reads at a glance like on a
+/// racing wheel: a thick chord across 12 degrees either side of the top.
+const ICON_MARK: ((f32, f32), (f32, f32)) = ((-1.87, -8.8), (1.87, -8.8));
+const ICON_MARK_STROKE: f32 = 3.0;
 
 /// Turns a point by the wheel angle (radians, positive to the left) on a y-down screen.
 fn turn((x, y): (f32, f32), angle: f32) -> (f32, f32) {
@@ -234,6 +239,8 @@ impl InputTraceWidget {
         for (from, to) in ICON_SPOKES {
             canvas.line(at(from), at(to), stroke, WHEEL);
         }
+        let (from, to) = ICON_MARK;
+        canvas.line(at(from), at(to), ICON_MARK_STROKE * scale, WHEEL_MARK);
     }
 
     fn draw_trace(&self, canvas: &mut Canvas<'_>) {
@@ -443,6 +450,28 @@ mod tests {
         assert_eq!(level(10.2), level(9.9));
         assert_ne!(level(10.6), level(10.2));
         assert_eq!(level(-450.0), -450, "angles beyond half a turn");
+    }
+
+    #[test]
+    fn marker_shows_the_top_of_the_wheel() {
+        let middle = |angle: f32| {
+            let (a, b) = (turn(ICON_MARK.0, angle), turn(ICON_MARK.1, angle));
+            ((a.0 + b.0) / 2.0, (a.1 + b.1) / 2.0)
+        };
+        let (x, y) = middle(0.0);
+        assert!(
+            x.abs() < 1e-6 && y < -8.0,
+            "straight: at the top ({x}, {y})"
+        );
+        let (x, y) = middle(PI / 4.0);
+        assert!(x < -5.0 && y < -5.0, "left: up and to the left ({x}, {y})");
+        let (x, y) = middle(-PI / 4.0);
+        assert!(x > 5.0 && y < -5.0, "right: up and to the right ({x}, {y})");
+        let (x, y) = middle(PI);
+        assert!(
+            x.abs() < 1e-3 && y > 8.0,
+            "half a turn: at the bottom ({x}, {y})"
+        );
     }
 
     #[test]
