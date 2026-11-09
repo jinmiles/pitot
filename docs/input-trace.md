@@ -2,7 +2,10 @@
 
 Shows throttle (green), brake (red, yellow while ABS is active), clutch (blue, drawn as `1 - Clutch` so a
 pressed pedal is high), and steering (grey, half a turn either way) for the last few seconds, with live bars on
-the right. The bars follow the pedals from left to right: clutch, brake, throttle, then the steering marker.
+the right. The bars follow the pedals from left to right: clutch, brake, throttle. Right of them a white steering
+wheel icon turns by the actual wheel angle (`SteeringWheelAngle`, positive to the left), beyond half a turn as
+well. The icon is Tabler Icons' `steering-wheel`, drawn with Direct2D circles and lines so it stays sharp at any
+size and angle.
 
 ## How it draws
 
@@ -11,7 +14,8 @@ the right. The bars follow the pedals from left to right: clutch, brake, throttl
   show the ring. Nothing else is redrawn.
 - Samples come from the pipeline's sample ring, so every 60 Hz sample is drawn even though the screen updates
   less often: a frame draws all samples queued since the previous one.
-- The bars are redrawn only when a level changes by at least a pixel.
+- The bars and the wheel are redrawn only when a level changes by at least a pixel or the wheel angle by a
+  whole degree.
 - Samples lost upstream (overwritten in the sim's buffers) are counted; a red line on top of the bars appears if
   any were lost.
 - Hidden unless the player is driving.

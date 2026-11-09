@@ -13,8 +13,9 @@ use windows::Win32::Graphics::Direct2D::Common::{
 use windows::Win32::Graphics::Direct2D::{
     D2D1_ANTIALIAS_MODE_ALIASED, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_BITMAP_OPTIONS_TARGET,
     D2D1_BITMAP_PROPERTIES1, D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_DRAW_TEXT_OPTIONS_CLIP,
-    D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1CreateFactory,
-    ID2D1Bitmap1, ID2D1Device, ID2D1DeviceContext, ID2D1Factory1, ID2D1SolidColorBrush,
+    D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ELLIPSE, D2D1_FACTORY_TYPE_SINGLE_THREADED,
+    D2D1CreateFactory, ID2D1Bitmap1, ID2D1Device, ID2D1DeviceContext, ID2D1Factory1,
+    ID2D1SolidColorBrush,
 };
 use windows::Win32::Graphics::Direct3D::{
     D3D_DRIVER_TYPE, D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP,
@@ -691,6 +692,23 @@ impl Canvas<'_> {
                 width,
                 None,
             );
+        }
+    }
+
+    /// Strokes a circle around `center`.
+    pub fn circle(&mut self, center: (f32, f32), radius: f32, width: f32, color: Color) {
+        let ellipse = D2D1_ELLIPSE {
+            point: Vector2 {
+                X: center.0,
+                Y: center.1,
+            },
+            radiusX: radius,
+            radiusY: radius,
+        };
+        // SAFETY: drawing calls on a device context inside BeginDraw/EndDraw with a live brush.
+        unsafe {
+            self.brush.SetColor(&color.d2d());
+            self.context.DrawEllipse(&ellipse, self.brush, width, None);
         }
     }
 

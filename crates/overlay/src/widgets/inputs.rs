@@ -1,4 +1,5 @@
-//! Input trace: throttle, brake (with ABS), clutch, and steering over the last few seconds, and live bars.
+//! Input trace: throttle, brake (with ABS), clutch, and steering over the last few seconds, live pedal bars,
+//! and a steering wheel icon that turns with the wheel.
 //!
 //! The trace is a scrolling layer: each sample owns two columns of a ring surface, only new samples' columns
 //! are drawn, and scrolling moves the visuals instead of redrawing. Every sample from the pipeline is drawn,
@@ -14,7 +15,13 @@ use crate::render::{Canvas, Color, Rect};
 use super::{LayerSpec, MAX_LAYERS, Redraw, Widget};
 
 const PX_PER_SAMPLE: u32 = 2;
-const BARS_WIDTH: u32 = 64;
+/// Live pedal bars: width and the gap before each bar.
+const BAR_W: f32 = 12.0;
+const BAR_GAP: f32 = 4.0;
+/// The three pedal bars with their gaps.
+const PEDALS_WIDTH: u32 = 52;
+/// Largest steering wheel icon, in pixels.
+const WHEEL_MAX: u32 = 72;
 const PAD: u32 = 6;
 const LINE: f32 = 2.0;
 
@@ -23,6 +30,7 @@ const BRAKE: Color = Color::rgb(0xF0_524F, 1.0);
 const ABS: Color = Color::rgb(0xFF_D23F, 1.0);
 const CLUTCH: Color = Color::rgb(0x4E_A6F2, 1.0);
 const STEERING: Color = Color::rgb(0xC8_CCD2, 0.8);
+const WHEEL: Color = Color::rgb(0xF0_F2F5, 1.0);
 const GRID: Color = Color::rgb(0xFF_FFFF, 0.08);
 const TRACK: Color = Color::rgb(0xFF_FFFF, 0.10);
 
@@ -36,6 +44,34 @@ fn steering_level(sample: &InputSample) -> f32 {
     0.5 - (sample.steering / PI).clamp(-1.0, 1.0) * 0.5
 }
 
+/// Steering wheel icon ported from Tabler Icons `steering-wheel` (MIT): a 24-unit box centered on the origin with
+/// the rim, the hub, and three spokes. The stroke is thinner than the icon's 2 units, which reads better large.
+const ICON_BOX: f32 = 24.0;
+const ICON_RIM: f32 = 9.0;
+const ICON_HUB: f32 = 2.0;
+const ICON_STROKE: f32 = 1.5;
+const ICON_SPOKES: [((f32, f32), (f32, f32)); 3] = [
+    ((0.0, 2.0), (0.0, 9.0)),
+    ((-2.0, 0.0), (-8.75, -2.0)),
+    ((2.0, 0.0), (8.75, -2.0)),
+];
+
+/// Turns a point by the wheel angle (radians, positive to the left) on a y-down screen.
+fn turn((x, y): (f32, f32), angle: f32) -> (f32, f32) {
+    let (sin, cos) = angle.sin_cos();
+    (x * cos + y * sin, y * cos - x * sin)
+}
+
+/// Steering wheel icon size for a widget height.
+fn wheel_size(height: u32) -> u32 {
+    (height - 2 * PAD).min(WHEEL_MAX)
+}
+
+/// Width of the live area right of the trace: the pedal bars, then the wheel.
+fn side_width(height: u32) -> u32 {
+    PEDALS_WIDTH + wheel_size(height)
+}
+
 /// Live pedal bars from left to right, in the order of the pedals: clutch, brake, throttle.
 fn pedal_bars(sample: &InputSample) -> [(f32, Color); 3] {
     [
@@ -45,14 +81,16 @@ fn pedal_bars(sample: &InputSample) -> [(f32, Color); 3] {
     ]
 }
 
-/// Live pedal levels rounded to what the bars can show, to skip redraws that change nothing.
+/// Live pedal levels and wheel angle rounded to what the bars and the wheel can show, to skip redraws that change
+/// nothing.
 fn bar_levels(sample: &InputSample, height: f32) -> [i32; 5] {
     let px = |v: f32| (v.clamp(0.0, 1.0) * height) as i32;
     [
         px(clutch_pedal(sample)),
         px(sample.brake),
         px(sample.throttle),
-        px(steering_level(sample)),
+        // Whole degrees: a degree moves the rim of the largest wheel by about half a pixel.
+        sample.steering.to_degrees().round() as i32,
         i32::from(sample.abs_active),
     ]
 }
@@ -78,12 +116,13 @@ pub struct InputTraceWidget {
 
 impl InputTraceWidget {
     pub fn new(config: &WidgetConfig) -> Self {
+        let height = config.height.unwrap_or(120).max(4 * PAD);
+        let side = side_width(height);
         let width = config
             .width
             .unwrap_or(600)
-            .max(BARS_WIDTH + 4 * PAD + 2 * PX_PER_SAMPLE);
-        let height = config.height.unwrap_or(120).max(4 * PAD);
-        let columns = (width - BARS_WIDTH - 3 * PAD) / PX_PER_SAMPLE * PX_PER_SAMPLE;
+            .max(side + 4 * PAD + 2 * PX_PER_SAMPLE);
+        let columns = (width - side - 3 * PAD) / PX_PER_SAMPLE * PX_PER_SAMPLE;
         let trace = Rect::new(
             PAD as f32,
             PAD as f32,
@@ -120,13 +159,22 @@ impl InputTraceWidget {
             .saturating_sub(u64::from(self.columns / PX_PER_SAMPLE))
     }
 
+    /// The live area right of the trace: pedal bars and the steering wheel.
     fn bars_rect(&self) -> Rect {
-        let x = (self.width - BARS_WIDTH - PAD) as f32;
+        let side = side_width(self.height);
+        let x = (self.width - side - PAD) as f32;
+        Rect::new(x, PAD as f32, side as f32, (self.height - 2 * PAD) as f32)
+    }
+
+    /// Box of the steering wheel icon, right of the pedal bars and vertically centered.
+    fn wheel_rect(&self) -> Rect {
+        let bars = self.bars_rect();
+        let size = wheel_size(self.height) as f32;
         Rect::new(
-            x,
-            PAD as f32,
-            BARS_WIDTH as f32,
-            (self.height - 2 * PAD) as f32,
+            bars.x + PEDALS_WIDTH as f32,
+            bars.y + (bars.h - size) / 2.0,
+            size,
+            size,
         )
     }
 
@@ -158,23 +206,33 @@ impl InputTraceWidget {
             canvas.line((t.x, y), (t.x + t.w, y), 1.0, GRID);
         }
         let bars = self.bars_rect();
-        let bar_w = 12.0;
-        let gap = (bars.w - 4.0 * bar_w) / 5.0;
         let s = &self.latest;
         for (n, (level, color)) in pedal_bars(s).into_iter().enumerate() {
-            let x = bars.x + gap + n as f32 * (bar_w + gap);
-            canvas.fill(Rect::new(x, bars.y, bar_w, bars.h), TRACK);
+            let x = bars.x + BAR_GAP + n as f32 * (BAR_W + BAR_GAP);
+            canvas.fill(Rect::new(x, bars.y, BAR_W, bars.h), TRACK);
             let fill = level.clamp(0.0, 1.0) * bars.h;
-            canvas.fill(Rect::new(x, bars.y + bars.h - fill, bar_w, fill), color);
+            canvas.fill(Rect::new(x, bars.y + bars.h - fill, BAR_W, fill), color);
         }
-        // Steering: a marker that moves left and right in the fourth column.
-        let x = bars.x + gap + 3.0 * (bar_w + gap);
-        canvas.fill(Rect::new(x, bars.y, bar_w, bars.h), TRACK);
-        let y = bars.y + steering_level(s) * (bars.h - 4.0);
-        canvas.fill(Rect::new(x, y, bar_w, 4.0), STEERING);
+        self.draw_wheel(canvas, s.steering);
         if self.missed > 0 {
             // Visible proof that samples were lost; normally never shown.
             canvas.fill(Rect::new(bars.x, bars.y, bars.w, 3.0), BRAKE);
+        }
+    }
+
+    fn draw_wheel(&self, canvas: &mut Canvas<'_>, angle: f32) {
+        let r = self.wheel_rect();
+        let scale = r.w / ICON_BOX;
+        let center = (r.x + r.w / 2.0, r.y + r.h / 2.0);
+        let stroke = ICON_STROKE * scale;
+        canvas.circle(center, ICON_RIM * scale, stroke, WHEEL);
+        canvas.circle(center, ICON_HUB * scale, stroke, WHEEL);
+        let at = |point: (f32, f32)| {
+            let (x, y) = turn(point, angle);
+            (center.0 + x * scale, center.1 + y * scale)
+        };
+        for (from, to) in ICON_SPOKES {
+            canvas.line(at(from), at(to), stroke, WHEEL);
         }
     }
 
@@ -360,6 +418,31 @@ mod tests {
             abs.r > 0.9 && abs.g > 0.75 && abs.b < 0.4,
             "brake turns yellow under ABS"
         );
+    }
+
+    #[test]
+    fn wheel_turns_with_the_steering() {
+        // A left turn (positive angle) moves the top of the wheel to the left on screen.
+        let (x, y) = turn((0.0, -1.0), PI / 2.0);
+        assert!((x + 1.0).abs() < 1e-6 && y.abs() < 1e-6, "({x}, {y})");
+        let (x, y) = turn((0.0, -1.0), -PI / 2.0);
+        assert!((x - 1.0).abs() < 1e-6 && y.abs() < 1e-6, "({x}, {y})");
+        let w = widget();
+        let (wheel, bars) = (w.wheel_rect(), w.bars_rect());
+        assert_eq!((wheel.w, wheel.h), (WHEEL_MAX as f32, WHEEL_MAX as f32));
+        assert!(wheel.x + wheel.w <= bars.x + bars.w);
+        assert!(wheel.y >= bars.y && wheel.y + wheel.h <= bars.y + bars.h);
+        // Redrawn for a whole degree of change, not less.
+        let level = |degrees: f32| {
+            let sample = InputSample {
+                steering: degrees.to_radians(),
+                ..InputSample::default()
+            };
+            bar_levels(&sample, 100.0)[3]
+        };
+        assert_eq!(level(10.2), level(9.9));
+        assert_ne!(level(10.6), level(10.2));
+        assert_eq!(level(-450.0), -450, "angles beyond half a turn");
     }
 
     #[test]
