@@ -6,5 +6,9 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
+[features]
+# Builds the counting-allocator test that checks the data path for heap allocations.
+alloc-check = []
+
 [dependencies]
 pitot-irsdk.workspace = true

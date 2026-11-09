@@ -146,6 +146,20 @@ impl Snapshot {
         self.tick
     }
 
+    /// The copied variables, back to back. With [`Snapshot::bytes_mut`] and [`Snapshot::set_tick`], this lets
+    /// a clone of the snapshot on another thread receive ticks without the reader.
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    pub fn bytes_mut(&mut self) -> &mut [u8] {
+        &mut self.bytes
+    }
+
+    pub fn set_tick(&mut self, tick: i32) {
+        self.tick = tick;
+    }
+
     pub fn available(&self, var: VarId) -> bool {
         self.field(var).is_some()
     }
