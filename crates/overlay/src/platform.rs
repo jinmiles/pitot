@@ -1,4 +1,5 @@
-//! Win32 platform layer: DPI awareness, monitors, overlay windows, the message loop, timers, and the tray icon.
+//! Win32 platform layer: DPI awareness, monitors, overlay windows, the message loop, timers, the tray icon, and
+//! the single-instance lock.
 //!
 //! All Win32 `unsafe` for windowing lives here; callers use the safe types below.
 
@@ -7,8 +8,8 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Duration;
 
 use windows::Win32::Foundation::{
-    CloseHandle, HANDLE, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WAIT_OBJECT_0,
-    WAIT_TIMEOUT, WPARAM,
+    CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE, HINSTANCE, HWND, LPARAM, LRESULT,
+    POINT, RECT, WAIT_OBJECT_0, WAIT_TIMEOUT, WPARAM,
 };
 use windows::Win32::Graphics::Gdi::{
     EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFO, MONITORINFOEXW,
@@ -20,7 +21,7 @@ use windows::Win32::Storage::FileSystem::{
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::SystemInformation::GetLocalTime;
 use windows::Win32::System::Threading::{
-    CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, CreateWaitableTimerExW, SetWaitableTimer,
+    CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, CreateMutexW, CreateWaitableTimerExW, SetWaitableTimer,
     TIMER_ALL_ACCESS,
 };
 use windows::Win32::UI::HiDpi::{
@@ -386,6 +387,44 @@ impl Drop for Timer {
     }
 }
 
+/// Name of the mutex that marks a running overlay in this Windows session.
+const INSTANCE_MUTEX: PCWSTR = w!("Local\\PitotOverlay");
+
+/// Held for the life of the process so that a second overlay can tell one is already running. The OS releases
+/// it when the process exits, also after a crash.
+#[derive(Debug)]
+pub struct SingleInstance {
+    handle: HANDLE,
+}
+
+impl SingleInstance {
+    /// Takes the overlay's instance lock. `Ok(None)` means another overlay in this session holds it.
+    pub fn acquire() -> Result<Option<Self>, PlatformError> {
+        Self::acquire_named(INSTANCE_MUTEX)
+    }
+
+    fn acquire_named(name: PCWSTR) -> Result<Option<Self>, PlatformError> {
+        // SAFETY: `name` is a static NUL-terminated wide string; default security. The mutex is never owned:
+        // only its existence matters.
+        let handle =
+            unsafe { CreateMutexW(None, false, name) }.map_err(|e| error("CreateMutexW", &e))?;
+        // SAFETY: reads this thread's last error, which CreateMutexW just set.
+        if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+            // SAFETY: closes the handle opened above, once.
+            let _ = unsafe { CloseHandle(handle) };
+            return Ok(None);
+        }
+        Ok(Some(Self { handle }))
+    }
+}
+
+impl Drop for SingleInstance {
+    fn drop(&mut self) {
+        // SAFETY: closes the mutex handle owned by `self`, once.
+        let _ = unsafe { CloseHandle(self.handle) };
+    }
+}
+
 /// A change notification on a directory's file names and write times, for reloading configuration without
 /// polling.
 #[derive(Debug)]
@@ -475,4 +514,29 @@ pub fn pump_messages() -> bool {
         }
     }
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn second_instance_is_refused_until_the_first_exits() {
+        let name = w!("Local\\PitotOverlayTest");
+        let first = SingleInstance::acquire_named(name)
+            .expect("create mutex")
+            .expect("first instance takes the lock");
+        assert!(
+            SingleInstance::acquire_named(name)
+                .expect("open mutex")
+                .is_none()
+        );
+        drop(first);
+        assert!(
+            SingleInstance::acquire_named(name)
+                .expect("create mutex")
+                .is_some(),
+            "released when the first instance exits"
+        );
+    }
 }
