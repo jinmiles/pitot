@@ -41,7 +41,9 @@ jobs:
         run: cargo test --workspace
 
       - name: Allocation check
-        run: cargo test -p pitot-irsdk --features alloc-check --test alloc_check
+        run: |
+          cargo test -p pitot-irsdk --features alloc-check --test alloc_check
+          cargo test -p pitot-overlay --features alloc-check --test alloc_check
 
       # pitot-bench must not depend on pitot-overlay; pitot-irsdk depends on neither.
       - name: Dependency direction
