@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use crate::pipeline::{Display, View};
 use crate::render::{Align, Canvas, Color, Rect};
 
-use super::{Redraw, Widget};
+use super::{MAX_LAYERS, Redraw, Widget};
 
 const WIDTH: u32 = 300;
 const HEIGHT: u32 = 54;
@@ -47,7 +47,7 @@ impl Widget for StatusWidget {
         Duration::from_millis(250)
     }
 
-    fn update(&mut self, view: &mut View, _now: Instant) -> Redraw {
+    fn update(&mut self, view: &mut View, _now: Instant, redraw: &mut [Redraw; MAX_LAYERS]) {
         self.display = view.display();
         self.next.clear();
         match self.display {
@@ -69,14 +69,13 @@ impl Widget for StatusWidget {
                 );
             }
         }
-        if self.next == self.line {
-            return Redraw::Nothing;
+        if self.next != self.line {
+            std::mem::swap(&mut self.line, &mut self.next);
+            redraw[0] = Redraw::All;
         }
-        std::mem::swap(&mut self.line, &mut self.next);
-        Redraw::All
     }
 
-    fn draw(&self, canvas: &mut Canvas<'_>) {
+    fn draw(&self, _layer: usize, canvas: &mut Canvas<'_>) {
         let (w, h) = (WIDTH as f32, HEIGHT as f32);
         canvas.fill(
             Rect::new(0.0, 0.0, w, h),

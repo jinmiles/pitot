@@ -39,7 +39,7 @@ x = 660
 y = 900
 width = 600
 height = 120
-rate_hz = 60.0
+rate_hz = 30.0  # every 60 Hz sample is drawn; this is how often the screen updates
 opacity = 0.82
 
 [widgets.relative]
@@ -113,7 +113,7 @@ impl Default for Widgets {
         };
         Self {
             status: widget(24, 24, None, None),
-            inputs: widget(660, 900, Some((600, 120)), Some(60.0)),
+            inputs: widget(660, 900, Some((600, 120)), Some(30.0)),
             relative: widget(1460, 560, Some((430, 280)), Some(15.0)),
             standings: widget(24, 260, Some((480, 560)), Some(4.0)),
             fuel: widget(1460, 900, Some((300, 120)), Some(1.0)),
