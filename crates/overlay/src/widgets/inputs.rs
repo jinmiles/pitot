@@ -20,7 +20,7 @@ const LINE: f32 = 2.0;
 
 const THROTTLE: Color = Color::rgb(0x3D_D68C, 1.0);
 const BRAKE: Color = Color::rgb(0xF0_524F, 1.0);
-const ABS: Color = Color::rgb(0xF2_A33A, 1.0);
+const ABS: Color = Color::rgb(0xFF_D23F, 1.0);
 const CLUTCH: Color = Color::rgb(0x4E_A6F2, 1.0);
 const STEERING: Color = Color::rgb(0xC8_CCD2, 0.8);
 const GRID: Color = Color::rgb(0xFF_FFFF, 0.08);
@@ -350,6 +350,15 @@ mod tests {
         assert!(
             throttle.g > throttle.r && throttle.g > throttle.b,
             "throttle is green"
+        );
+        let abs = pedal_bars(&InputSample {
+            abs_active: true,
+            ..sample
+        })[1]
+            .1;
+        assert!(
+            abs.r > 0.9 && abs.g > 0.75 && abs.b < 0.4,
+            "brake turns yellow under ABS"
         );
     }
 
