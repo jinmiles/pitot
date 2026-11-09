@@ -1,6 +1,6 @@
 # Standings widget
 
-Race order grouped by class, fastest class first (by `CarClassRelSpeed`), updated at 4 Hz by default.
+Race order grouped by class, fastest class first (by `CarClassRelSpeed`), updated at 2 Hz by default.
 
 - Within a class, cars are ordered by `CarIdxClassPosition`; cars without a position yet follow in car index
   order.

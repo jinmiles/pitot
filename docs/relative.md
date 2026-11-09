@@ -1,6 +1,6 @@
 # Relative widget
 
-Shows the three cars nearest on track ahead of the player, the player, and the three nearest behind, at 15 Hz by
+Shows the three cars nearest on track ahead of the player, the player, and the three nearest behind, at 10 Hz by
 default.
 
 - **Gap**: from `CarIdxEstTime`, the sim's estimate of each car's time into the lap, as the difference to the

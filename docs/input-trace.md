@@ -18,7 +18,7 @@ the right.
 
 ## Update rate
 
-`rate_hz` sets how often the screen updates (default 30). Development measurement on the lab PC (release build,
+`rate_hz` sets how often the screen updates (default 60, for a smooth trace). Development measurement on the lab PC (release build,
 60 Hz replay, process CPU time over 10 s, not `pitot-bench`):
 
 | Screen updates | CPU, one core | CPU, all 8 cores |
@@ -27,5 +27,6 @@ the right.
 | 60 Hz | 2.34% | 0.293% |
 | widget disabled (status only) | 0.16% | 0.020% |
 
-At 60 Hz the widget alone exceeds the all-core budget of 0.2%, so the default is 30 Hz. Drawing cost per frame
-(composition surface updates and commits) is the target of later optimization work.
+The trace is the most expensive widget at 60 Hz. Setting `rate_hz = 30` halves the screen updates and costs about
+a third of the CPU, still drawing every sample. The defaults favor a smooth input trace and update the relative and
+standings less often (10 Hz and 2 Hz).
