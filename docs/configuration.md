@@ -7,6 +7,11 @@ notification (no polling) and reloads 250 ms after the last write. A file that f
 reported with its line and column, and the previous configuration stays in use. The tray menu's
 *Reload configuration* forces a reload.
 
+## One instance
+
+Only one overlay runs per Windows session. Launching it again while it runs exits at once and leaves the running
+overlay, its windows, and its log untouched.
+
 ## Log file
 
 The overlay logs to `%APPDATA%\Pitot\pitot.log` and keeps the previous run's log as `pitot.previous.log`. It
