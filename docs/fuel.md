@@ -3,8 +3,11 @@
 Shows current fuel, fuel used per lap, laps left on the current fuel, and how much to add (or how much is spare)
 to finish. Updates once per second by default.
 
-- **Use per lap**: the average of the last five clean laps. A lap counts when it was completed without visiting
-  pit road and without fuel being added (any rise of more than 0.05 L). Until the first clean lap the widget
+- **Use per lap**: the average of the last five clean laps. A lap counts when it was driven in full under
+  green-flag running, without visiting pit road and without fuel being added (any rise of more than 0.05 L).
+  Laps are not counted while `SessionState` is get in car, warm-up, parade laps, or cool-down, or while
+  `SessionFlags` has a full-course caution, one lap to green, or a red flag. The lap in progress when tracking
+  starts (overlay started or reconnected mid-lap) is not counted either. Until the first clean lap the widget
   shows `measuring`.
 - **Laps left**: current fuel divided by use per lap.
 - **Laps to go**: `SessionLapsRemainEx` in lap-limited sessions. In timed sessions, `SessionTimeRemain` divided
