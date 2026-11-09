@@ -35,6 +35,15 @@ menu.
 - A configuration change keeps the device and rebuilds only window targets and layers. Recreating the D3D11
   device each time leaked about 4.6 MB of driver memory per reload.
 
+## Text
+
+- Numbers, signs, separators, and units (`0-9 . , : + - / # % k L` and space) come from a glyph atlas built per
+  text size when the device is created: each glyph is rendered once in white, and drawing it is a colored
+  `FillOpacityMask` from the atlas, with no DirectWrite work per frame.
+- Other text uses an `IDWriteTextLayout` cached per string, size, alignment, and box, created on first use and
+  drawn with `DrawTextLayout`. The cache is cleared past 512 entries, which bounds memory if text keeps changing.
+- Text is clipped to its box, so long names do not run into the next column.
+
 ## Schedule
 
 The render thread sleeps in `MsgWaitForMultipleObjectsEx` on a high-resolution waitable timer
@@ -55,6 +64,5 @@ These are development numbers; official numbers come from `pitot-bench` runs on 
 
 ## Not yet
 
-- Text is drawn with `DrawText`; the glyph atlas and cached layouts follow in their own change.
 - Widget placement is a built-in default until the configuration file exists.
 - The binary is a console application for now, so errors are visible during development.

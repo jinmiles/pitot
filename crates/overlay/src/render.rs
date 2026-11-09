@@ -4,12 +4,17 @@
 //! rectangle of that surface, and nothing is committed unless something was drawn. All COM `unsafe` for
 //! rendering lives here; widgets draw through the safe [`Canvas`].
 
+use std::collections::HashMap;
+
 use windows::Win32::Foundation::{HMODULE, POINT, RECT};
-use windows::Win32::Graphics::Direct2D::Common::{D2D_RECT_F, D2D1_COLOR_F};
+use windows::Win32::Graphics::Direct2D::Common::{
+    D2D_RECT_F, D2D_SIZE_U, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_PIXEL_FORMAT,
+};
 use windows::Win32::Graphics::Direct2D::{
-    D2D1_ANTIALIAS_MODE_ALIASED, D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_DRAW_TEXT_OPTIONS_NONE,
-    D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1CreateFactory, ID2D1Device, ID2D1DeviceContext,
-    ID2D1Factory1, ID2D1SolidColorBrush,
+    D2D1_ANTIALIAS_MODE_ALIASED, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_BITMAP_OPTIONS_TARGET,
+    D2D1_BITMAP_PROPERTIES1, D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_DRAW_TEXT_OPTIONS_CLIP,
+    D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1CreateFactory,
+    ID2D1Bitmap1, ID2D1Device, ID2D1DeviceContext, ID2D1Factory1, ID2D1SolidColorBrush,
 };
 use windows::Win32::Graphics::Direct3D::{
     D3D_DRIVER_TYPE, D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP,
@@ -25,8 +30,8 @@ use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
     DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_MEASURING_MODE_NATURAL, DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
     DWRITE_TEXT_ALIGNMENT, DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_LEADING,
-    DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_WORD_WRAPPING_NO_WRAP, DWriteCreateFactory,
-    IDWriteFactory, IDWriteTextFormat,
+    DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_TEXT_METRICS, DWRITE_WORD_WRAPPING_NO_WRAP,
+    DWriteCreateFactory, IDWriteFactory, IDWriteTextFormat, IDWriteTextLayout,
 };
 use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_ALPHA_MODE_PREMULTIPLIED, DXGI_FORMAT_B8G8R8A8_UNORM,
@@ -179,7 +184,8 @@ impl Formats {
         Ok(Self { by_size })
     }
 
-    fn get(&self, size: f32, align: Align) -> &IDWriteTextFormat {
+    /// Size index and alignment column for a request.
+    fn index(size: f32, align: Align) -> (usize, usize) {
         let index = TEXT_SIZES
             .iter()
             .position(|&s| s >= size)
@@ -189,9 +195,148 @@ impl Formats {
             Align::Center => 1,
             Align::Right => 2,
         };
-        &self.by_size[index][column]
+        (index, column)
     }
 }
+
+/// Characters drawn from the glyph atlas: what numbers, gaps, times, and units are made of.
+const ATLAS_CHARS: &str = "0123456789.,:+-/#%kL ";
+
+#[derive(Debug, Clone, Copy)]
+struct Glyph {
+    source: D2D_RECT_F,
+    advance: f32,
+}
+
+/// One text size's glyphs, rendered white into a bitmap once and drawn as colored opacity masks.
+#[derive(Debug)]
+struct AtlasFace {
+    bitmap: ID2D1Bitmap1,
+    glyphs: [Option<Glyph>; 128],
+    cell_height: f32,
+}
+
+impl AtlasFace {
+    fn glyph(&self, c: char) -> Option<Glyph> {
+        self.glyphs.get(c as usize).copied().flatten()
+    }
+
+    fn covers(&self, text: &str) -> bool {
+        text.chars().all(|c| self.glyph(c).is_some())
+    }
+}
+
+fn build_atlas(
+    d2d: &ID2D1Device,
+    dwrite: &IDWriteFactory,
+    formats: &Formats,
+) -> Result<Vec<AtlasFace>, RenderError> {
+    let chars: Vec<char> = ATLAS_CHARS.chars().collect();
+    let mut faces = Vec::with_capacity(TEXT_SIZES.len());
+    for sizes in &formats.by_size {
+        let format = &sizes[0];
+        let mut advances = Vec::with_capacity(chars.len());
+        let mut line = 0.0f32;
+        for &c in &chars {
+            let mut buffer = [0u16; 2];
+            let unit = c.encode_utf16(&mut buffer);
+            let mut metrics = DWRITE_TEXT_METRICS::default();
+            // SAFETY: plain DirectWrite calls; the layout is released at the end of the iteration.
+            unsafe {
+                let layout = dwrite
+                    .CreateTextLayout(unit, format, 1000.0, 1000.0)
+                    .map_err(fail("CreateTextLayout"))?;
+                layout
+                    .GetMetrics(&mut metrics)
+                    .map_err(fail("GetMetrics"))?;
+            }
+            advances.push(metrics.widthIncludingTrailingWhitespace);
+            line = line.max(metrics.height);
+        }
+        let cell_w = advances.iter().fold(0.0f32, |a, &b| a.max(b)).ceil() + 2.0;
+        let cell_h = line.ceil() + 2.0;
+        let props = D2D1_BITMAP_PROPERTIES1 {
+            pixelFormat: D2D1_PIXEL_FORMAT {
+                format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+            },
+            dpiX: 96.0,
+            dpiY: 96.0,
+            bitmapOptions: D2D1_BITMAP_OPTIONS_TARGET,
+            colorContext: core::mem::ManuallyDrop::new(None),
+        };
+        let size = D2D_SIZE_U {
+            width: (cell_w * chars.len() as f32) as u32,
+            height: cell_h as u32,
+        };
+        let mut glyphs = [None; 128];
+        // SAFETY: a private device context renders into a new target bitmap between BeginDraw and EndDraw.
+        let bitmap = unsafe {
+            let context = d2d
+                .CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE)
+                .map_err(fail("CreateDeviceContext"))?;
+            let bitmap = context
+                .CreateBitmap(size, None, 0, &props)
+                .map_err(fail("CreateBitmap"))?;
+            let white = context
+                .CreateSolidColorBrush(&Color::WHITE.d2d(), None)
+                .map_err(fail("CreateSolidColorBrush"))?;
+            context.SetTarget(&bitmap);
+            context.SetDpi(96.0, 96.0);
+            context.BeginDraw();
+            context.Clear(Some(&Color::TRANSPARENT.d2d()));
+            for (n, (&c, &advance)) in chars.iter().zip(&advances).enumerate() {
+                let x = n as f32 * cell_w;
+                let mut buffer = [0u16; 2];
+                let unit = c.encode_utf16(&mut buffer);
+                let cell = D2D_RECT_F {
+                    left: x,
+                    top: 0.0,
+                    right: x + cell_w,
+                    bottom: cell_h,
+                };
+                context.DrawText(
+                    unit,
+                    format,
+                    &cell,
+                    &white,
+                    D2D1_DRAW_TEXT_OPTIONS_NONE,
+                    DWRITE_MEASURING_MODE_NATURAL,
+                );
+                if let Some(slot) = glyphs.get_mut(c as usize) {
+                    *slot = Some(Glyph {
+                        source: D2D_RECT_F {
+                            left: x,
+                            top: 0.0,
+                            right: x + advance,
+                            bottom: cell_h,
+                        },
+                        advance,
+                    });
+                }
+            }
+            context.EndDraw(None, None).map_err(fail("EndDraw"))?;
+            bitmap
+        };
+        faces.push(AtlasFace {
+            bitmap,
+            glyphs,
+            cell_height: cell_h,
+        });
+    }
+    Ok(faces)
+}
+
+/// Text layouts for strings that are not in the atlas, created on first use and reused.
+#[derive(Debug, Default)]
+struct LayoutCache {
+    /// Per (size, alignment), text to (layout box width, height, layout).
+    maps: Vec<HashMap<String, (f32, f32, IDWriteTextLayout)>>,
+    entries: usize,
+}
+
+/// More cached layouts than this clears the cache, bounding memory if text keeps changing.
+const MAX_CACHED_LAYOUTS: usize = 512;
 
 /// Device-wide state shared by every window and layer.
 #[derive(Debug)]
@@ -200,7 +345,10 @@ pub struct Renderer {
     _d2d: ID2D1Device,
     dcomp: IDCompositionDesktopDevice,
     brush: ID2D1SolidColorBrush,
+    dwrite: IDWriteFactory,
     formats: Formats,
+    atlas: Vec<AtlasFace>,
+    layouts: LayoutCache,
     text: Vec<u16>,
     /// Whether a layer was drawn since the last commit.
     dirty: bool,
@@ -256,12 +404,20 @@ impl Renderer {
             let brush = context
                 .CreateSolidColorBrush(&Color::WHITE.d2d(), None)
                 .map_err(fail("CreateSolidColorBrush"))?;
+            let formats = Formats::new(&dwrite)?;
+            let atlas = build_atlas(&d2d, &dwrite, &formats)?;
             Ok(Self {
                 _d3d: d3d,
                 _d2d: d2d,
                 dcomp,
                 brush,
-                formats: Formats::new(&dwrite)?,
+                dwrite,
+                formats,
+                atlas,
+                layouts: LayoutCache {
+                    maps: (0..TEXT_SIZES.len() * 3).map(|_| HashMap::new()).collect(),
+                    entries: 0,
+                },
                 text: Vec::with_capacity(256),
                 dirty: false,
                 software,
@@ -414,7 +570,10 @@ impl Renderer {
                 let mut canvas = Canvas {
                     context: &context,
                     brush: &self.brush,
+                    dwrite: &self.dwrite,
                     formats: &self.formats,
+                    atlas: &self.atlas,
+                    layouts: &mut self.layouts,
                     text: &mut self.text,
                     area: Rect::new(
                         update.left as f32,
@@ -496,7 +655,10 @@ impl Layer {
 pub struct Canvas<'a> {
     context: &'a ID2D1DeviceContext,
     brush: &'a ID2D1SolidColorBrush,
+    dwrite: &'a IDWriteFactory,
     formats: &'a Formats,
+    atlas: &'a [AtlasFace],
+    layouts: &'a mut LayoutCache,
     text: &'a mut Vec<u16>,
     area: Rect,
 }
@@ -532,21 +694,101 @@ impl Canvas<'_> {
         }
     }
 
-    /// Draws one line of text vertically centered in `rect`. Text that does not fit is clipped.
+    /// Draws one line of text vertically centered in `rect`, clipped to it.
+    ///
+    /// Numbers and units come from the glyph atlas without DirectWrite work; other text uses a cached layout
+    /// created on first use. Neither path allocates once warmed up.
     pub fn text(&mut self, text: &str, rect: Rect, size: f32, align: Align, color: Color) {
-        self.text.clear();
-        self.text.extend(text.encode_utf16());
-        // SAFETY: drawing calls on a device context inside BeginDraw/EndDraw with a live brush and format.
+        if text.is_empty() {
+            return;
+        }
+        let (index, column) = Formats::index(size, align);
+        // SAFETY: sets the color of a live brush.
+        unsafe { self.brush.SetColor(&color.d2d()) };
+        if let Some(face) = self.atlas.get(index)
+            && face.covers(text)
+        {
+            self.atlas_text(face, text, rect, align);
+            return;
+        }
+        let key = index * 3 + column;
+        let fits = |entry: &(f32, f32, IDWriteTextLayout)| entry.0 == rect.w && entry.1 == rect.h;
+        if !self.layouts.maps[key].get(text).is_some_and(fits) {
+            if self.layouts.entries >= MAX_CACHED_LAYOUTS {
+                self.layouts.maps.iter_mut().for_each(HashMap::clear);
+                self.layouts.entries = 0;
+            }
+            self.text.clear();
+            self.text.extend(text.encode_utf16());
+            let format = &self.formats.by_size[index][column];
+            // SAFETY: plain DirectWrite call; the layout is owned by the cache.
+            let Ok(layout) = (unsafe {
+                self.dwrite
+                    .CreateTextLayout(self.text, format, rect.w, rect.h)
+            }) else {
+                return;
+            };
+            let entry = (rect.w, rect.h, layout);
+            if self.layouts.maps[key]
+                .insert(text.to_owned(), entry)
+                .is_none()
+            {
+                self.layouts.entries += 1;
+            }
+        }
+        if let Some((_, _, layout)) = self.layouts.maps[key].get(text) {
+            // SAFETY: drawing call inside BeginDraw/EndDraw with a live layout and brush.
+            unsafe {
+                self.context.DrawTextLayout(
+                    Vector2 {
+                        X: rect.x,
+                        Y: rect.y,
+                    },
+                    layout,
+                    self.brush,
+                    D2D1_DRAW_TEXT_OPTIONS_CLIP,
+                );
+            }
+        }
+    }
+
+    fn atlas_text(&mut self, face: &AtlasFace, text: &str, rect: Rect, align: Align) {
+        let width: f32 = text
+            .chars()
+            .filter_map(|c| face.glyph(c))
+            .map(|g| g.advance)
+            .sum();
+        let mut x = match align {
+            Align::Left => rect.x,
+            Align::Center => rect.x + (rect.w - width) / 2.0,
+            Align::Right => rect.x + rect.w - width,
+        };
+        let y = (rect.y + (rect.h - face.cell_height) / 2.0).round();
+        // SAFETY: drawing calls inside BeginDraw/EndDraw; opacity masks require aliased antialiasing, which is
+        // restored afterwards.
         unsafe {
-            self.brush.SetColor(&color.d2d());
-            self.context.DrawText(
-                self.text,
-                self.formats.get(size, align),
-                &rect.d2d(),
-                self.brush,
-                D2D1_DRAW_TEXT_OPTIONS_NONE,
-                DWRITE_MEASURING_MODE_NATURAL,
-            );
+            self.context.SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
+            for glyph in text.chars().filter_map(|c| face.glyph(c)) {
+                let left = x.round();
+                let target = D2D_RECT_F {
+                    left,
+                    top: y,
+                    right: left + glyph.advance,
+                    bottom: y + face.cell_height,
+                };
+                // Stay inside the text box, as the layout path clips.
+                if left >= rect.x - 0.5 && left + glyph.advance <= rect.x + rect.w + 0.5 {
+                    self.context.FillOpacityMask(
+                        &face.bitmap,
+                        self.brush,
+                        Some(&target),
+                        Some(&glyph.source),
+                    );
+                }
+                x += glyph.advance;
+            }
+            self.context
+                .SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
         }
     }
 }
