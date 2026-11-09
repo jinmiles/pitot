@@ -696,8 +696,9 @@ impl Canvas<'_> {
 
     /// Draws one line of text vertically centered in `rect`, clipped to it.
     ///
-    /// Numbers and units come from the glyph atlas without DirectWrite work; other text uses a cached layout
-    /// created on first use. Neither path allocates once warmed up.
+    /// Numbers and units come from the glyph atlas without DirectWrite work. Stable text such as names and labels
+    /// uses a cached layout created on first use. Text that mixes digits with letters (counters, "46.0 laps")
+    /// changes too often to cache and is drawn directly. No path allocates once warmed up.
     pub fn text(&mut self, text: &str, rect: Rect, size: f32, align: Align, color: Color) {
         if text.is_empty() {
             return;
@@ -709,6 +710,22 @@ impl Canvas<'_> {
             && face.covers(text)
         {
             self.atlas_text(face, text, rect, align);
+            return;
+        }
+        if text.bytes().any(|b| b.is_ascii_digit()) {
+            self.text.clear();
+            self.text.extend(text.encode_utf16());
+            // SAFETY: drawing call inside BeginDraw/EndDraw with a live format and brush.
+            unsafe {
+                self.context.DrawText(
+                    self.text,
+                    &self.formats.by_size[index][column],
+                    &rect.d2d(),
+                    self.brush,
+                    D2D1_DRAW_TEXT_OPTIONS_CLIP,
+                    DWRITE_MEASURING_MODE_NATURAL,
+                );
+            }
             return;
         }
         let key = index * 3 + column;
