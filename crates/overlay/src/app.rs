@@ -17,7 +17,8 @@ use crate::platform::{
 };
 use crate::render::{Canvas, Layer, RenderError, Renderer, WindowTarget};
 use crate::widgets::{
-    InputTraceWidget, MAX_LAYERS, Redraw, RelativeWidget, StandingsWidget, StatusWidget, Widget,
+    FuelWidget, InputTraceWidget, MAX_LAYERS, Redraw, RelativeWidget, StandingsWidget,
+    StatusWidget, Widget,
 };
 
 /// Saving a file often takes several writes; reload once they settle.
@@ -49,6 +50,7 @@ fn create_widget(name: &str, config: &WidgetConfig) -> Option<Box<dyn Widget>> {
         "inputs" => Some(Box::new(InputTraceWidget::new(config))),
         "relative" => Some(Box::new(RelativeWidget::new(config))),
         "standings" => Some(Box::new(StandingsWidget::new(config))),
+        "fuel" => Some(Box::new(FuelWidget::new(config))),
         _ => None,
     }
 }

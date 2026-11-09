@@ -3,6 +3,7 @@
 //! A widget has one or more layers (its own composition surfaces), for example a static background and a
 //! scrolling trace. Each update reports what to redraw per layer.
 
+mod fuel;
 mod inputs;
 mod relative;
 mod standings;
@@ -11,6 +12,7 @@ mod text;
 
 use std::time::{Duration, Instant};
 
+pub use fuel::FuelWidget;
 pub use inputs::InputTraceWidget;
 pub use relative::RelativeWidget;
 pub use standings::StandingsWidget;
