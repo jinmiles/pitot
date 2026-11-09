@@ -93,16 +93,15 @@ impl Layout {
     }
 }
 
-/// GPU objects that are rebuilt after device loss or a configuration change.
+/// Composition objects for one layout, rebuilt after a configuration change. The renderer (the GPU device)
+/// survives configuration changes and is recreated only after device loss.
 struct Scene {
-    renderer: Renderer,
     _targets: Vec<WindowTarget>,
     layers: Vec<Layer>,
 }
 
 impl Scene {
-    fn build(layout: &Layout) -> Result<Self, RenderError> {
-        let mut renderer = Renderer::new()?;
+    fn build(renderer: &mut Renderer, layout: &Layout) -> Result<Self, RenderError> {
         let mut targets = Vec::with_capacity(layout.windows.len());
         for window in &layout.windows {
             targets.push(renderer.attach(window)?);
@@ -114,7 +113,6 @@ impl Scene {
         }
         renderer.commit_now()?;
         Ok(Self {
-            renderer,
             _targets: targets,
             layers,
         })
@@ -144,7 +142,11 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     let mut layout = Layout::build(&config, &monitors)?;
     let _tray = Tray::create()?;
-    let mut scene = Some(Scene::build(&layout)?);
+    let mut renderer = Some(Renderer::new()?);
+    let mut scene = match renderer.as_mut() {
+        Some(device) => Some(Scene::build(device, &layout)?),
+        None => None,
+    };
     let (pipeline, mut view) = Pipeline::start(SdkNames::sim(), ReaderConfig::default())?;
     let timer = Timer::new()?;
     let mut reload_at: Option<Instant> = None;
@@ -178,16 +180,23 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 slot.stale = true;
             }
         }
-        if scene.is_none() {
-            scene = Scene::build(&layout).ok();
+        if renderer.is_none() {
+            renderer = Renderer::new().ok();
+        }
+        if scene.is_none()
+            && let Some(device) = renderer.as_mut()
+        {
+            scene = Scene::build(device, &layout).ok();
             layout.slots.iter_mut().for_each(|s| s.stale = true);
         }
         let now = Instant::now();
-        if let Some(current) = scene.as_mut()
-            && frame(current, &mut layout.slots, &mut view, now).is_err()
+        if let (Some(device), Some(current)) = (renderer.as_mut(), scene.as_mut())
+            && frame(device, current, &mut layout.slots, &mut view, now).is_err()
         {
-            // Rebuild on the next pass, after a short pause so a missing device does not spin.
+            // Device loss: rebuild the device and the scene on the next pass, after a short pause so a missing
+            // device does not spin.
             scene = None;
+            renderer = None;
             timer.set(Duration::from_millis(500))?;
             platform::wait(&timer, None, Duration::from_secs(1));
             continue;
@@ -212,6 +221,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 
 /// Updates and draws the widgets that are due, then commits once.
 fn frame(
+    renderer: &mut Renderer,
     scene: &mut Scene,
     slots: &mut [Slot],
     view: &mut View,
@@ -220,7 +230,7 @@ fn frame(
     let display = view.display();
     for (slot, layer) in slots.iter_mut().zip(scene.layers.iter_mut()) {
         let visible = slot.widget.visible(display);
-        scene.renderer.set_visible(layer, visible)?;
+        renderer.set_visible(layer, visible)?;
         if !visible || (now < slot.next_due && !slot.stale) {
             continue;
         }
@@ -233,14 +243,10 @@ fn frame(
         let widget = &slot.widget;
         match redraw {
             Redraw::Nothing => {}
-            Redraw::All => scene
-                .renderer
-                .draw(layer, None, |canvas| widget.draw(canvas))?,
-            Redraw::Area(area) => scene
-                .renderer
-                .draw(layer, Some(area), |canvas| widget.draw(canvas))?,
+            Redraw::All => renderer.draw(layer, None, |canvas| widget.draw(canvas))?,
+            Redraw::Area(area) => renderer.draw(layer, Some(area), |canvas| widget.draw(canvas))?,
         }
     }
-    scene.renderer.commit()?;
+    renderer.commit()?;
     Ok(())
 }

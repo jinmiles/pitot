@@ -30,8 +30,10 @@ menu.
 - The device commits only when something was drawn or a visibility changed.
 - Widgets draw through `Canvas` (rectangles, lines, text) and never touch COM directly. All rendering `unsafe` is
   in the `render` module and all windowing `unsafe` in `platform`, each block with a `// SAFETY:` comment.
-- A rendering error, such as device loss, drops the renderer, waits 500 ms, rebuilds every window target and
-  layer, and redraws all widgets.
+- A rendering error, such as device loss, drops the renderer, waits 500 ms, rebuilds the device, every window
+  target, and every layer, and redraws all widgets.
+- A configuration change keeps the device and rebuilds only window targets and layers. Recreating the D3D11
+  device each time leaked about 4.6 MB of driver memory per reload.
 
 ## Schedule
 
