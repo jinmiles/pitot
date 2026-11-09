@@ -1,8 +1,9 @@
 //! Relative: the cars nearest on track ahead of and behind the player, with time gaps.
 //!
-//! Gaps come from `CarIdxEstTime` (the sim's estimate of each car's time into the lap), as differences to the
-//! player normalized to half a lap either way, so cars across the start line are handled. When estimated times
-//! are missing, the distance difference times the player's lap time is used instead.
+//! Order on track comes from lap distance, normalized to half a lap either way so cars across the start line are
+//! placed correctly. The time gap is the distance times the player's lap time. For cars of the player's class,
+//! `CarIdxEstTime` (the sim's estimate of time into the lap) gives a more accurate gap and is used when it agrees
+//! with the distance. It is not compared across classes, because each class's estimate follows its own pace.
 
 use std::fmt::Write as _;
 use std::time::{Duration, Instant};
@@ -33,6 +34,22 @@ pub(crate) fn normalize_gap(gap: f32, lap: f32) -> f32 {
         gap += lap;
     }
     gap
+}
+
+/// Gap in seconds from the player to a car, positive when the car is ahead on track.
+///
+/// Distance decides the side. Estimated times are only comparable within a class, so they refine the gap for
+/// same-class cars and only when they agree with the distance.
+pub(crate) fn car_gap(car: (f32, f32), player: (f32, f32), lap: f32, same_class: bool) -> f32 {
+    let ((car_pct, car_est), (player_pct, player_est)) = (car, player);
+    let by_distance = normalize_gap((car_pct - player_pct) * lap, lap);
+    if same_class && car_est > 0.0 && player_est > 0.0 {
+        let by_estimate = normalize_gap(car_est - player_est, lap);
+        if by_estimate.signum() == by_distance.signum() {
+            return by_estimate;
+        }
+    }
+    by_distance
 }
 
 /// Laps between a car and the player, accounting for one of them having just crossed the line: positive when
@@ -157,11 +174,13 @@ impl RelativeWidget {
             if driver(i).is_some_and(|d| d.is_pace_car || d.is_spectator) {
                 continue;
             }
-            let gap = if est(i) > 0.0 && player_est > 0.0 {
-                normalize_gap(est(i) - player_est, lap)
-            } else {
-                normalize_gap((pct(i) - player_pct) * lap, lap)
+            let class_of = |idx: usize| {
+                snap.i32(vars.car_class, idx)
+                    .map(i64::from)
+                    .or_else(|| driver(idx).and_then(|d| d.car_class_id))
             };
+            let same_class = class_of(i) == class_of(player);
+            let gap = car_gap((pct(i), est(i)), (player_pct, player_est), lap, same_class);
             self.cars.push((gap, i));
         }
         // Nearest ahead (smallest positive gaps) and nearest behind (largest negative gaps).
@@ -320,6 +339,27 @@ mod tests {
             "just ahead across the line"
         );
         assert_eq!(normalize_gap(150.0, 100.0), 50.0);
+    }
+
+    #[test]
+    fn other_classes_are_placed_by_distance() {
+        // Captured case: a faster-class car ahead on track has a lower estimated time than the player.
+        let player = (0.2257, 26.29);
+        let car = (0.2472, 26.01);
+        let gap = car_gap(car, player, 140.0, false);
+        assert!(gap > 2.9 && gap < 3.1, "ahead by distance: {gap}");
+        assert_eq!(lap_difference(1, car.0, 1, player.0, gap), 0, "same lap");
+        // The same numbers for a same-class car disagree with the distance, so distance wins there too.
+        assert!(car_gap(car, player, 140.0, true) > 0.0);
+    }
+
+    #[test]
+    fn same_class_cars_use_estimated_time() {
+        let gap = car_gap((0.2510, 26.38), (0.2257, 26.29), 140.0, true);
+        assert!((gap - 0.09).abs() < 0.001, "{gap}");
+        // Across the line: car just behind the player who has just crossed.
+        let gap = car_gap((0.99, 138.6), (0.01, 1.4), 140.0, true);
+        assert!(gap < 0.0 && gap > -3.0, "{gap}");
     }
 
     #[test]
