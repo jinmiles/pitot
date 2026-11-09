@@ -40,8 +40,11 @@ menu.
 - Numbers, signs, separators, and units (`0-9 . , : + - / # % k L` and space) come from a glyph atlas built per
   text size when the device is created: each glyph is rendered once in white, and drawing it is a colored
   `FillOpacityMask` from the atlas, with no DirectWrite work per frame.
-- Other text uses an `IDWriteTextLayout` cached per string, size, alignment, and box, created on first use and
-  drawn with `DrawTextLayout`. The cache is cleared past 512 entries, which bounds memory if text keeps changing.
+- Stable text without digits (names, labels) uses an `IDWriteTextLayout` cached per string, size, alignment, and
+  box, created on first use and drawn with `DrawTextLayout`. The cache is cleared past 512 entries.
+- Text that mixes digits with letters (a tick counter, "46.0 laps") changes too often to cache and is drawn with
+  `DrawText` directly. Caching it filled the cache every couple of minutes and made private bytes swing between
+  16 and 23.5 MB; drawn directly, they stay flat.
 - Text is clipped to its box, so long names do not run into the next column.
 
 ## Schedule
