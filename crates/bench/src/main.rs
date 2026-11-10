@@ -6,7 +6,8 @@ use pitot_bench::replay::{self, FrameSource, IbtSource, IrdtSource, ReplayOption
 const USAGE: &str = "usage:
   pitot-bench replay (--irdt <file> | --ibt <file>) [--loop] [--speed <factor>] [--seconds <n>]
   pitot-bench collect (--pid <n> | --name <exe>...) [--seconds <n>] [--interval-ms <n>] [--out <dir>]
-  pitot-bench run <plan.toml> [--dry-run]";
+  pitot-bench run <plan.toml> [--dry-run]
+  pitot-bench report <series.json> [--force]";
 
 #[derive(Debug, Default)]
 struct ReplayArgs {
@@ -239,12 +240,39 @@ fn run(_: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
     Err("run needs Windows".into())
 }
 
+#[derive(Debug, PartialEq)]
+struct ReportArgs {
+    series: String,
+    force: bool,
+}
+
+fn parse_report(args: impl Iterator<Item = String>) -> Result<ReportArgs, String> {
+    let (mut series, mut force) = (None, false);
+    for arg in args {
+        match arg.as_str() {
+            "--force" => force = true,
+            other if other.starts_with("--") => return Err(format!("unknown argument `{other}`")),
+            _ if series.is_some() => return Err("give one series file".to_owned()),
+            _ => series = Some(arg),
+        }
+    }
+    let series = series.ok_or("give a series file")?;
+    Ok(ReportArgs { series, force })
+}
+
+fn report(args: ReportArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let path = pitot_bench::report::generate(args.series.as_ref(), args.force)?;
+    eprintln!("report written to {}", path.display());
+    Ok(())
+}
+
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
     let result = match args.next().as_deref() {
         Some("replay") => parse_replay(args).map_err(Into::into).and_then(replay),
         Some("collect") => parse_collect(args).map_err(Into::into).and_then(collect),
         Some("run") => parse_run(args).map_err(Into::into).and_then(run),
+        Some("report") => parse_report(args).map_err(Into::into).and_then(report),
         _ => Err(USAGE.into()),
     };
     match result {
@@ -300,5 +328,14 @@ mod tests {
         assert!(run(&[]).is_err());
         assert!(run(&["a.toml", "b.toml"]).is_err());
         assert!(run(&["a.toml", "--fast"]).is_err());
+        let report = |args: &[&str]| parse_report(args.iter().map(|a| (*a).to_owned()));
+        assert_eq!(
+            report(&["--force", "s.json"]),
+            Ok(ReportArgs {
+                series: "s.json".into(),
+                force: true
+            })
+        );
+        assert!(report(&[]).is_err());
     }
 }

@@ -33,6 +33,9 @@ command = "target/release/pitot-overlay.exe"
 args = []
 # measure = ["other.exe"]  # executable names to measure; default: the launched process tree
 files = [{ from = "benchmarks/pitot/full.toml", to = "%APPDATA%/Pitot/config.toml" }]
+
+[budget]                   # optional limits the report checks; see report.md
+cpu_pct = 0.2
 ```
 
 - `command`, `files.from`, and `files.to` expand `%NAME%` to environment variables.

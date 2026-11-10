@@ -11,5 +11,5 @@ pub mod record;
 
 #[cfg(windows)]
 pub use exec::{Options, RunnerError, execute};
-pub use plan::{AppPlan, BASELINE, FilePlan, Plan, PlanError, ReplayPlan, Slot};
+pub use plan::{AppPlan, BASELINE, Budget, FilePlan, Plan, PlanError, ReplayPlan, Slot};
 pub use record::{Outcome, RunInfo, RunRecord, SeriesRecord};
