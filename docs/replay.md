@@ -48,7 +48,7 @@ order (no missed or torn reads), 72-entry per-car arrays with 41 cars on track, 
 
 - The data-valid event is auto-reset. Whether the sim uses auto-reset or manual-reset (pulsed) events is still to
   be checked on a machine with the sim; it matters when several processes wait on the event at once.
-- The live recorder comes later in M2. Until then, captures come from conversion:
+- Captures come from the [recorder](recorder.md) or from conversion:
 
 ```text
 pitot-bench convert (--irdt <file> | --ibt <file>) --out <file.ptc> [--level <n>]

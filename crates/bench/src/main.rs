@@ -6,6 +6,7 @@ use pitot_bench::replay::{self, FrameSource, IbtSource, IrdtSource, ReplayOption
 const USAGE: &str = "usage:
   pitot-bench replay (--irdt <file> | --ibt <file> | --capture <file>) [--loop] [--speed <factor>] [--seconds <n>]
   pitot-bench convert (--irdt <file> | --ibt <file>) --out <file.ptc> [--level <n>]
+  pitot-bench record [--out <file.ptc>] [--seconds <n>] [--level <n>]
   pitot-bench collect (--pid <n> | --name <exe>...) [--seconds <n>] [--interval-ms <n>] [--out <dir>]
   pitot-bench run <plan.toml> [--dry-run]
   pitot-bench report <series.json> [--force]";
@@ -290,6 +291,94 @@ fn convert(args: ConvertArgs) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[derive(Debug, PartialEq)]
+struct RecordArgs {
+    out: Option<String>,
+    seconds: Option<f64>,
+    level: i32,
+}
+
+fn parse_record(mut args: impl Iterator<Item = String>) -> Result<RecordArgs, String> {
+    let mut parsed = RecordArgs {
+        out: None,
+        seconds: None,
+        level: 3,
+    };
+    while let Some(arg) = args.next() {
+        let mut value = |name: &str| args.next().ok_or(format!("{name} needs a value"));
+        match arg.as_str() {
+            "--out" => parsed.out = Some(value("--out")?),
+            "--seconds" => {
+                let seconds: f64 = value("--seconds")?
+                    .parse()
+                    .map_err(|_| "--seconds needs a number")?;
+                if !seconds.is_finite() || seconds <= 0.0 {
+                    return Err("--seconds must be positive".to_owned());
+                }
+                parsed.seconds = Some(seconds);
+            }
+            "--level" => {
+                parsed.level = value("--level")?
+                    .parse()
+                    .map_err(|_| "--level needs a number")?
+            }
+            other => return Err(format!("unknown argument `{other}`")),
+        }
+    }
+    if !(1..=22).contains(&parsed.level) {
+        return Err("--level must be 1 to 22".to_owned());
+    }
+    Ok(parsed)
+}
+
+#[cfg(windows)]
+fn record(args: RecordArgs) -> Result<(), Box<dyn std::error::Error>> {
+    use pitot_bench::{paths, record};
+    use pitot_irsdk::live::{ReaderConfig, SdkNames};
+    let out = args
+        .out
+        .map_or_else(|| paths::capture_file(&paths::local_run_id()), Into::into);
+    let options = record::RecordOptions {
+        names: SdkNames::sim(),
+        out: out.clone(),
+        level: args.level,
+        max_duration: args.seconds.map(std::time::Duration::from_secs_f64),
+        reader: ReaderConfig::default(),
+    };
+    let stop = record::stop_on_ctrl_c()?;
+    eprintln!(
+        "recording to {} (Ctrl+C to stop); waiting for the sim",
+        out.display()
+    );
+    let summary = record::record(&options, stop)?;
+    for file in &summary.files {
+        let c = file.counts;
+        eprintln!(
+            "{}: {} frames, {} session info revisions, {} gaps ({} missed ticks), {} disconnects",
+            file.path.display(),
+            c.frames,
+            c.session_info_revisions,
+            c.gaps,
+            c.missed_ticks,
+            c.disconnects
+        );
+    }
+    if summary.files.is_empty() {
+        eprintln!("the sim did not connect; nothing was recorded");
+    }
+    eprintln!(
+        "{} torn reads in {:.1} s",
+        summary.torn,
+        summary.elapsed.as_secs_f64()
+    );
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn record(_: RecordArgs) -> Result<(), Box<dyn std::error::Error>> {
+    Err("record needs Windows shared memory".into())
+}
+
+#[derive(Debug, PartialEq)]
 struct RunArgs {
     plan: String,
     dry_run: bool,
@@ -368,6 +457,7 @@ fn main() -> ExitCode {
         Some("replay") => parse_replay(args).map_err(Into::into).and_then(replay),
         Some("collect") => parse_collect(args).map_err(Into::into).and_then(collect),
         Some("convert") => parse_convert(args).map_err(Into::into).and_then(convert),
+        Some("record") => parse_record(args).map_err(Into::into).and_then(record),
         Some("run") => parse_run(args).map_err(Into::into).and_then(run),
         Some("report") => parse_report(args).map_err(Into::into).and_then(report),
         _ => Err(USAGE.into()),
@@ -434,6 +524,26 @@ mod tests {
             })
         );
         assert!(report(&[]).is_err());
+    }
+
+    #[test]
+    fn record_arguments() {
+        let record = |args: &[&str]| parse_record(args.iter().map(|a| (*a).to_owned()));
+        assert_eq!(
+            record(&[]),
+            Ok(RecordArgs {
+                out: None,
+                seconds: None,
+                level: 3
+            })
+        );
+        assert_eq!(
+            record(&["--out", "a.ptc", "--seconds", "60"]).map(|a| (a.out, a.seconds)),
+            Ok((Some("a.ptc".into()), Some(60.0)))
+        );
+        assert!(record(&["--seconds", "0"]).is_err());
+        assert!(record(&["--level", "0"]).is_err());
+        assert!(record(&["--fast"]).is_err());
     }
 
     #[test]

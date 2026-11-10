@@ -17,7 +17,8 @@ metadata         JSON
 trailer          32 bytes
 ```
 
-A capture whose recorder stopped early has no index, metadata, or trailer. Its chunks are still readable in
+Captures come from the [recorder](recorder.md) or from conversion (`pitot-bench convert`, see
+[replay.md](replay.md)). A capture whose recorder stopped early has no index, metadata, or trailer. Its chunks are still readable in
 order, up to the last complete one.
 
 ## File header
