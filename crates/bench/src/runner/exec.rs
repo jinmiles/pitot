@@ -154,11 +154,7 @@ fn check(plan: &Plan) -> Result<Vec<detect::Found>, RunnerError> {
         }
     }
     if let Some(replay) = &plan.replay {
-        let file = replay
-            .irdt
-            .as_deref()
-            .or(replay.ibt.as_deref())
-            .unwrap_or_default();
+        let file = replay.file().map(|(_, f)| f).unwrap_or_default();
         if !Path::new(file).is_file() {
             return Err(RunnerError::Setup(format!(
                 "replay file {file} does not exist"
@@ -416,11 +412,10 @@ fn start_replay(
     let seconds = plan.warmup_s + plan.measure_s + REPLAY_SLACK.as_secs_f64();
     let mut command = Command::new(std::env::current_exe()?);
     command.arg("replay");
-    match (&replay.irdt, &replay.ibt) {
-        (Some(file), _) => command.args(["--irdt", file]),
-        (_, Some(file)) => command.args(["--ibt", file]),
-        _ => return Err(RunnerError::Setup("[replay] has no file".to_owned())),
+    let Some((option, file)) = replay.file() else {
+        return Err(RunnerError::Setup("[replay] has no file".to_owned()));
     };
+    command.args([option, file]);
     let log = dir.join("replay.log");
     let mut child = command
         .args(["--loop", "--speed"])

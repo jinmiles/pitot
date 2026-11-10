@@ -24,7 +24,7 @@ interval_ms = 1000         # sample interval, at least 100
 # detect = ["Other.exe"]   # more executable names to warn about
 
 [replay]                   # leave out to measure with the sim not running
-irdt = "data/irdashies/ai-race-10min.irdt"   # or ibt = "..."
+irdt = "data/irdashies/ai-race-10min.irdt"   # or ibt = "...", or capture = "....ptc"
 speed = 1.0
 
 [[app]]

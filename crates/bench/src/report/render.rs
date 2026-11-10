@@ -59,11 +59,7 @@ pub fn markdown(report: &Report) -> String {
     );
     match &plan.replay {
         Some(replay) => {
-            let file = replay
-                .irdt
-                .as_deref()
-                .or(replay.ibt.as_deref())
-                .unwrap_or("?");
+            let file = replay.file().map_or("?", |(_, f)| f);
             let _ = writeln!(out, "- Replay: `{file}` at {}x, looped", replay.speed);
         }
         None => {

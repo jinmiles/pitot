@@ -4,7 +4,8 @@ use std::process::ExitCode;
 use pitot_bench::replay::{self, FrameSource, IbtSource, IrdtSource, ReplayOptions};
 
 const USAGE: &str = "usage:
-  pitot-bench replay (--irdt <file> | --ibt <file>) [--loop] [--speed <factor>] [--seconds <n>]
+  pitot-bench replay (--irdt <file> | --ibt <file> | --capture <file>) [--loop] [--speed <factor>] [--seconds <n>]
+  pitot-bench convert (--irdt <file> | --ibt <file>) --out <file.ptc> [--level <n>]
   pitot-bench collect (--pid <n> | --name <exe>...) [--seconds <n>] [--interval-ms <n>] [--out <dir>]
   pitot-bench run <plan.toml> [--dry-run]
   pitot-bench report <series.json> [--force]";
@@ -13,6 +14,7 @@ const USAGE: &str = "usage:
 struct ReplayArgs {
     irdt: Option<String>,
     ibt: Option<String>,
+    capture: Option<String>,
     looped: bool,
     speed: Option<f64>,
     seconds: Option<f64>,
@@ -25,6 +27,7 @@ fn parse_replay(mut args: impl Iterator<Item = String>) -> Result<ReplayArgs, St
         match arg.as_str() {
             "--irdt" => parsed.irdt = Some(value("--irdt")?),
             "--ibt" => parsed.ibt = Some(value("--ibt")?),
+            "--capture" => parsed.capture = Some(value("--capture")?),
             "--loop" => parsed.looped = true,
             "--speed" => {
                 parsed.speed = Some(
@@ -43,9 +46,14 @@ fn parse_replay(mut args: impl Iterator<Item = String>) -> Result<ReplayArgs, St
             other => return Err(format!("unknown argument `{other}`")),
         }
     }
-    match (&parsed.irdt, &parsed.ibt) {
-        (Some(_), None) | (None, Some(_)) => Ok(parsed),
-        _ => Err("give exactly one of --irdt or --ibt".to_owned()),
+    let given = [&parsed.irdt, &parsed.ibt, &parsed.capture]
+        .iter()
+        .filter(|f| f.is_some())
+        .count();
+    if given == 1 {
+        Ok(parsed)
+    } else {
+        Err("give exactly one of --irdt, --ibt, or --capture".to_owned())
     }
 }
 
@@ -86,9 +94,10 @@ fn replay(args: ReplayArgs) -> Result<(), Box<dyn std::error::Error>> {
         );
         Ok(())
     }
-    match (args.irdt, args.ibt) {
-        (Some(path), _) => play(IrdtSource::open(path)?, &options),
-        (_, Some(path)) => play(IbtSource::open(path)?, &options),
+    match (args.irdt, args.ibt, args.capture) {
+        (Some(path), _, _) => play(IrdtSource::open(path)?, &options),
+        (_, Some(path), _) => play(IbtSource::open(path)?, &options),
+        (_, _, Some(path)) => play(pitot_bench::capture::CaptureSource::open(path)?, &options),
         _ => Err(USAGE.into()),
     }
 }
@@ -194,6 +203,93 @@ fn collect(_: CollectArgs) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[derive(Debug, PartialEq)]
+struct ConvertArgs {
+    irdt: Option<String>,
+    ibt: Option<String>,
+    out: String,
+    level: i32,
+}
+
+fn parse_convert(mut args: impl Iterator<Item = String>) -> Result<ConvertArgs, String> {
+    let (mut irdt, mut ibt, mut out, mut level) = (None, None, None, 19);
+    while let Some(arg) = args.next() {
+        let mut value = |name: &str| args.next().ok_or(format!("{name} needs a value"));
+        match arg.as_str() {
+            "--irdt" => irdt = Some(value("--irdt")?),
+            "--ibt" => ibt = Some(value("--ibt")?),
+            "--out" => out = Some(value("--out")?),
+            "--level" => {
+                level = value("--level")?
+                    .parse()
+                    .map_err(|_| "--level needs a number")?
+            }
+            other => return Err(format!("unknown argument `{other}`")),
+        }
+    }
+    if irdt.is_some() == ibt.is_some() {
+        return Err("give exactly one of --irdt or --ibt".to_owned());
+    }
+    if !(1..=22).contains(&level) {
+        return Err("--level must be 1 to 22".to_owned());
+    }
+    let out = out.ok_or("give --out <file.ptc>")?;
+    Ok(ConvertArgs {
+        irdt,
+        ibt,
+        out,
+        level,
+    })
+}
+
+fn convert(args: ConvertArgs) -> Result<(), Box<dyn std::error::Error>> {
+    use pitot_bench::capture::{self, CaptureSource};
+    use pitot_bench::replay::{IbtSource, IrdtSource};
+    use std::path::Path;
+    let out = Path::new(&args.out);
+    let started = std::time::Instant::now();
+    let (input, counts) = match (&args.irdt, &args.ibt) {
+        (Some(input), _) => (
+            input,
+            capture::convert::irdt(input.as_ref(), out, args.level)?,
+        ),
+        (_, Some(input)) => (
+            input,
+            capture::convert::ibt(input.as_ref(), out, args.level)?,
+        ),
+        _ => unreachable!("checked by parse_convert"),
+    };
+    let (before, after) = (
+        std::fs::metadata(input)?.len(),
+        std::fs::metadata(out)?.len(),
+    );
+    eprintln!(
+        "{} frames, {} session info revisions, {} gaps ({} missed ticks), {} disconnects in {} chunks",
+        counts.frames,
+        counts.session_info_revisions,
+        counts.gaps,
+        counts.missed_ticks,
+        counts.disconnects,
+        counts.chunks
+    );
+    eprintln!(
+        "{before} -> {after} bytes ({:.1}%) in {:.1} s",
+        after as f64 * 100.0 / before.max(1) as f64,
+        started.elapsed().as_secs_f64()
+    );
+    let mut written = CaptureSource::open(out)?;
+    let checked = match (&args.irdt, &args.ibt) {
+        (Some(input), _) => capture::convert::check(&mut IrdtSource::open(input)?, &mut written)?,
+        (_, Some(input)) => capture::convert::check(&mut IbtSource::open(input)?, &mut written)?,
+        _ => unreachable!("checked by parse_convert"),
+    };
+    eprintln!(
+        "checked against the source: {} frames and {} session info revisions identical",
+        checked.frames, checked.session_infos
+    );
+    Ok(())
+}
+
+#[derive(Debug, PartialEq)]
 struct RunArgs {
     plan: String,
     dry_run: bool,
@@ -271,6 +367,7 @@ fn main() -> ExitCode {
     let result = match args.next().as_deref() {
         Some("replay") => parse_replay(args).map_err(Into::into).and_then(replay),
         Some("collect") => parse_collect(args).map_err(Into::into).and_then(collect),
+        Some("convert") => parse_convert(args).map_err(Into::into).and_then(convert),
         Some("run") => parse_run(args).map_err(Into::into).and_then(run),
         Some("report") => parse_report(args).map_err(Into::into).and_then(report),
         _ => Err(USAGE.into()),
@@ -337,5 +434,26 @@ mod tests {
             })
         );
         assert!(report(&[]).is_err());
+    }
+
+    #[test]
+    fn convert_arguments() {
+        let convert = |args: &[&str]| parse_convert(args.iter().map(|a| (*a).to_owned()));
+        assert_eq!(
+            convert(&["--irdt", "a.irdt", "--out", "a.ptc"]),
+            Ok(ConvertArgs {
+                irdt: Some("a.irdt".into()),
+                ibt: None,
+                out: "a.ptc".into(),
+                level: 19
+            })
+        );
+        assert_eq!(
+            convert(&["--ibt", "a.ibt", "--out", "a.ptc", "--level", "3"]).map(|a| a.level),
+            Ok(3)
+        );
+        assert!(convert(&["--irdt", "a", "--ibt", "b", "--out", "c"]).is_err());
+        assert!(convert(&["--irdt", "a"]).is_err(), "needs --out");
+        assert!(convert(&["--irdt", "a", "--out", "b", "--level", "30"]).is_err());
     }
 }
