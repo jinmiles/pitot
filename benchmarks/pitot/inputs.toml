@@ -1,0 +1,26 @@
+# Pitot configuration for benchmarks: the input trace alone, at its default position and rate. Every field is
+# spelled out, so a change of defaults does not change the benchmark. Widgets go on the primary monitor.
+
+[general]
+font = "Segoe UI"
+
+[widgets.status]
+enabled = false
+
+[widgets.inputs]
+enabled = true
+x = 660
+y = 900
+width = 600
+height = 120
+rate_hz = 60.0
+opacity = 0.82
+
+[widgets.relative]
+enabled = false
+
+[widgets.standings]
+enabled = false
+
+[widgets.fuel]
+enabled = false
