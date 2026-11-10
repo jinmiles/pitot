@@ -16,7 +16,23 @@ overlay, its windows, and its log untouched.
 
 The overlay logs to `%APPDATA%\Pitot\pitot.log` and keeps the previous run's log as `pitot.previous.log`. It
 records start and exit, configuration problems and reloads, sim connect and disconnect, and render device
-recovery, but never telemetry values, session info, or driver names. Release builds have no console window
+recovery, but never telemetry values, session info, or driver names.
+
+At every sim disconnect and at exit, the line also carries the data path's counters since start:
+
+```text
+2026-11-11 10:00:00.000 INFO  pitot_overlay::app: sim disconnected ticks=36000 missed=0 torn=0 errors=0 dropped_samples=0
+```
+
+| Field | Meaning |
+|---|---|
+| `ticks` | Ticks read from the sim |
+| `missed` | Ticks the sim wrote that were overwritten before they could be read |
+| `torn` | Reads where the buffer changed during both copy attempts |
+| `errors` | Shared memory read errors |
+| `dropped_samples` | Input samples lost because rendering fell a full ring (512 samples, about 8 s) behind |
+
+`missed` and `dropped_samples` are gaps in the input trace. Both are zero for a run without gaps. Release builds have no console window
 (quit from the tray icon); debug builds also print the log to the console.
 
 ## Format

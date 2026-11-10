@@ -203,7 +203,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             if view.is_connected() {
                 info!("sim connected");
             } else {
-                info!("sim disconnected");
+                log_counters(&view, "sim disconnected");
             }
             for slot in &mut layout.slots {
                 slot.widget.reset();
@@ -251,8 +251,25 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             reload_at = Some(Instant::now() + RELOAD_DELAY);
         }
     }
+    log_counters(&view, "data counters at exit");
     drop(pipeline);
     Ok(())
+}
+
+/// Logs the data path's counters since start: ticks read, ticks missed before they could be read, torn reads,
+/// read errors, and input samples the render thread lost. Missed ticks and dropped samples are gaps in the input
+/// trace.
+fn log_counters(view: &View, event: &str) {
+    use std::sync::atomic::Ordering::Relaxed;
+    let stats = view.stats();
+    info!(
+        ticks = stats.ticks.load(Relaxed),
+        missed = stats.missed.load(Relaxed),
+        torn = stats.torn.load(Relaxed),
+        errors = stats.errors.load(Relaxed),
+        dropped_samples = view.dropped_samples_total(),
+        "{event}"
+    );
 }
 
 /// Updates and draws the widgets that are due, then commits once.
