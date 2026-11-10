@@ -10,12 +10,13 @@
 //! - `record`: live recorder of SDK shared memory into captures (Windows).
 //! - [`report`]: processed metrics per run and a report per series with confidence intervals, baseline
 //!   differences, and budget checks.
+//! - [`anonymize`]: replaces driver names, team names, and IDs in captures and `.ibt` files for fixtures.
 //! - [`paths`]: where bench output goes.
 //!
 //! Planned modules:
-//! - `anonymize`: fixture anonymizer for driver names, IDs, and team names (M2).
 //! - `tier_b`: replay controller over broadcast messages and PresentMon capture (M5).
 
+pub mod anonymize;
 pub mod capture;
 pub mod collect;
 pub mod paths;

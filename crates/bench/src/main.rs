@@ -7,6 +7,7 @@ const USAGE: &str = "usage:
   pitot-bench replay (--irdt <file> | --ibt <file> | --capture <file>) [--loop] [--speed <factor>] [--seconds <n>]
   pitot-bench convert (--irdt <file> | --ibt <file>) --out <file.ptc> [--level <n>]
   pitot-bench record [--out <file.ptc>] [--seconds <n>] [--level <n>]
+  pitot-bench anonymize --in <file.ptc|file.ibt> --out <file>
   pitot-bench collect (--pid <n> | --name <exe>...) [--seconds <n>] [--interval-ms <n>] [--out <dir>]
   pitot-bench run <plan.toml> [--dry-run]
   pitot-bench report <series.json> [--force]";
@@ -379,6 +380,58 @@ fn record(_: RecordArgs) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[derive(Debug, PartialEq)]
+struct AnonymizeArgs {
+    input: String,
+    out: String,
+}
+
+fn parse_anonymize(mut args: impl Iterator<Item = String>) -> Result<AnonymizeArgs, String> {
+    let (mut input, mut out) = (None, None);
+    while let Some(arg) = args.next() {
+        let mut value = |name: &str| args.next().ok_or(format!("{name} needs a value"));
+        match arg.as_str() {
+            "--in" => input = Some(value("--in")?),
+            "--out" => out = Some(value("--out")?),
+            other => return Err(format!("unknown argument `{other}`")),
+        }
+    }
+    let (Some(input), Some(out)) = (input, out) else {
+        return Err("give --in <file> and --out <file>".to_owned());
+    };
+    if input == out {
+        return Err("--out must differ from --in".to_owned());
+    }
+    Ok(AnonymizeArgs { input, out })
+}
+
+fn anonymize(args: AnonymizeArgs) -> Result<(), Box<dyn std::error::Error>> {
+    use pitot_bench::anonymize;
+    use std::path::Path;
+    let (input, out) = (Path::new(&args.input), Path::new(&args.out));
+    let extension = |p: &Path| {
+        p.extension()
+            .map(|e| e.to_string_lossy().to_ascii_lowercase())
+            .unwrap_or_default()
+    };
+    if extension(input) != extension(out) {
+        return Err("--in and --out need the same extension".into());
+    }
+    let (replaced, revisions) = match extension(input).as_str() {
+        "ptc" => {
+            let (_, replaced, revisions) = anonymize::capture(input, out, 19)?;
+            (replaced, revisions)
+        }
+        "ibt" => anonymize::ibt(input, out)?,
+        _ => return Err("anonymize reads .ptc captures and .ibt files".into()),
+    };
+    eprintln!(
+        "replaced {} drivers, {} teams, {} IDs, and {} session IDs; {} session info revisions checked",
+        replaced.drivers, replaced.teams, replaced.ids, replaced.sessions, revisions
+    );
+    Ok(())
+}
+
+#[derive(Debug, PartialEq)]
 struct RunArgs {
     plan: String,
     dry_run: bool,
@@ -458,6 +511,9 @@ fn main() -> ExitCode {
         Some("collect") => parse_collect(args).map_err(Into::into).and_then(collect),
         Some("convert") => parse_convert(args).map_err(Into::into).and_then(convert),
         Some("record") => parse_record(args).map_err(Into::into).and_then(record),
+        Some("anonymize") => parse_anonymize(args)
+            .map_err(Into::into)
+            .and_then(anonymize),
         Some("run") => parse_run(args).map_err(Into::into).and_then(run),
         Some("report") => parse_report(args).map_err(Into::into).and_then(report),
         _ => Err(USAGE.into()),
@@ -544,6 +600,20 @@ mod tests {
         assert!(record(&["--seconds", "0"]).is_err());
         assert!(record(&["--level", "0"]).is_err());
         assert!(record(&["--fast"]).is_err());
+    }
+
+    #[test]
+    fn anonymize_arguments() {
+        let anonymize = |args: &[&str]| parse_anonymize(args.iter().map(|a| (*a).to_owned()));
+        assert_eq!(
+            anonymize(&["--in", "a.ibt", "--out", "b.ibt"]),
+            Ok(AnonymizeArgs {
+                input: "a.ibt".into(),
+                out: "b.ibt".into()
+            })
+        );
+        assert!(anonymize(&["--in", "a.ibt"]).is_err());
+        assert!(anonymize(&["--in", "a.ibt", "--out", "a.ibt"]).is_err());
     }
 
     #[test]

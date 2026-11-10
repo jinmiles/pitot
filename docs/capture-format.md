@@ -88,7 +88,7 @@ frame turns unchanged bytes into zeros, which compress well; frames are restored
 UTF-8 JSON with the tool and version that wrote the capture, the source (`live`, `irdt`, or `ibt`, and the source
 file's name and size for conversions), the compression level, and counts: frames, seconds, session info
 revisions, gaps, missed ticks, and disconnects. It never contains session info content, so it holds no driver
-names.
+names. Session info itself does; see [anonymize.md](anonymize.md).
 
 ## Trailer
 
