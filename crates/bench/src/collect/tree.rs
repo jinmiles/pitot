@@ -27,13 +27,16 @@ fn stem(name: &str) -> &str {
     }
 }
 
+/// Whether two executable names are the same program: compared without case, with or without `.exe`.
+pub fn same_exe(a: &str, b: &str) -> bool {
+    stem(a).eq_ignore_ascii_case(stem(b))
+}
+
 impl Target {
     fn is_root(&self, entry: &ProcessEntry) -> bool {
         match self {
             Self::Pid(pid) => entry.pid == *pid,
-            Self::Names(names) => names
-                .iter()
-                .any(|n| stem(n).eq_ignore_ascii_case(stem(&entry.name))),
+            Self::Names(names) => names.iter().any(|n| same_exe(n, &entry.name)),
         }
     }
 

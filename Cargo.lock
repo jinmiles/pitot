@@ -118,6 +118,7 @@ dependencies = [
  "pitot-irsdk",
  "serde",
  "serde_json",
+ "toml",
  "windows",
 ]
 

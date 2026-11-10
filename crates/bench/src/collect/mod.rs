@@ -12,7 +12,7 @@ pub mod tree;
 use std::fmt;
 use std::io::{self, Write};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 #[cfg(windows)]
 pub use sampler::Collector;
@@ -96,7 +96,7 @@ impl Sample {
 }
 
 /// Time-weighted means and extremes of a run.
-#[derive(Debug, Clone, PartialEq, Default, Serialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct Summary {
     pub samples: usize,
     pub seconds: f64,
@@ -307,12 +307,11 @@ mod run {
     ) -> Result<Summary, CollectError> {
         fs::create_dir_all(&options.out_dir)?;
         let mut collector = Collector::new(target.clone());
-        let [y, mo, d, h, mi, s] = sys::local_time();
         let mut info = RunInfo {
             tool: "pitot-bench",
             version: env!("CARGO_PKG_VERSION"),
             target,
-            started_local: format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}"),
+            started_local: crate::paths::local_timestamp(),
             interval_ms: options.interval.as_millis(),
             requested_seconds: options.duration.as_secs_f64(),
             machine: Machine::read(collector.logical_processors()),
