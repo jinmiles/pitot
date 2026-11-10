@@ -39,11 +39,36 @@ fn u32_at(bytes: &[u8], at: usize) -> u32 {
     u32::from_le_bytes(word)
 }
 
+/// Kinds of `.irdt` records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IrdtKind {
+    Frame,
+    SessionInfo,
+    /// Ticks the recorder missed; `value` holds how many.
+    Gap,
+    Disconnect,
+    End,
+}
+
+/// A record's header fields.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IrdtRecord {
+    pub kind: IrdtKind,
+    /// Time since the recording started, in units of [`IrdtSource::clock_hz`].
+    pub elapsed: u64,
+    /// The SDK `tickCount` of a frame.
+    pub tick: i32,
+    /// The buffer index of a frame, the `sessionInfoUpdate` of session info, or the missed ticks of a gap.
+    pub value: i32,
+}
+
 /// An `.irdt` v1 tape read sequentially.
 #[derive(Debug)]
 pub struct IrdtSource<R> {
     reader: R,
     layout: SourceLayout,
+    clock_hz: u64,
+    sdk_version: i32,
     records_start: u64,
     position: u64,
     file_len: u64,
@@ -76,6 +101,12 @@ impl<R: Read + Seek> IrdtSource<R> {
             return Err(ReplayError::Format("invalid .irdt variable count"));
         }
         let schema_checksum = u32_at(&head, 56);
+        let mut clock = [0u8; 8];
+        clock.copy_from_slice(&head[40..48]);
+        let clock_hz = u64::from_le_bytes(clock);
+        if clock_hz == 0 {
+            return Err(ReplayError::Format("invalid .irdt clock frequency"));
+        }
 
         let mut sdk = [0u8; Header::SIZE];
         read_exact(&mut reader, &mut sdk)?;
@@ -111,6 +142,8 @@ impl<R: Read + Seek> IrdtSource<R> {
                 session_info_capacity,
                 player_car_only: false,
             },
+            clock_hz,
+            sdk_version: header.ver,
             records_start,
             position: records_start,
             file_len,
@@ -125,6 +158,61 @@ fn read_exact<R: Read>(reader: &mut R, buf: &mut [u8]) -> Result<(), ReplayError
     })
 }
 
+impl<R: Read + Seek> IrdtSource<R> {
+    /// Frequency of record times (the recorder's performance counter).
+    pub fn clock_hz(&self) -> u64 {
+        self.clock_hz
+    }
+
+    pub fn sdk_version(&self) -> i32 {
+        self.sdk_version
+    }
+
+    /// Reads the next record of any kind, its payload into `buf`. `Ok(None)` at the end of the tape.
+    pub fn read_record(&mut self, buf: &mut Vec<u8>) -> Result<Option<IrdtRecord>, ReplayError> {
+        // A tape cut off after a whole record still ends cleanly.
+        if self.position == self.file_len {
+            return Ok(None);
+        }
+        let offset = self.position;
+        let mut head = [0u8; RECORD_HEADER_SIZE];
+        read_exact(&mut self.reader, &mut head)?;
+        let kind = u32_at(&head, 0);
+        let payload_len = u32_at(&head, 8);
+        if u32_at(&head, 4) as usize != RECORD_HEADER_SIZE || payload_len > MAX_PAYLOAD {
+            return Err(ReplayError::Format("invalid .irdt record header"));
+        }
+        buf.clear();
+        buf.resize(payload_len as usize, 0);
+        read_exact(&mut self.reader, buf)?;
+        self.position += (RECORD_HEADER_SIZE + buf.len()) as u64;
+        if fnv1a(buf) != u32_at(&head, 32) {
+            return Err(ReplayError::Checksum { offset });
+        }
+        let kind = match kind {
+            KIND_FRAME if buf.len() == self.layout.buf_len => IrdtKind::Frame,
+            KIND_FRAME => {
+                return Err(ReplayError::Format(
+                    ".irdt frame does not match the buffer length",
+                ));
+            }
+            KIND_SESSION_INFO => IrdtKind::SessionInfo,
+            KIND_GAP => IrdtKind::Gap,
+            KIND_DISCONNECT => IrdtKind::Disconnect,
+            KIND_END => IrdtKind::End,
+            _ => return Err(ReplayError::Format("unknown .irdt record kind")),
+        };
+        let mut elapsed = [0u8; 8];
+        elapsed.copy_from_slice(&head[16..24]);
+        Ok(Some(IrdtRecord {
+            kind,
+            elapsed: u64::from_le_bytes(elapsed),
+            tick: u32_at(&head, 24) as i32,
+            value: u32_at(&head, 28) as i32,
+        }))
+    }
+}
+
 impl<R: Read + Seek> FrameSource for IrdtSource<R> {
     fn layout(&self) -> &SourceLayout {
         &self.layout
@@ -132,38 +220,16 @@ impl<R: Read + Seek> FrameSource for IrdtSource<R> {
 
     fn next(&mut self, buf: &mut Vec<u8>) -> Result<Option<Item>, ReplayError> {
         loop {
-            // A tape cut off after a whole record still ends cleanly.
-            if self.position == self.file_len {
+            let Some(record) = self.read_record(buf)? else {
                 return Ok(None);
-            }
-            let offset = self.position;
-            let mut head = [0u8; RECORD_HEADER_SIZE];
-            read_exact(&mut self.reader, &mut head)?;
-            let kind = u32_at(&head, 0);
-            let payload_len = u32_at(&head, 8);
-            if u32_at(&head, 4) as usize != RECORD_HEADER_SIZE || payload_len > MAX_PAYLOAD {
-                return Err(ReplayError::Format("invalid .irdt record header"));
-            }
-            buf.clear();
-            buf.resize(payload_len as usize, 0);
-            read_exact(&mut self.reader, buf)?;
-            self.position += (RECORD_HEADER_SIZE + buf.len()) as u64;
-            if fnv1a(buf) != u32_at(&head, 32) {
-                return Err(ReplayError::Checksum { offset });
-            }
-            match kind {
-                KIND_FRAME if buf.len() == self.layout.buf_len => return Ok(Some(Item::Frame)),
-                KIND_FRAME => {
-                    return Err(ReplayError::Format(
-                        ".irdt frame does not match the buffer length",
-                    ));
-                }
-                KIND_SESSION_INFO => return Ok(Some(Item::SessionInfo)),
+            };
+            match record.kind {
+                IrdtKind::Frame => return Ok(Some(Item::Frame)),
+                IrdtKind::SessionInfo => return Ok(Some(Item::SessionInfo)),
                 // Ticks the recorder missed; the replay simply continues with the next frame.
-                KIND_GAP => continue,
-                KIND_DISCONNECT => return Ok(Some(Item::Disconnect)),
-                KIND_END => return Ok(None),
-                _ => return Err(ReplayError::Format("unknown .irdt record kind")),
+                IrdtKind::Gap => continue,
+                IrdtKind::Disconnect => return Ok(Some(Item::Disconnect)),
+                IrdtKind::End => return Ok(None),
             }
         }
     }
@@ -199,17 +265,31 @@ pub(crate) mod tests {
         row
     }
 
-    fn record(out: &mut Vec<u8>, kind: u32, payload: &[u8]) {
+    /// Clock of the test tape: 100 ns units, as real tapes use.
+    pub(crate) const CLOCK_HZ: u64 = 10_000_000;
+
+    fn record_at(
+        out: &mut Vec<u8>,
+        kind: u32,
+        payload: &[u8],
+        elapsed: u64,
+        tick: i32,
+        value: i32,
+    ) {
         let mut head = [0u8; RECORD_HEADER_SIZE];
         head[0..4].copy_from_slice(&kind.to_le_bytes());
         head[4..8].copy_from_slice(&(RECORD_HEADER_SIZE as u32).to_le_bytes());
         head[8..12].copy_from_slice(&(payload.len() as u32).to_le_bytes());
+        head[16..24].copy_from_slice(&elapsed.to_le_bytes());
+        head[24..28].copy_from_slice(&tick.to_le_bytes());
+        head[28..32].copy_from_slice(&value.to_le_bytes());
         head[32..36].copy_from_slice(&fnv1a(payload).to_le_bytes());
         out.extend_from_slice(&head);
         out.extend_from_slice(payload);
     }
 
-    /// A tape: session info, `frames` frames with a gap and a session info revision in the middle, end.
+    /// A tape: session info, `frames` frames with a gap of two ticks and a session info revision in the middle,
+    /// end. Frame `n` is at `n` periods of 60 Hz, tick `1000 + n`, buffer `n % 3`.
     pub(crate) fn tape(frames: u32) -> Vec<u8> {
         let vars = vars();
         let mut header = Header::default();
@@ -240,20 +320,36 @@ pub(crate) mod tests {
             out[at..at + 4].copy_from_slice(&value.to_le_bytes());
         }
         out[28..32].copy_from_slice(&(vars.len() as u32).to_le_bytes());
+        out[40..48].copy_from_slice(&CLOCK_HZ.to_le_bytes());
         out[56..60].copy_from_slice(&fnv1a(&table).to_le_bytes());
         out.extend_from_slice(&sdk);
         out.extend_from_slice(&table);
         let mut info = vec![0u8; 256];
         info[..12].copy_from_slice(b"WeekendInfo:");
-        record(&mut out, KIND_SESSION_INFO, &info);
+        record_at(&mut out, KIND_SESSION_INFO, &info, 0, -1, 1);
+        let at = |n: u32| u64::from(n) * CLOCK_HZ / 60;
         for n in 0..frames {
             if n == frames / 2 {
-                record(&mut out, KIND_GAP, &[]);
-                record(&mut out, KIND_SESSION_INFO, b"DriverInfo:\0\0\0");
+                record_at(&mut out, KIND_GAP, &[], at(n), -1, 2);
+                record_at(
+                    &mut out,
+                    KIND_SESSION_INFO,
+                    b"DriverInfo:\0\0\0",
+                    at(n),
+                    -1,
+                    2,
+                );
             }
-            record(&mut out, KIND_FRAME, &row(n));
+            record_at(
+                &mut out,
+                KIND_FRAME,
+                &row(n),
+                at(n),
+                1000 + n as i32,
+                (n % 3) as i32,
+            );
         }
-        record(&mut out, KIND_END, &[]);
+        record_at(&mut out, KIND_END, &[], at(frames), -1, 0);
         out
     }
 

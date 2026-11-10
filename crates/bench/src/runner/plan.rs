@@ -67,6 +67,9 @@ pub struct ReplayPlan {
     pub irdt: Option<String>,
     #[serde(default)]
     pub ibt: Option<String>,
+    /// A Pitot capture (`.ptc`).
+    #[serde(default)]
+    pub capture: Option<String>,
     #[serde(default = "defaults::speed")]
     pub speed: f64,
 }
@@ -93,6 +96,24 @@ pub struct FilePlan {
     pub from: String,
     /// Destination; `%NAME%` expands to the environment variable `NAME`.
     pub to: String,
+}
+
+impl ReplayPlan {
+    /// The recording and its option name, when exactly one is given.
+    pub fn file(&self) -> Option<(&'static str, &str)> {
+        let given: Vec<(&'static str, &str)> = [
+            ("--irdt", self.irdt.as_deref()),
+            ("--ibt", self.ibt.as_deref()),
+            ("--capture", self.capture.as_deref()),
+        ]
+        .into_iter()
+        .filter_map(|(option, file)| Some((option, file?)))
+        .collect();
+        match given[..] {
+            [one] => Some(one),
+            _ => None,
+        }
+    }
 }
 
 mod defaults {
@@ -172,8 +193,8 @@ impl Plan {
             return Err("measure_s must cover at least one interval".to_owned());
         }
         if let Some(replay) = &self.replay {
-            if replay.irdt.is_some() == replay.ibt.is_some() {
-                return Err("[replay] needs exactly one of irdt or ibt".to_owned());
+            if replay.file().is_none() {
+                return Err("[replay] needs exactly one of irdt, ibt, or capture".to_owned());
             }
             if !seconds(replay.speed, true) {
                 return Err("[replay] speed must be positive".to_owned());
@@ -360,6 +381,10 @@ measure = ["other.exe", "other-helper.exe"]
         bad("repeats = 3", "repeats = 0");
         bad("measure_s = 10", "measure_s = 0.05");
         bad("irdt = \"data/race.irdt\"", "speed = 2.0");
+        bad(
+            "irdt = \"data/race.irdt\"",
+            "irdt = \"data/race.irdt\"\ncapture = \"data/race.ptc\"",
+        );
         bad("seed = 7", "seed = 7\ntypo = 1");
     }
 

@@ -14,7 +14,9 @@ use pitot_irsdk::ibt::IbtError;
 use pitot_irsdk::layout::{LayoutError, VarHeader};
 
 pub use ibt::IbtSource;
-pub use irdt::IrdtSource;
+#[cfg(test)]
+pub(crate) use irdt::tests::{CLOCK_HZ as IRDT_TEST_CLOCK_HZ, tape as irdt_tape};
+pub use irdt::{IrdtKind, IrdtRecord, IrdtSource};
 #[cfg(windows)]
 pub use runner::{ReplayOptions, ReplaySummary, run};
 

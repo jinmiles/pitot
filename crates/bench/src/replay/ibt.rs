@@ -44,6 +44,12 @@ impl<R: Read + Seek> IbtSource<R> {
     }
 }
 
+impl<R: Read + Seek> IbtSource<R> {
+    pub fn sdk_version(&self) -> i32 {
+        self.reader.header().ver
+    }
+}
+
 impl<R: Read + Seek> FrameSource for IbtSource<R> {
     fn layout(&self) -> &SourceLayout {
         &self.layout
