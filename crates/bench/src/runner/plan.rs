@@ -35,6 +35,29 @@ pub struct Plan {
     /// More executable names to warn about before the series, besides the built-in list.
     #[serde(default)]
     pub detect: Vec<String>,
+    /// Limits the report checks every app against.
+    #[serde(default)]
+    pub budget: Option<Budget>,
+}
+
+/// Performance limits, each optional. The report marks every app within, over, or inconclusive for each.
+#[derive(Debug, Clone, PartialEq, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Budget {
+    /// Mean CPU as a percentage of all logical processors.
+    #[serde(default)]
+    pub cpu_pct: Option<f64>,
+    /// Highest one-sample CPU, in ms per second (10 is 1% of one core).
+    #[serde(default)]
+    pub cpu_peak_ms_per_s: Option<f64>,
+    /// Highest private bytes, in MB (2^20 bytes).
+    #[serde(default)]
+    pub private_mb: Option<f64>,
+    #[serde(default)]
+    pub private_growth_mb_per_h: Option<f64>,
+    /// DWM CPU and GPU must not rise measurably over the baselines.
+    #[serde(default)]
+    pub dwm_no_increase: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
@@ -285,6 +308,11 @@ warmup_s = 5
 measure_s = 10
 seed = 7
 
+[budget]
+cpu_pct = 0.2
+private_mb = 30
+dwm_no_increase = true
+
 [replay]
 irdt = "data/race.irdt"
 
@@ -313,6 +341,10 @@ measure = ["other.exe", "other-helper.exe"]
         assert_eq!(plan.apps.len(), 2);
         assert_eq!(plan.app("other").map(|a| a.measure.len()), Some(2));
         assert_eq!(plan.estimated_seconds(), 10.0 * 25.0, "10 runs of 25 s");
+        let budget = plan.budget.expect("budget");
+        assert_eq!((budget.cpu_pct, budget.private_mb), (Some(0.2), Some(30.0)));
+        assert_eq!(budget.cpu_peak_ms_per_s, None);
+        assert!(budget.dwm_no_increase);
     }
 
     #[test]
