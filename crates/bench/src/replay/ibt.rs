@@ -77,27 +77,31 @@ impl<R: Read + Seek> FrameSource for IbtSource<R> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use pitot_irsdk::layout::{DiskSubHeader, Header, SDK_VERSION, VarHeader, VarType};
     use std::io::Cursor;
 
     const YAML: &[u8] = b"WeekendInfo:\n TrackName: synthetic\n";
 
-    /// A minimal `.ibt`: two variables, the session info text, and three records.
     fn ibt() -> Vec<u8> {
+        ibt_with(YAML)
+    }
+
+    /// A minimal `.ibt`: two variables, the session info text `yaml`, and three records.
+    pub(crate) fn ibt_with(yaml: &[u8]) -> Vec<u8> {
         let vars = [
             VarHeader::new(VarType::Double, 0, 1, "SessionTime").expect("valid"),
             VarHeader::new(VarType::Int, 8, 1, "SessionNum").expect("valid"),
         ];
         let table_at = Header::SIZE + DiskSubHeader::SIZE;
         let info_at = table_at + vars.len() * VarHeader::SIZE;
-        let data_at = info_at + YAML.len();
+        let data_at = info_at + yaml.len();
         let mut bytes = vec![0u8; data_at + 3 * 12];
         let mut header = Header::default();
         header.ver = SDK_VERSION;
         header.tick_rate = 60;
-        header.session_info_len = YAML.len() as i32;
+        header.session_info_len = yaml.len() as i32;
         header.session_info_offset = info_at as i32;
         header.num_vars = 2;
         header.var_header_offset = table_at as i32;
@@ -114,7 +118,7 @@ mod tests {
             var.write(&mut bytes[table_at + n * VarHeader::SIZE..])
                 .expect("fits");
         }
-        bytes[info_at..data_at].copy_from_slice(YAML);
+        bytes[info_at..data_at].copy_from_slice(yaml);
         for n in 0..3 {
             let at = data_at + n * 12;
             bytes[at..at + 8].copy_from_slice(&(n as f64).to_le_bytes());

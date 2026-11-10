@@ -15,6 +15,8 @@ use pitot_irsdk::layout::{LayoutError, VarHeader};
 
 pub use ibt::IbtSource;
 #[cfg(test)]
+pub(crate) use ibt::tests::ibt_with as ibt_file;
+#[cfg(test)]
 pub(crate) use irdt::tests::{CLOCK_HZ as IRDT_TEST_CLOCK_HZ, tape as irdt_tape};
 pub use irdt::{IrdtKind, IrdtRecord, IrdtSource};
 #[cfg(windows)]
