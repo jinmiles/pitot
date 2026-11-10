@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use pitot_irsdk::layout::{VarHeader, VarType};
 use pitot_irsdk::live::{ReaderConfig, SdkNames};
 use pitot_irsdk::publish::{Publisher, PublisherConfig};
-use pitot_overlay::pipeline::{Display, InputSample, Pipeline, View};
+use pitot_overlay::pipeline::{Display, InputSample, Pipeline, SAMPLE_CAPACITY, View};
 
 const ROW: usize = 28 + 72 * 4;
 const TICKS: u32 = 120;
@@ -53,6 +53,69 @@ fn wait_for(view: &mut View, what: &str, mut done: impl FnMut(&mut View) -> bool
         assert!(Instant::now() < deadline, "timed out waiting for {what}");
         thread::sleep(Duration::from_millis(2));
     }
+}
+
+#[test]
+fn dropped_samples_are_kept_across_connections() {
+    let pid = std::process::id();
+    let names = SdkNames::new(
+        &format!("Local\\PitotPipelineDropMap-{pid}"),
+        &format!("Local\\PitotPipelineDropEvent-{pid}"),
+    );
+    let mut publisher = publisher(&names);
+    let config = ReaderConfig {
+        retry_interval: Duration::from_millis(5),
+        idle_timeout: Duration::from_millis(50),
+    };
+    let (_pipeline, mut view) = Pipeline::start(names, config).expect("starts");
+    wait_for(&mut view, "connection", |v| {
+        v.poll().connection && v.is_connected()
+    });
+    // More ticks than the ring holds, without draining: the oldest samples are dropped.
+    let extra = 40;
+    for n in 0..SAMPLE_CAPACITY as u32 + extra {
+        publisher.publish(&row(n)).expect("publishes");
+        thread::sleep(Duration::from_millis(1));
+    }
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while view_ticks(&view) < SAMPLE_CAPACITY as u64 + 1 {
+        assert!(
+            Instant::now() < deadline,
+            "data thread did not read enough ticks"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+    thread::sleep(Duration::from_millis(50));
+    let read = view_ticks(&view);
+    let dropped = view.dropped_samples();
+    assert_eq!(dropped, read - SAMPLE_CAPACITY as u64, "read {read}");
+    assert_eq!(view.dropped_samples_total(), dropped);
+
+    publisher.set_connected(false).expect("disconnects");
+    wait_for(&mut view, "disconnect", |v| {
+        v.poll().connection && !v.is_connected()
+    });
+    assert_eq!(view.dropped_samples(), 0, "no connection");
+    assert_eq!(
+        view.dropped_samples_total(),
+        dropped,
+        "kept after disconnect"
+    );
+    publisher.set_connected(true).expect("reconnects");
+    wait_for(&mut view, "reconnection", |v| {
+        v.poll().connection && v.is_connected()
+    });
+    assert_eq!(
+        view.dropped_samples_total(),
+        dropped,
+        "kept after reconnect"
+    );
+}
+
+fn view_ticks(view: &View) -> u64 {
+    view.stats()
+        .ticks
+        .load(std::sync::atomic::Ordering::Relaxed)
 }
 
 #[test]

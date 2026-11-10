@@ -137,6 +137,7 @@ mod threads {
                 session: None,
                 version: 0,
                 stats: Arc::clone(&stats),
+                dropped_before: 0,
             };
             Ok((
                 Self {
@@ -263,9 +264,18 @@ mod threads {
         session: Option<Arc<SessionInfo>>,
         version: u64,
         stats: Arc<PipelineStats>,
+        /// Samples dropped by connections that were replaced.
+        dropped_before: u64,
     }
 
     impl View {
+        /// Adds the current connection's dropped samples to the running total before it is replaced.
+        fn retire_connection(&mut self) {
+            if let Some(old) = self.connection.take() {
+                self.dropped_before += old.samples.dropped();
+            }
+        }
+
         /// Takes connection changes, session info, and the latest tick. Allocates only when the connection
         /// changes.
         pub fn poll(&mut self) -> ViewChanges {
@@ -273,6 +283,7 @@ mod threads {
             while let Ok(message) = self.messages.try_recv() {
                 match message {
                     Message::Connected(connection) => {
+                        self.retire_connection();
                         self.snapshot = connection.template.clone();
                         self.connection = Some(connection);
                         self.session = None;
@@ -280,7 +291,7 @@ mod threads {
                         changes.connection = true;
                     }
                     Message::Disconnected => {
-                        self.connection = None;
+                        self.retire_connection();
                         self.session = None;
                         changes.connection = true;
                     }
@@ -339,9 +350,14 @@ mod threads {
             self.connection.as_ref().map_or(0, |c| c.car_count)
         }
 
-        /// Input samples dropped because the render thread fell a full ring behind.
+        /// Input samples of the current connection dropped because the render thread fell a full ring behind.
         pub fn dropped_samples(&self) -> u64 {
             self.connection.as_ref().map_or(0, |c| c.samples.dropped())
+        }
+
+        /// Dropped input samples since the pipeline started, over every connection.
+        pub fn dropped_samples_total(&self) -> u64 {
+            self.dropped_before + self.dropped_samples()
         }
 
         pub fn stats(&self) -> &PipelineStats {
