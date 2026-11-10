@@ -104,11 +104,21 @@ pub struct VarId(usize);
 #[derive(Debug, Clone, Default)]
 pub struct VarSet {
     names: Vec<String>,
+    whole_row: bool,
 }
 
 impl VarSet {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Every byte of each data buffer row, as the sim wrote it, for recorders. The snapshot then has no named
+    /// variables; [`Snapshot::bytes`] is the row and [`LiveReader::layout`] describes it.
+    pub fn whole_row() -> Self {
+        Self {
+            names: Vec::new(),
+            whole_row: true,
+        }
     }
 
     pub fn add(&mut self, name: &str) -> VarId {
@@ -134,6 +144,7 @@ pub struct Snapshot {
     bytes: Vec<u8>,
     fields: Vec<Option<Field>>,
     tick: i32,
+    buffer: usize,
 }
 
 impl Snapshot {
@@ -144,6 +155,11 @@ impl Snapshot {
     /// Sim tick count of the copied data.
     pub fn tick(&self) -> i32 {
         self.tick
+    }
+
+    /// Index of the sim's rotating buffer the latest tick was copied from.
+    pub fn buffer(&self) -> usize {
+        self.buffer
     }
 
     /// The copied variables, back to back. With [`Snapshot::bytes_mut`] and [`Snapshot::set_tick`], this lets
@@ -280,6 +296,12 @@ impl LiveReader {
             .load_i32(SESSION_INFO_UPDATE_OFFSET)
     }
 
+    /// The connection's layout: variable headers, row length, tick rate, session info area size, and SDK
+    /// version. `None` while disconnected.
+    pub fn layout(&self) -> Option<&LiveLayout> {
+        Some(&self.conn.as_ref()?.plan.layout)
+    }
+
     /// Size of the session info area. Reserve this much in the buffer passed to
     /// [`LiveReader::copy_session_info`] so the copy does not allocate.
     pub fn session_info_capacity(&self) -> Option<usize> {
@@ -406,10 +428,15 @@ impl Live {
             self.last_tick,
             &mut snapshot.bytes,
         ) {
-            ReadOutcome::New { tick, missed } => {
+            ReadOutcome::New {
+                tick,
+                missed,
+                buffer,
+            } => {
                 self.last_tick = Some(tick);
                 self.last_tick_at = Some(Instant::now());
                 snapshot.tick = tick;
+                snapshot.buffer = buffer;
                 Some(Step::Tick { missed })
             }
             ReadOutcome::Torn => Some(Step::Torn),
@@ -462,9 +489,22 @@ struct Span {
     len: usize,
 }
 
+/// What a connection publishes, as recorders need it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveLayout {
+    pub vars: Vec<VarHeader>,
+    /// Bytes per data buffer row.
+    pub buf_len: usize,
+    pub tick_rate: i32,
+    /// Size of the session info area.
+    pub session_info_capacity: usize,
+    pub sdk_version: i32,
+}
+
 /// Per-connection copy plan.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Plan {
+    layout: LiveLayout,
     spans: Vec<Span>,
     buf_offsets: [usize; MAX_BUFS],
     num_buf: usize,
@@ -500,8 +540,16 @@ impl Plan {
             .map_err(|_| LayoutError::OutOfRange { field: "bufLen" })?;
 
         snapshot.fields.clear();
-        let mut spans = Vec::with_capacity(vars.len());
+        let mut spans = Vec::with_capacity(vars.len().max(1));
         let mut total = 0;
+        if vars.whole_row {
+            spans.push(Span {
+                src: 0,
+                dst: 0,
+                len: buf_len,
+            });
+            total = buf_len;
+        }
         for name in &vars.names {
             // A variable with an unknown type or a bad range is unavailable rather than fatal.
             let field = headers
@@ -532,12 +580,20 @@ impl Plan {
         }
         let tick_rate = u64::try_from(header.tick_rate)
             .map_err(|_| LayoutError::OutOfRange { field: "tickRate" })?;
+        let session_info = header.session_info_range(available)?;
         Ok(Self {
+            layout: LiveLayout {
+                vars: headers,
+                buf_len,
+                tick_rate: header.tick_rate,
+                session_info_capacity: session_info.len(),
+                sdk_version: header.ver,
+            },
             spans,
             buf_offsets,
             num_buf,
             key: LayoutKey::of(header),
-            session_info: header.session_info_range(available)?,
+            session_info,
             tick_period: Duration::from_nanos(1_000_000_000 / tick_rate.max(1)),
         })
     }
@@ -561,7 +617,11 @@ impl Source for Mapping {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ReadOutcome {
-    New { tick: i32, missed: u32 },
+    New {
+        tick: i32,
+        missed: u32,
+        buffer: usize,
+    },
     Empty,
     Torn,
 }
@@ -612,7 +672,11 @@ fn read_next<S: Source>(src: &S, plan: &Plan, last: Option<i32>, out: &mut [u8])
                 }
                 _ => 0,
             };
-            return ReadOutcome::New { tick, missed };
+            return ReadOutcome::New {
+                tick,
+                missed,
+                buffer: buf,
+            };
         }
     }
     ReadOutcome::Torn
@@ -747,6 +811,45 @@ mod tests {
         assert_eq!(r.snapshot.f32(r.laps, 72), None);
         assert_eq!(r.snapshot.f64(r.throttle, 0), None, "type mismatch");
         assert_eq!(r.step(), Step::Idle);
+    }
+
+    #[test]
+    fn whole_rows_and_layout_for_recorders() {
+        let names = names();
+        let mut publisher = publisher(&names);
+        let config = ReaderConfig {
+            retry_interval: Duration::from_millis(1),
+            idle_timeout: Duration::from_millis(20),
+        };
+        let mut reader = LiveReader::new(names.clone(), VarSet::whole_row(), config);
+        let mut snapshot = Snapshot::new();
+        assert_eq!(reader.layout(), None);
+        assert_eq!(reader.step(&mut snapshot).expect("steps"), Step::Connected);
+        let layout = reader.layout().expect("connected").clone();
+        assert_eq!(layout.vars, sim_vars());
+        assert_eq!(
+            (
+                layout.buf_len,
+                layout.tick_rate,
+                layout.session_info_capacity
+            ),
+            (ROW, 60, 4096)
+        );
+        assert_eq!(layout.sdk_version, crate::layout::SDK_VERSION);
+        let published = row(3.0, 0.75);
+        let tick = publisher.publish(&published).expect("publishes");
+        assert_eq!(
+            reader.step(&mut snapshot).expect("steps"),
+            Step::Tick { missed: 0 }
+        );
+        assert_eq!(snapshot.bytes(), &published[..], "the whole row");
+        assert_eq!(snapshot.tick(), tick);
+        let first = snapshot.buffer();
+        assert!(first < 3);
+        let second = publisher.publish(&row(4.0, 0.5)).expect("publishes");
+        reader.step(&mut snapshot).expect("steps");
+        assert_eq!(snapshot.tick(), second);
+        assert_ne!(snapshot.buffer(), first, "the sim rotates its buffers");
     }
 
     #[test]
@@ -900,6 +1003,13 @@ mod tests {
 
     fn fake_plan() -> Plan {
         Plan {
+            layout: LiveLayout {
+                vars: Vec::new(),
+                buf_len: 4,
+                tick_rate: 60,
+                session_info_capacity: 0,
+                sdk_version: 2,
+            },
             spans: vec![Span {
                 src: 0,
                 dst: 0,
@@ -926,7 +1036,8 @@ mod tests {
             read_next(&source, &fake_plan(), Some(9), &mut out),
             ReadOutcome::New {
                 tick: 10,
-                missed: 0
+                missed: 0,
+                buffer: 0
             },
             "oldest unseen buffer is read first and was not touched"
         );
@@ -939,7 +1050,8 @@ mod tests {
             read_next(&source, &fake_plan(), Some(11), &mut out),
             ReadOutcome::New {
                 tick: 13,
-                missed: 1
+                missed: 1,
+                buffer: 2
             },
             "second attempt reads the rewritten buffer"
         );

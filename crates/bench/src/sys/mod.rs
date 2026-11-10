@@ -4,6 +4,7 @@
 use std::fmt;
 
 use windows::Win32::Foundation::{CloseHandle, ERROR_SUCCESS, FILETIME, HANDLE, WAIT_OBJECT_0};
+use windows::Win32::System::Console::{CTRL_BREAK_EVENT, CTRL_C_EVENT, SetConsoleCtrlHandler};
 use windows::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
 };
@@ -263,6 +264,26 @@ impl Drop for Job {
         // SAFETY: closes the job handle owned by `self`, once; this terminates processes still in the job.
         let _ = unsafe { CloseHandle(self.handle) };
     }
+}
+
+static STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+unsafe extern "system" fn on_console_control(kind: u32) -> windows::core::BOOL {
+    if kind == CTRL_C_EVENT || kind == CTRL_BREAK_EVENT {
+        STOP.store(true, std::sync::atomic::Ordering::Relaxed);
+        return true.into();
+    }
+    false.into()
+}
+
+/// Makes Ctrl+C and Ctrl+Break set the returned flag instead of ending the process, so a long task can finish
+/// its files.
+pub fn stop_on_ctrl_c() -> Result<&'static std::sync::atomic::AtomicBool, SysError> {
+    // SAFETY: the handler is a plain function that only stores to a static atomic; it stays valid for the
+    // process's lifetime.
+    unsafe { SetConsoleCtrlHandler(Some(on_console_control), true) }
+        .map_err(win("SetConsoleCtrlHandler"))?;
+    Ok(&STOP)
 }
 
 /// CPU time of this process, in 100 ns units.

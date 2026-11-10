@@ -7,18 +7,20 @@
 //! - [`collect`]: samples an overlay's whole process tree (CPU, memory, GPU, DWM) into raw CSV.
 //! - [`runner`]: measurement series from a plan: replay, launch, warm-up, collection, shutdown, interleaved
 //!   baselines, and a warning when known overlays run.
+//! - `record`: live recorder of SDK shared memory into captures (Windows).
 //! - [`report`]: processed metrics per run and a report per series with confidence intervals, baseline
 //!   differences, and budget checks.
 //! - [`paths`]: where bench output goes.
 //!
 //! Planned modules:
-//! - `record`: live shared-memory recorder (M2).
 //! - `anonymize`: fixture anonymizer for driver names, IDs, and team names (M2).
 //! - `tier_b`: replay controller over broadcast messages and PresentMon capture (M5).
 
 pub mod capture;
 pub mod collect;
 pub mod paths;
+#[cfg(windows)]
+pub mod record;
 pub mod replay;
 pub mod report;
 pub mod runner;
