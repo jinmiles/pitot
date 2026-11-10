@@ -5,7 +5,8 @@ use pitot_bench::replay::{self, FrameSource, IbtSource, IrdtSource, ReplayOption
 
 const USAGE: &str = "usage:
   pitot-bench replay (--irdt <file> | --ibt <file>) [--loop] [--speed <factor>] [--seconds <n>]
-  pitot-bench collect (--pid <n> | --name <exe>...) [--seconds <n>] [--interval-ms <n>] [--out <dir>]";
+  pitot-bench collect (--pid <n> | --name <exe>...) [--seconds <n>] [--interval-ms <n>] [--out <dir>]
+  pitot-bench run <plan.toml> [--dry-run]";
 
 #[derive(Debug, Default)]
 struct ReplayArgs {
@@ -191,11 +192,59 @@ fn collect(_: CollectArgs) -> Result<(), Box<dyn std::error::Error>> {
     Err("collect needs Windows".into())
 }
 
+#[derive(Debug, PartialEq)]
+struct RunArgs {
+    plan: String,
+    dry_run: bool,
+}
+
+fn parse_run(args: impl Iterator<Item = String>) -> Result<RunArgs, String> {
+    let (mut plan, mut dry_run) = (None, false);
+    for arg in args {
+        match arg.as_str() {
+            "--dry-run" => dry_run = true,
+            other if other.starts_with("--") => return Err(format!("unknown argument `{other}`")),
+            _ if plan.is_some() => return Err("give one plan file".to_owned()),
+            _ => plan = Some(arg),
+        }
+    }
+    let plan = plan.ok_or("give a plan file")?;
+    Ok(RunArgs { plan, dry_run })
+}
+
+#[cfg(windows)]
+fn run(args: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
+    use pitot_bench::runner::{self, Outcome, Plan};
+    let text = std::fs::read_to_string(&args.plan)
+        .map_err(|e| format!("cannot read {}: {e}", args.plan))?;
+    let plan = Plan::parse(&text).map_err(|e| format!("{}: {e}", args.plan))?;
+    let options = runner::Options {
+        plan_file: args.plan.into(),
+        dry_run: args.dry_run,
+    };
+    let record = runner::execute(&plan, &options)?;
+    if !args.dry_run {
+        let measured = record
+            .runs
+            .iter()
+            .filter(|r| matches!(r.outcome, Some(Outcome::Measured { .. })))
+            .count();
+        eprintln!("{measured} of {} runs measured", record.runs.len());
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn run(_: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
+    Err("run needs Windows".into())
+}
+
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
     let result = match args.next().as_deref() {
         Some("replay") => parse_replay(args).map_err(Into::into).and_then(replay),
         Some("collect") => parse_collect(args).map_err(Into::into).and_then(collect),
+        Some("run") => parse_run(args).map_err(Into::into).and_then(run),
         _ => Err(USAGE.into()),
     };
     match result {
@@ -236,5 +285,20 @@ mod tests {
         assert!(collect_args(&["--pid", "1", "--name", "a"]).is_err());
         assert!(collect_args(&["--pid", "1", "--interval-ms", "10"]).is_err());
         assert!(collect_args(&["--pid", "1", "--seconds", "0"]).is_err());
+    }
+
+    #[test]
+    fn run_arguments() {
+        let run = |args: &[&str]| parse_run(args.iter().map(|a| (*a).to_owned()));
+        assert_eq!(
+            run(&["plan.toml", "--dry-run"]),
+            Ok(RunArgs {
+                plan: "plan.toml".into(),
+                dry_run: true
+            })
+        );
+        assert!(run(&[]).is_err());
+        assert!(run(&["a.toml", "b.toml"]).is_err());
+        assert!(run(&["a.toml", "--fast"]).is_err());
     }
 }

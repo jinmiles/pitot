@@ -1,11 +1,16 @@
-//! Win32 calls without a safe wrapper: process enumeration, per-process times and memory, PDH counters, the
-//! clock, and registry strings. All of this crate's `unsafe` lives in this module.
+//! Win32 calls without a safe wrapper: process enumeration, per-process times and memory, process termination,
+//! job objects, PDH counters, the clock, and registry strings. All of this crate's `unsafe` lives in this module.
 
 use std::fmt;
 
 use windows::Win32::Foundation::{CloseHandle, ERROR_SUCCESS, FILETIME, HANDLE, WAIT_OBJECT_0};
 use windows::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
+};
+use windows::Win32::System::JobObjects::{
+    AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_BREAKAWAY_OK,
+    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+    JobObjectExtendedLimitInformation, SetInformationJobObject, TerminateJobObject,
 };
 use windows::Win32::System::Performance::{
     PDH_CSTATUS_NEW_DATA, PDH_CSTATUS_VALID_DATA, PDH_FMT, PDH_FMT_COUNTERVALUE,
@@ -22,7 +27,8 @@ use windows::Win32::System::Registry::{
 use windows::Win32::System::SystemInformation::{GetLocalTime, GetSystemTimeAsFileTime};
 use windows::Win32::System::Threading::{
     ALL_PROCESSOR_GROUPS, GetActiveProcessorCount, GetCurrentProcess, GetProcessTimes, OpenProcess,
-    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_VM_READ, WaitForSingleObject,
+    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE, PROCESS_VM_READ,
+    TerminateProcess, WaitForSingleObject,
 };
 use windows::Win32::System::WindowsProgramming::QueryProcessCycleTime;
 use windows::core::{HSTRING, PCWSTR};
@@ -178,6 +184,83 @@ impl Process {
 impl Drop for Process {
     fn drop(&mut self) {
         // SAFETY: closes the handle owned by `self`, once.
+        let _ = unsafe { CloseHandle(self.handle) };
+    }
+}
+
+/// Terminates a process if it is still the one created at `created` (a FILETIME value), so a reused PID is left
+/// alone. Returns whether it was terminated.
+pub fn terminate(pid: u32, created: u64) -> Result<bool, SysError> {
+    // SAFETY: opens a handle that is closed below.
+    let handle = unsafe {
+        OpenProcess(
+            PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION,
+            false,
+            pid,
+        )
+    }
+    .map_err(win("OpenProcess"))?;
+    let result = times_of(handle).and_then(|times| {
+        if times.created != created {
+            return Ok(false);
+        }
+        // SAFETY: `handle` has terminate rights.
+        unsafe { TerminateProcess(handle, 1) }.map_err(win("TerminateProcess"))?;
+        Ok(true)
+    });
+    // SAFETY: closes the handle opened above, once.
+    let _ = unsafe { CloseHandle(handle) };
+    result
+}
+
+/// A job object that terminates its processes when it is closed, so processes a series started do not outlive
+/// it. Processes in the job may still start children outside it (breakaway is allowed), which keeps apps that ask
+/// for breakaway working.
+#[derive(Debug)]
+pub struct Job {
+    handle: HANDLE,
+}
+
+impl Job {
+    pub fn new() -> Result<Self, SysError> {
+        // SAFETY: creates an unnamed job; the handle is owned by the returned value and closed in Drop.
+        let handle =
+            unsafe { CreateJobObjectW(None, PCWSTR::null()) }.map_err(win("CreateJobObjectW"))?;
+        let job = Self { handle };
+        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        limits.BasicLimitInformation.LimitFlags =
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_BREAKAWAY_OK;
+        // SAFETY: `limits` is the structure this information class expects, with its exact size.
+        unsafe {
+            SetInformationJobObject(
+                job.handle,
+                JobObjectExtendedLimitInformation,
+                (&raw const limits).cast(),
+                size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            )
+        }
+        .map_err(win("SetInformationJobObject"))?;
+        Ok(job)
+    }
+
+    /// Adds a child process. Processes it starts from then on join the job too.
+    pub fn assign(&self, child: &std::process::Child) -> Result<(), SysError> {
+        use std::os::windows::io::AsRawHandle;
+        // SAFETY: the child's handle stays open while `child` is borrowed and has the rights CreateProcess grants.
+        unsafe { AssignProcessToJobObject(self.handle, HANDLE(child.as_raw_handle())) }
+            .map_err(win("AssignProcessToJobObject"))
+    }
+
+    /// Terminates every process in the job.
+    pub fn terminate(&self) -> Result<(), SysError> {
+        // SAFETY: the job handle is open and has all access.
+        unsafe { TerminateJobObject(self.handle, 1) }.map_err(win("TerminateJobObject"))
+    }
+}
+
+impl Drop for Job {
+    fn drop(&mut self) {
+        // SAFETY: closes the job handle owned by `self`, once; this terminates processes still in the job.
         let _ = unsafe { CloseHandle(self.handle) };
     }
 }
