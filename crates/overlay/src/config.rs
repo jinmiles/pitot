@@ -315,6 +315,25 @@ mod tests {
     }
 
     #[test]
+    fn benchmark_configurations_parse() {
+        let four =
+            Config::parse(include_str!("../../../benchmarks/pitot/four.toml")).expect("four");
+        let enabled = |c: &Config| c.widgets().iter().filter(|(_, w)| w.enabled).count();
+        assert_eq!(enabled(&four), 4);
+        assert!(!four.widgets.status.enabled);
+        let defaults = Widgets::default();
+        assert_eq!(
+            four.widgets.inputs, defaults.inputs,
+            "default positions and rates"
+        );
+        assert_eq!(four.widgets.standings, defaults.standings);
+        let inputs =
+            Config::parse(include_str!("../../../benchmarks/pitot/inputs.toml")).expect("inputs");
+        assert_eq!(enabled(&inputs), 1);
+        assert_eq!(inputs.widgets.inputs, defaults.inputs);
+    }
+
+    #[test]
     fn missing_fields_keep_defaults() {
         let config = Config::parse("[widgets.fuel]\nx = 10\nmonitor = 2\n").expect("parses");
         assert_eq!(

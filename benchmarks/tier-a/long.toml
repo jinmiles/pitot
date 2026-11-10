@@ -1,0 +1,26 @@
+# Tier A, 60 minutes: memory growth and input sample gaps over a long session (scenario S3). The ten-minute race
+# capture loops, so the overlay also sees a disconnect and reconnect every ten minutes. Its log then shows the
+# input counters at every loop (docs/configuration.md).
+#
+#   pitot-bench run benchmarks/tier-a/long.toml
+
+scenario = "tier-a-long"
+repeats = 1
+warmup_s = 60
+measure_s = 3600
+cooldown_s = 10
+interval_ms = 1000
+
+[replay]
+irdt = "data/irdashies/ai-race-10min.irdt"
+
+[budget]
+cpu_pct = 0.2
+private_mb = 30
+private_growth_mb_per_h = 0.1
+dwm_no_increase = true
+
+[[app]]
+name = "pitot-four"
+command = "target/release/pitot-overlay.exe"
+files = [{ from = "benchmarks/pitot/four.toml", to = "%APPDATA%/Pitot/config.toml" }]

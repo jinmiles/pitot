@@ -1,0 +1,22 @@
+# Tier A, sim not running: Pitot with the four reference widgets while nothing publishes SDK shared memory, as
+# when the overlay starts with Windows and waits for the sim.
+#
+#   pitot-bench run benchmarks/tier-a/idle.toml
+
+scenario = "tier-a-idle"
+repeats = 3
+warmup_s = 30
+measure_s = 120
+cooldown_s = 10
+interval_ms = 1000
+
+[budget]
+cpu_pct = 0.2
+cpu_peak_ms_per_s = 10
+private_mb = 30
+dwm_no_increase = true
+
+[[app]]
+name = "pitot-four"
+command = "target/release/pitot-overlay.exe"
+files = [{ from = "benchmarks/pitot/four.toml", to = "%APPDATA%/Pitot/config.toml" }]

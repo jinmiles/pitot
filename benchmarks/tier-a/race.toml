@@ -1,0 +1,34 @@
+# Tier A, race: the public ten-minute AI race capture (40 cars, several classes, race start) replayed into SDK
+# shared memory. Pitot with the input trace alone and with the four reference widgets, interleaved with
+# baselines. Warm-up and measurement fit in one pass of the capture, so every run sees the same part of the race.
+#
+#   pitot-bench run benchmarks/tier-a/race.toml
+#   pitot-bench report bench-results/tier-a-race/series/<series-id>.json
+
+scenario = "tier-a-race"
+repeats = 5
+warmup_s = 60
+measure_s = 180
+cooldown_s = 10
+interval_ms = 1000
+
+[replay]
+# SHA-256 6e23e8abab49c1a0ae7c8f6d1f298d31145a6189d3029b8ca540aad56a22b168, see docs/replay.md.
+irdt = "data/irdashies/ai-race-10min.irdt"
+
+# The performance budget of the project plan, for the reference configuration.
+[budget]
+cpu_pct = 0.2
+cpu_peak_ms_per_s = 10
+private_mb = 30
+dwm_no_increase = true
+
+[[app]]
+name = "pitot-inputs"
+command = "target/release/pitot-overlay.exe"
+files = [{ from = "benchmarks/pitot/inputs.toml", to = "%APPDATA%/Pitot/config.toml" }]
+
+[[app]]
+name = "pitot-four"
+command = "target/release/pitot-overlay.exe"
+files = [{ from = "benchmarks/pitot/four.toml", to = "%APPDATA%/Pitot/config.toml" }]
