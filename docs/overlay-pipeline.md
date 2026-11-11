@@ -67,8 +67,12 @@ So the overlay shows a [capture](capture-format.md) of the session instead:
 2. Each tick, the data thread reads `ReplaySessionNum` and `ReplaySessionTime` and moves the capture there. The
    frame is copied into the live layout (`pitot_irsdk::live::RowMap`: variables by name, missing ones zero), and
    the session info in effect at that frame is parsed as usual, so widgets cannot tell it from live data.
-   - Playing forward (any speed up to 1 s per tick) adds every frame passed to the input trace.
-   - Pausing or slow motion between two frames adds nothing.
+   - While the replay plays (`ReplayPlaySpeed` not 0, at any speed), the input trace gets one sample per tick:
+     the frame at the replayed moment, so it scrolls as evenly as live. The sim's replay clock is uneven: in
+     the home PC capture it moved 0.8 to 1.4 frames per tick at 1x (190 of 217 ticks moved exactly one), so
+     adding the frames passed would add none on some ticks and two on others. At 4x the trace shows every
+     fourth frame; in slow motion a frame repeats. A sim without `ReplayPlaySpeed` gets every frame passed.
+   - Paused (`ReplayPlaySpeed` 0) adds nothing.
    - Going back shows the frame there; the trace restarts when the replay plays forward again.
    - A jump forward, a new session, or the start of a replay restarts the trace with the 4.3 s (256 samples)
      before the moment. A restart is a new connection for the render thread, so widgets reset.

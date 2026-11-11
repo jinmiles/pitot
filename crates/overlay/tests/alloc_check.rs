@@ -180,6 +180,7 @@ fn playing_a_capture_does_not_allocate_per_tick() {
             VarHeader::new(VarType::Double, 8, 1, "ReplaySessionTime").expect("valid"),
             VarHeader::new(VarType::Int, 16, 1, "ReplaySessionNum").expect("valid"),
             VarHeader::new(VarType::Bool, 20, 1, "IsReplayPlaying").expect("valid"),
+            VarHeader::new(VarType::Int, 24, 1, "ReplayPlaySpeed").expect("valid"),
             VarHeader::new(VarType::Float, 32, 72, "CarIdxLapDistPct").expect("valid"),
         ],
         buf_len: REPLAY_ROW,
@@ -199,6 +200,7 @@ fn playing_a_capture_does_not_allocate_per_tick() {
 
     let mut row = [0u8; REPLAY_ROW];
     row[20] = 1;
+    row[24..28].copy_from_slice(&1i32.to_le_bytes());
     fn cycle(
         publisher: &mut Publisher,
         view: &mut View,
@@ -232,10 +234,7 @@ fn playing_a_capture_does_not_allocate_per_tick() {
     }
     COUNTING.store(false, Ordering::Relaxed);
 
-    assert!(
-        samples >= 590,
-        "every replayed frame became a sample: {samples}"
-    );
+    assert!(samples >= 590, "one sample per replayed tick: {samples}");
     assert_eq!(
         view.source(),
         Some(Source::Capture { first: true }),
