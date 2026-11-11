@@ -22,6 +22,12 @@ pitot-bench record [--out <file.ptc>] [--seconds <n>] [--level <n>]
   such as another car or a session type with other variables, finishes the file and starts the next one with
   `-2`, `-3`, ... before the extension.
 
+## Replays in the overlay
+
+The overlay plays a capture of the session while the sim plays a replay of it. Record from the folder that holds
+`pitot-overlay.exe` (so the capture lands in its `captures` folder), or move captures to
+`%APPDATA%\Pitot\captures`. See [Replays](configuration.md#replays).
+
 ## Checking a recording
 
 ```text
