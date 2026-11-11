@@ -27,11 +27,11 @@ use windows::Win32::System::Registry::{
 };
 use windows::Win32::System::SystemInformation::{GetLocalTime, GetSystemTimeAsFileTime};
 use windows::Win32::System::Threading::{
-    ALL_PROCESSOR_GROUPS, GetActiveProcessorCount, GetCurrentProcess, GetProcessTimes, OpenProcess,
-    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE, PROCESS_VM_READ,
-    TerminateProcess, WaitForSingleObject,
+    ALL_PROCESSOR_GROUPS, GetActiveProcessorCount, GetCurrentProcess, GetCurrentThread,
+    GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+    PROCESS_TERMINATE, PROCESS_VM_READ, TerminateProcess, WaitForSingleObject,
 };
-use windows::Win32::System::WindowsProgramming::QueryProcessCycleTime;
+use windows::Win32::System::WindowsProgramming::{QueryProcessCycleTime, QueryThreadCycleTime};
 use windows::core::{HSTRING, PCWSTR};
 
 use crate::collect::ProcessEntry;
@@ -290,6 +290,24 @@ pub fn stop_on_ctrl_c() -> Result<&'static std::sync::atomic::AtomicBool, SysErr
 pub fn current_process_cpu() -> Result<u64, SysError> {
     // SAFETY: the pseudo handle for the current process is always valid and needs no closing.
     times_of(unsafe { GetCurrentProcess() }).map(|t| t.cpu)
+}
+
+/// CPU cycles of this process, including exited threads.
+pub fn current_process_cycles() -> Result<u64, SysError> {
+    let mut cycles = 0;
+    // SAFETY: the pseudo handle for the current process is always valid; `cycles` is a valid out pointer.
+    unsafe { QueryProcessCycleTime(GetCurrentProcess(), &mut cycles) }
+        .map_err(win("QueryProcessCycleTime"))?;
+    Ok(cycles)
+}
+
+/// CPU cycles the calling thread has used.
+pub fn current_thread_cycles() -> Result<u64, SysError> {
+    let mut cycles = 0;
+    // SAFETY: the pseudo handle for the current thread is always valid; `cycles` is a valid out pointer.
+    unsafe { QueryThreadCycleTime(GetCurrentThread(), &mut cycles) }
+        .map_err(win("QueryThreadCycleTime"))?;
+    Ok(cycles)
 }
 
 /// Logical processors across all processor groups.

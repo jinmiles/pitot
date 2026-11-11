@@ -36,7 +36,7 @@ One row per sample. Empty fields mean the source was not available.
 | `t_s` | s | Time since the baseline sample | Monotonic clock |
 | `dt_s` | s | Time this row covers | Monotonic clock |
 | `processes` | count | Live processes in the tree | Process list (Toolhelp) |
-| `cpu_ms` | ms | CPU time (kernel and user) of the tree in this row | `GetProcessTimes` |
+| `cpu_ms` | ms | CPU time (kernel and user) of the tree in this row, in clock ticks | `GetProcessTimes` |
 | `cpu_mcycles` | 10^6 cycles | CPU cycles of the tree in this row | `QueryProcessCycleTime` |
 | `cpu_pct` | % | `cpu_ms` over `dt_s` and all logical processors | Derived |
 | `private_bytes` | bytes | Private bytes of the live processes | `GetProcessMemoryInfo` (`PrivateUsage`) |
@@ -47,13 +47,24 @@ One row per sample. Empty fields mean the source was not available.
 | `gpu_shared_bytes` | bytes | Shared system memory held by the GPU for the tree | PDH `GPU Process Memory` |
 | `dwm_cpu_ms` | ms | CPU time of the desktop compositor (`dwm.exe`) | PDH `Process(dwm)` |
 | `dwm_gpu_pct` | % | Busiest GPU engine type of `dwm.exe` | PDH `GPU Engine` |
-| `collector_cpu_ms` | ms | CPU time of the collector itself | `GetProcessTimes` |
+| `collector_cpu_ms` | ms | CPU time of the collector itself, in clock ticks | `GetProcessTimes` |
+| `collector_mcycles` | 10^6 cycles | CPU cycles of the collector itself | `QueryProcessCycleTime` |
 
 Notes on the sources:
 
-- **CPU time** is kept by the OS per clock tick (15.6 ms by default), so single rows are multiples of that and
-  noisy for a light process. Means over a run are accurate. Cycles are exact per row but are not a time: the clock
-  frequency changes with load and turbo.
+- **CPU time comes from cycles.** `QueryProcessCycleTime` counts the cycles a process's threads run on a
+  counter that has a fixed rate on current x64 CPUs (the invariant time-stamp counter, at the nominal clock speed),
+  whatever the actual clock speed. At the start of every run the collector measures that rate: five 10 ms busy
+  loops on its own thread against the monotonic clock, keeping the highest, since being preempted only lowers it.
+  Cycles over the rate are CPU time, exact per row. The rows keep the raw counts; the summary and the
+  [report](report.md) do the conversion. On the lab PC (i7-9700, nominal 3.0 GHz) the rate is 2,990 to 3,000 MHz
+  with one core busy and with all eight busy.
+- **Clock ticks** are how the OS counts CPU time (`GetProcessTimes`, the `cpu_ms` columns): in whole ticks of
+  15.6 ms by default. A one-second row of a light process reads 0, 15.6, or 31.2 ms, and a process that runs for
+  a moment at the same point of every tick is counted a whole tick every time, or never. On the lab PC, three
+  120 s runs of the same replay gave 58.0 to 58.8 Mcycles/s but 18.4 to 23.7 ms/s in clock ticks; an overlay
+  waking once per second showed no tick at all over 120 s; and the collector itself, which wakes once per second,
+  read exactly one tick (15.6 ms) per row while its cycles came to 7.6 ms/s. The columns are kept for comparison.
 - **Per-process values come from handles keyed by PID.** PDH `Process` instances are named by executable
   (`app`, `app#1`, ...), and those names shift as processes start and exit, so series of same-named processes can
   swap. Handles avoid that.
@@ -74,16 +85,19 @@ Written at the start and completed at the end:
 
 - `tool`, `version`, `target` (`{"pid": n}` or `{"names": [...]}`), `started_local`, `interval_ms`,
   `requested_seconds`.
-- `machine`: CPU name, logical processors, and the OS product name, display version, build, and update build
-  revision from the registry. Windows 11 still reports a `Windows 10` product name there; build 22000 or later is
+- `machine`: CPU name, logical processors, the measured cycle counter rate (`cycle_rate_mhz`), and the OS
+  product name, display version, build, and update build revision from the registry. Windows 11 still reports a `Windows 10` product name there; build 22000 or later is
   Windows 11.
 - `sources`: whether GPU and DWM counters were available.
 - `unreadable_processes`: tree members that could not be opened.
 - `summary`: sample count and duration, maximum process count, time-weighted means of CPU (percent and ms/s),
   the highest per-row CPU, private bytes at the first and last row and at most, GPU and DWM means, and the
-  collector's own CPU.
+  collector's own CPU. CPU comes from cycles at `cycle_rate_mhz`, also recorded in the summary; without a
+  measured rate it comes from clock ticks and the summary has no rate.
 
 ## Collector overhead
 
 The collector's own CPU is recorded in every row. It grows with the size of the tree and with the number of GPU
-counter instances on the system: about 3.6 ms/s for a single-process target on the lab PC.
+counter instances on the system: 7.6 ms/s (from cycles) for a single-process target on the lab PC, most of it
+reading the per-process GPU engine counters. It runs in its own process, so it is not part of any app's
+numbers.

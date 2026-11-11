@@ -25,9 +25,11 @@ Means are weighted by each sample's duration.
 | Metric | Meaning |
 |---|---|
 | `cpu_pct` | CPU of the process tree as a percentage of all logical processors |
-| `cpu_ms_per_s` | CPU time per second of wall time (10 ms/s is 1% of one core) |
-| `cpu_peak_ms_per_s` | The busiest sample's CPU, estimated from its cycles (see below) |
+| `cpu_ms_per_s` | CPU time per second of wall time (10 ms/s is 1% of one core), from cycles (see below) |
+| `cpu_tick_ms_per_s` | The same as the OS counts it, in clock ticks, for comparison |
+| `cpu_peak_ms_per_s` | The busiest sample's CPU |
 | `cpu_mcycles_per_s` | CPU cycles per second, in millions |
+| `cycle_rate_mhz` | The cycle counter rate the run's collector measured |
 | `private_mb_first`, `_last`, `_max`, `_mean` | Private bytes, in MB of 2^20 bytes |
 | `private_growth_mb_per_h` | Least squares slope of private bytes over the run |
 | `working_set_mb_mean` | Working set |
@@ -36,10 +38,16 @@ Means are weighted by each sample's duration.
 | `dwm_cpu_ms_per_s`, `dwm_gpu_pct` | The desktop compositor |
 | `collector_cpu_ms_per_s` | The collector's own CPU time |
 
-**The busiest sample.** Windows counts CPU time in clock ticks of 15.6 ms, so a one-second sample of a light
-process reads 0, 15.6, or 31.2 ms, and no sample can show a spike smaller than a tick. Cycle counts are exact per
-sample. The report converts each sample's cycles to time at the run's average CPU time per cycle
-(`total cpu_ms / total cpu_mcycles`). Clock speed changes within a run make this an estimate.
+**CPU time.** CPU time is the process tree's cycles over the cycle counter rate the [collector](collector.md)
+measured at the start of the run, so every sample is exact, the busiest one included. Windows' own count, in clock
+ticks of 15.6 ms, rounds every sample to whole ticks: a one-second sample of a light process reads 0, 15.6, or
+31.2 ms, and a process that wakes at a fixed point of the tick can be counted every time or never. It is shown as
+"CPU time, clock ticks" for comparison.
+
+Runs collected before the rate was measured have no `cycle_rate_mhz`. For them CPU time is the clock-tick count,
+and the busiest sample is that sample's cycles at the run's average CPU time per cycle (`total cpu_ms / total
+cpu_mcycles`). The report's notes say how many runs that applies to. The collector's own CPU follows the same
+rule.
 
 **Growth.** A slope over a three-minute run mostly shows start-up allocations and caches filling. Memory growth
 budgets need long runs, such as the 60-minute scenario.

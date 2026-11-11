@@ -41,9 +41,13 @@ pub fn markdown(report: &Report) -> String {
     let plan = &series.plan;
     let _ = writeln!(out, "# {} series {}\n", report.scenario, series.series_id);
     let machine = &report.machine;
+    let cycle_rate = machine
+        .cycle_rate_mhz
+        .map(|rate| format!(", cycle counter {rate:.0} MHz"))
+        .unwrap_or_default();
     let _ = writeln!(
         out,
-        "- Machine: {}, {} logical processors; {}",
+        "- Machine: {}, {} logical processors{cycle_rate}; {}",
         machine.cpu.as_deref().unwrap_or("unknown CPU"),
         machine.logical_processors,
         machine.os()
@@ -182,12 +186,24 @@ and inconclusive otherwise. Highs and peaks use the worst run.\n"
         let _ = writeln!(out, "| {} | {} | {} |", run.position, run.app, run.status);
     }
 
+    let ticks_only = report.results.iter().map(|r| r.tick_runs).sum::<usize>();
+    let cpu_note = if ticks_only == 0 {
+        "- CPU time is each process's CPU cycles at the cycle counter's rate, which the collector measures at the \
+start of every run; the counter runs at a fixed rate whatever the clock speed. The OS's own count, in clock ticks \
+of 15.6 ms by default, is shown for comparison: it rounds every sample to whole ticks.\n"
+            .to_owned()
+    } else {
+        format!(
+            "- CPU time is each process's CPU cycles at the cycle counter's rate, which the collector measures at the \
+start of every run. {ticks_only} runs were collected without a measured rate; their CPU time is counted in clock ticks \
+(15.6 ms by default) and their busiest sample is estimated from cycles at the run's average CPU time per cycle.\n"
+        )
+    };
     let _ = writeln!(out, "\n## Notes\n");
     let _ = writeln!(
         out,
         "- Process values are summed over each app's process tree. MB is 2^20 bytes.\n\
-- CPU time is counted in clock ticks (15.6 ms by default); means over a run are accurate. The busiest sample is \
-estimated from that sample's CPU cycles at the run's average CPU time per cycle.\n\
+{cpu_note}\
 - Private bytes growth is the least squares slope over each run; over short runs it reflects start-up and \
 caching more than leaks.\n\
 - DWM and the GPU belong to the whole desktop, so they are compared against the baselines. The collector's own \

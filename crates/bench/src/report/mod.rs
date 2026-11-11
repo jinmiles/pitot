@@ -54,6 +54,13 @@ pub const METRICS: &[Metric] = &[
         value: |m| Some(m.cpu_ms_per_s),
     },
     Metric {
+        key: "cpu_tick_ms_per_s",
+        label: "CPU time, clock ticks",
+        unit: "ms/s",
+        scope: Scope::App,
+        value: |m| m.cpu_tick_ms_per_s,
+    },
+    Metric {
         key: "cpu_peak_ms_per_s",
         label: "CPU, busiest sample",
         unit: "ms/s",
@@ -144,6 +151,9 @@ pub const METRICS: &[Metric] = &[
 pub struct Machine {
     pub cpu: Option<String>,
     pub logical_processors: u32,
+    /// The cycle counter rate the first measured run's collector found.
+    #[serde(default)]
+    pub cycle_rate_mhz: Option<f64>,
     pub os_product: Option<String>,
     pub os_display_version: Option<String>,
     pub os_build: Option<String>,
@@ -189,6 +199,9 @@ pub struct AppResult {
     pub app: String,
     pub runs: usize,
     pub measured: usize,
+    /// Measured runs whose CPU time is counted in clock ticks, collected before the cycle rate was measured.
+    #[serde(default)]
+    pub tick_runs: usize,
     /// Mean over measured runs, by metric key.
     pub metrics: BTreeMap<String, Estimate>,
     /// Desktop-wide metrics minus the baselines, by metric key; empty for the baseline itself.
@@ -333,6 +346,7 @@ pub fn build(series: SeriesRecord, machine: Machine, measured: &[(String, RunMet
                 app: app.clone(),
                 runs: series.runs.iter().filter(|r| &r.app == app).count(),
                 measured: runs.len(),
+                tick_runs: runs.iter().filter(|m| m.cycle_rate_mhz.is_none()).count(),
                 metrics,
                 vs_baseline,
             }
@@ -540,8 +554,10 @@ mod tests {
             samples: 180,
             seconds: 180.0,
             processes_max: 1,
+            cycle_rate_mhz: Some(3000.0),
             cpu_pct,
             cpu_ms_per_s: cpu_pct * 80.0,
+            cpu_tick_ms_per_s: Some(cpu_pct * 80.0),
             cpu_mcycles_per_s: cpu_pct * 300.0,
             cpu_peak_ms_per_s: Some(cpu_pct * 200.0),
             private_mb_first: private,
@@ -625,6 +641,7 @@ command = "heavy.exe"
         let machine = Machine {
             cpu: Some("Test CPU".into()),
             logical_processors: 8,
+            cycle_rate_mhz: Some(3000.0),
             os_product: Some("Windows 10 Pro".into()),
             os_display_version: Some("25H2".into()),
             os_build: Some("26300".into()),

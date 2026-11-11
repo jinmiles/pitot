@@ -1,7 +1,8 @@
 //! Collector: samples an overlay's whole process tree once per interval and writes the raw samples.
 //!
 //! CPU time, cycles, and memory come from process handles keyed by PID, so processes with the same name never
-//! mix. GPU engines, GPU memory, and DWM come from PDH with English counter paths, so localized Windows works and
+//! mix. CPU time is taken from cycles at the cycle counter's measured rate; the OS's clock-tick count is kept
+//! alongside. GPU engines, GPU memory, and DWM come from PDH with English counter paths, so localized Windows works and
 //! DWM needs no elevation. Output: `samples.csv` and `collect.json`. See `docs/collector.md`.
 
 pub mod gpu;
@@ -27,7 +28,7 @@ pub struct Sample {
     pub dt: f64,
     /// Live processes in the tree.
     pub processes: u32,
-    /// CPU time of the tree in this interval. The OS updates it per clock tick (15.6 ms by default).
+    /// CPU time of the tree in this interval as the OS counts it, per clock tick (15.6 ms by default).
     pub cpu_ms: f64,
     /// CPU cycles of the tree in this interval, in millions; precise even for short intervals.
     pub cpu_mcycles: f64,
@@ -43,12 +44,14 @@ pub struct Sample {
     pub gpu_shared_bytes: Option<u64>,
     pub dwm_cpu_ms: Option<f64>,
     pub dwm_gpu_pct: Option<f64>,
-    /// CPU time of the collector itself in this interval.
+    /// CPU time of the collector itself in this interval, per clock tick.
     pub collector_cpu_ms: f64,
+    /// CPU cycles of the collector itself in this interval, in millions.
+    pub collector_mcycles: f64,
 }
 
 pub const CSV_HEADER: &str = "t_s,dt_s,processes,cpu_ms,cpu_mcycles,cpu_pct,private_bytes,working_set_bytes,\
-gpu_pct,gpu_3d_pct,gpu_dedicated_bytes,gpu_shared_bytes,dwm_cpu_ms,dwm_gpu_pct,collector_cpu_ms";
+gpu_pct,gpu_3d_pct,gpu_dedicated_bytes,gpu_shared_bytes,dwm_cpu_ms,dwm_gpu_pct,collector_cpu_ms,collector_mcycles";
 
 struct Opt<T>(Option<T>);
 
@@ -75,7 +78,7 @@ impl Sample {
     pub fn write_csv(&self, out: &mut impl Write) -> io::Result<()> {
         writeln!(
             out,
-            "{:.3},{:.3},{},{:.3},{:.3},{:.4},{},{},{},{},{},{},{},{},{:.3}",
+            "{:.3},{:.3},{},{:.3},{:.3},{:.4},{},{},{},{},{},{},{},{},{:.3},{:.3}",
             self.t,
             self.dt,
             self.processes,
@@ -91,16 +94,39 @@ impl Sample {
             Opt(self.dwm_cpu_ms),
             Opt(self.dwm_gpu_pct),
             self.collector_cpu_ms,
+            self.collector_mcycles,
         )
     }
 }
 
-/// Time-weighted means and extremes of a run.
+/// Turns cycles into CPU time. With the cycle counter's rate, time is cycles over the rate; without it (the rate
+/// could not be measured), time is the OS's clock-tick count.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CpuClock {
+    /// Cycle counter rate in MHz (millions of cycles per second).
+    pub cycle_rate_mhz: Option<f64>,
+}
+
+impl CpuClock {
+    /// CPU time in ms from a count in millions of cycles and the clock-tick time for the same stretch.
+    pub fn ms(self, mcycles: f64, tick_ms: f64) -> f64 {
+        match self.cycle_rate_mhz {
+            Some(rate) if rate > 0.0 => mcycles / rate * 1000.0,
+            _ => tick_ms,
+        }
+    }
+}
+
+/// Time-weighted means and extremes of a run. CPU time comes from cycles when `cycle_rate_mhz` is set, otherwise
+/// from clock ticks.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct Summary {
     pub samples: usize,
     pub seconds: f64,
     pub processes_max: u32,
+    /// The cycle counter rate CPU time was computed with; missing in summaries from before it was measured.
+    #[serde(default)]
+    pub cycle_rate_mhz: Option<f64>,
     pub cpu_pct_mean: f64,
     pub cpu_ms_per_s_mean: f64,
     pub cpu_ms_per_s_max: f64,
@@ -124,15 +150,19 @@ fn weighted(samples: &[Sample], value: impl Fn(&Sample) -> Option<f64>) -> Optio
 }
 
 impl Summary {
-    pub fn of(samples: &[Sample]) -> Self {
+    /// `cores` is the number of logical processors, for the percentage of all cores.
+    pub fn of(samples: &[Sample], clock: CpuClock, cores: u32) -> Self {
         let rate = |v: Option<f64>, s: &Sample| v.map(|v| v / s.dt);
+        let cpu_ms = |s: &Sample| clock.ms(s.cpu_mcycles, s.cpu_ms);
+        let cpu_ms_per_s_mean = weighted(samples, |s| rate(Some(cpu_ms(s)), s)).unwrap_or(0.0);
         Self {
             samples: samples.len(),
             seconds: samples.iter().map(|s| s.dt).sum(),
             processes_max: samples.iter().map(|s| s.processes).max().unwrap_or(0),
-            cpu_pct_mean: weighted(samples, |s| Some(s.cpu_pct)).unwrap_or(0.0),
-            cpu_ms_per_s_mean: weighted(samples, |s| rate(Some(s.cpu_ms), s)).unwrap_or(0.0),
-            cpu_ms_per_s_max: samples.iter().map(|s| s.cpu_ms / s.dt).fold(0.0, f64::max),
+            cycle_rate_mhz: clock.cycle_rate_mhz,
+            cpu_pct_mean: cpu_ms_per_s_mean / (10.0 * f64::from(cores.max(1))),
+            cpu_ms_per_s_mean,
+            cpu_ms_per_s_max: samples.iter().map(|s| cpu_ms(s) / s.dt).fold(0.0, f64::max),
             private_bytes_first: samples.first().map_or(0, |s| s.private_bytes),
             private_bytes_last: samples.last().map_or(0, |s| s.private_bytes),
             private_bytes_max: samples.iter().map(|s| s.private_bytes).max().unwrap_or(0),
@@ -140,8 +170,10 @@ impl Summary {
             gpu_3d_pct_mean: weighted(samples, |s| s.gpu_3d_pct),
             dwm_cpu_ms_per_s_mean: weighted(samples, |s| rate(s.dwm_cpu_ms, s)),
             dwm_gpu_pct_mean: weighted(samples, |s| s.dwm_gpu_pct),
-            collector_cpu_ms_per_s_mean: weighted(samples, |s| rate(Some(s.collector_cpu_ms), s))
-                .unwrap_or(0.0),
+            collector_cpu_ms_per_s_mean: weighted(samples, |s| {
+                rate(Some(clock.ms(s.collector_mcycles, s.collector_cpu_ms)), s)
+            })
+            .unwrap_or(0.0),
         }
     }
 }
@@ -181,7 +213,11 @@ impl fmt::Display for Summary {
             f,
             "  collector {:.2} ms/s CPU",
             self.collector_cpu_ms_per_s_mean
-        )
+        )?;
+        match self.cycle_rate_mhz {
+            Some(rate) => write!(f, "\n  CPU time from cycles at {rate:.0} MHz"),
+            None => write!(f, "\n  CPU time from clock ticks (cycle rate not measured)"),
+        }
     }
 }
 
@@ -197,7 +233,7 @@ mod run {
 
     use serde::Serialize;
 
-    use super::{CSV_HEADER, Collector, Summary, Target};
+    use super::{CSV_HEADER, Collector, CpuClock, Summary, Target};
     use crate::sys::{self, SysError};
 
     #[derive(Debug)]
@@ -248,6 +284,8 @@ mod run {
     struct Machine {
         cpu: Option<String>,
         logical_processors: u32,
+        /// Rate of the CPU cycle counter, measured at the start of the run.
+        cycle_rate_mhz: Option<f64>,
         os_product: Option<String>,
         os_display_version: Option<String>,
         os_build: Option<String>,
@@ -255,12 +293,13 @@ mod run {
     }
 
     impl Machine {
-        fn read(logical_processors: u32) -> Self {
+        fn read(logical_processors: u32, cycle_rate_mhz: Option<f64>) -> Self {
             const CPU: &str = r"HARDWARE\DESCRIPTION\System\CentralProcessor\0";
             const OS: &str = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion";
             Self {
                 cpu: sys::registry_string(CPU, "ProcessorNameString"),
                 logical_processors,
+                cycle_rate_mhz,
                 os_product: sys::registry_string(OS, "ProductName"),
                 os_display_version: sys::registry_string(OS, "DisplayVersion"),
                 os_build: sys::registry_string(OS, "CurrentBuild"),
@@ -314,7 +353,7 @@ mod run {
             started_local: crate::paths::local_timestamp(),
             interval_ms: options.interval.as_millis(),
             requested_seconds: options.duration.as_secs_f64(),
-            machine: Machine::read(collector.logical_processors()),
+            machine: Machine::read(collector.logical_processors(), collector.cycle_rate_mhz()),
             sources: Sources {
                 gpu: collector.gpu_available(),
                 dwm: collector.dwm_available(),
@@ -348,7 +387,10 @@ mod run {
             }
         }
 
-        let summary = Summary::of(&samples);
+        let clock = CpuClock {
+            cycle_rate_mhz: collector.cycle_rate_mhz(),
+        };
+        let summary = Summary::of(&samples, clock, collector.logical_processors());
         info.unreadable_processes = collector.unreadable().map(str::to_owned).collect();
         info.summary = Some(summary.clone());
         write_json(&info_path, &info)?;
@@ -377,6 +419,7 @@ mod tests {
             dwm_cpu_ms: Some(10.0),
             dwm_gpu_pct: None,
             collector_cpu_ms: 0.5,
+            collector_mcycles: 1.25,
         }
     }
 
@@ -387,7 +430,7 @@ mod tests {
         let row = String::from_utf8(out).unwrap();
         assert_eq!(
             row,
-            "1.000,1.000,2,15.625,46.875,0.1953,1000,2000,,,,4096,10.000,,0.500\n"
+            "1.000,1.000,2,15.625,46.875,0.1953,1000,2000,,,,4096,10.000,,0.500,1.250\n"
         );
         assert_eq!(
             row.trim_end().split(',').count(),
@@ -402,15 +445,31 @@ mod tests {
             sample(2.0, 30.0, 300, None),
         ];
         samples[1].dt = 3.0;
-        let s = Summary::of(&samples);
+        let ticks = CpuClock {
+            cycle_rate_mhz: None,
+        };
+        let s = Summary::of(&samples, ticks, 8);
         assert_eq!(s.samples, 2);
         assert_eq!(s.seconds, 4.0);
         assert_eq!(s.cpu_ms_per_s_mean, 10.0, "40 ms over 4 s");
         assert_eq!(s.cpu_ms_per_s_max, 10.0);
+        assert_eq!(s.cpu_pct_mean, 10.0 / 80.0, "10 ms/s of 8 cores");
+        assert_eq!(s.cycle_rate_mhz, None);
         assert_eq!((s.private_bytes_first, s.private_bytes_last), (100, 300));
         assert_eq!(s.gpu_pct_mean, Some(1.0), "only samples with GPU data");
         assert_eq!(s.dwm_gpu_pct_mean, None);
         let dwm = s.dwm_cpu_ms_per_s_mean.unwrap_or(0.0);
         assert!((dwm - 5.0).abs() < 1e-9, "20 ms over 4 s: {dwm}");
+
+        // 30 and 90 Mcycles at 1500 MHz are 20 and 60 ms; the collector's 1.25 Mcycles per row are 0.833 ms.
+        let cycles = CpuClock {
+            cycle_rate_mhz: Some(1500.0),
+        };
+        let s = Summary::of(&samples, cycles, 8);
+        assert!((s.cpu_ms_per_s_mean - 20.0).abs() < 1e-9, "80 ms over 4 s");
+        assert!((s.cpu_ms_per_s_max - 20.0).abs() < 1e-9);
+        assert!((s.cpu_pct_mean - 0.25).abs() < 1e-9);
+        assert!((s.collector_cpu_ms_per_s_mean - 2.5 / 1.5 / 4.0).abs() < 1e-9);
+        assert_eq!(s.cycle_rate_mhz, Some(1500.0));
     }
 }
