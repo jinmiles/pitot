@@ -14,9 +14,12 @@ menu.
 
 - One window per monitor that has widgets, created over the monitor's bounds in physical pixels (the process is
   per-monitor DPI aware, so monitors left of or above the primary one, at negative coordinates, work).
-- Extended styles `WS_EX_NOREDIRECTIONBITMAP | WS_EX_TOPMOST | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE |
-  WS_EX_TOOLWINDOW`: no redirection surface, always on top, click-through (`WM_NCHITTEST` returns
-  `HTTRANSPARENT`), never activated, and not shown in the taskbar.
+- Extended styles `WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOREDIRECTIONBITMAP | WS_EX_TOPMOST |
+  WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW`: click-through, no redirection surface, always on top, never activated,
+  and not shown in the taskbar. Only a layered window with `WS_EX_TRANSPARENT` is left out of mouse hit
+  testing, so clicks reach the windows below, also those of other processes (answering `WM_NCHITTEST` with
+  `HTTRANSPARENT` passes them only to windows of the same thread). The layer is set to full opacity once,
+  which a layered window needs before it shows; DirectComposition still draws the content.
 - A tray icon owned by a hidden window offers Reload configuration and Quit.
 - `WM_CLOSE` to any of these windows quits like Quit, so tools that close apps the usual way (End task, the
   benchmark runner) end the overlay cleanly and its exit line with the data counters is written.

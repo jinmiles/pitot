@@ -8,8 +8,8 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Duration;
 
 use windows::Win32::Foundation::{
-    CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE, HINSTANCE, HWND, LPARAM, LRESULT,
-    POINT, RECT, WAIT_OBJECT_0, WAIT_TIMEOUT, WPARAM,
+    COLORREF, CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE, HINSTANCE, HWND, LPARAM,
+    LRESULT, POINT, RECT, WAIT_OBJECT_0, WAIT_TIMEOUT, WPARAM,
 };
 use windows::Win32::Graphics::Gdi::{
     EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFO, MONITORINFOEXW,
@@ -33,11 +33,12 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow,
-    DispatchMessageW, GetCursorPos, HTTRANSPARENT, IDI_APPLICATION, LoadIconW, MF_STRING, MSG,
-    MWMO_INPUTAVAILABLE, MsgWaitForMultipleObjectsEx, PM_REMOVE, PeekMessageW, PostQuitMessage,
-    QS_ALLINPUT, RegisterClassExW, SW_SHOWNOACTIVATE, SetForegroundWindow, ShowWindow,
-    TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, WM_APP,
-    WM_CLOSE, WM_CONTEXTMENU, WM_NCHITTEST, WM_QUIT, WM_RBUTTONUP, WNDCLASSEXW, WS_EX_NOACTIVATE,
+    DispatchMessageW, GetCursorPos, HTTRANSPARENT, IDI_APPLICATION, LWA_ALPHA, LoadIconW,
+    MF_STRING, MSG, MWMO_INPUTAVAILABLE, MsgWaitForMultipleObjectsEx, PM_REMOVE, PeekMessageW,
+    PostQuitMessage, QS_ALLINPUT, RegisterClassExW, SW_SHOWNOACTIVATE, SetForegroundWindow,
+    SetLayeredWindowAttributes, ShowWindow, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON,
+    TrackPopupMenu, TranslateMessage, WINDOW_EX_STYLE, WM_APP, WM_CLOSE, WM_CONTEXTMENU,
+    WM_NCHITTEST, WM_QUIT, WM_RBUTTONUP, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
     WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 use windows::core::{PCWSTR, w};
@@ -192,7 +193,7 @@ unsafe extern "system" fn window_proc(
     lparam: LPARAM,
 ) -> LRESULT {
     match msg {
-        // Clicks pass through to the windows below.
+        // Layered and transparent windows get no mouse input at all; this only covers windows of this thread.
         WM_NCHITTEST => LRESULT(HTTRANSPARENT as isize),
         // Closing any window quits like the tray's Quit, so tools that close apps the usual way end the overlay
         // cleanly instead of leaving it running without that window.
@@ -262,6 +263,18 @@ fn class() -> Result<PCWSTR, PlatformError> {
     Ok(name)
 }
 
+/// Extended styles of the overlay windows. Only `WS_EX_LAYERED` together with `WS_EX_TRANSPARENT` takes a
+/// window out of mouse hit testing, so clicks reach the windows below, also those of other processes.
+/// `WS_EX_NOREDIRECTIONBITMAP` leaves the content to DirectComposition.
+const OVERLAY_STYLE: WINDOW_EX_STYLE = WINDOW_EX_STYLE(
+    WS_EX_LAYERED.0
+        | WS_EX_TRANSPARENT.0
+        | WS_EX_NOREDIRECTIONBITMAP.0
+        | WS_EX_TOPMOST.0
+        | WS_EX_NOACTIVATE.0
+        | WS_EX_TOOLWINDOW.0,
+);
+
 /// A borderless, transparent, click-through, topmost window that never takes focus.
 #[derive(Debug)]
 pub struct OverlayWindow {
@@ -271,11 +284,7 @@ pub struct OverlayWindow {
 impl OverlayWindow {
     /// Creates a window covering `rect` and shows it without activating it.
     pub fn create(rect: ScreenRect) -> Result<Self, PlatformError> {
-        let style = WS_EX_NOREDIRECTIONBITMAP
-            | WS_EX_TOPMOST
-            | WS_EX_TRANSPARENT
-            | WS_EX_NOACTIVATE
-            | WS_EX_TOOLWINDOW;
+        let style = OVERLAY_STYLE;
         // SAFETY: the class is registered and all strings are static; no creation parameter is passed.
         let hwnd = unsafe {
             CreateWindowExW(
@@ -294,6 +303,14 @@ impl OverlayWindow {
             )
         }
         .map_err(|e| error("CreateWindowExW", &e))?;
+        // A layered window stays invisible until its attributes are set. Full opacity leaves the composition
+        // content as drawn.
+        // SAFETY: `hwnd` was just created by this thread with WS_EX_LAYERED.
+        if let Err(e) = unsafe { SetLayeredWindowAttributes(hwnd, COLORREF(0), 255, LWA_ALPHA) } {
+            // SAFETY: the window was created above and is destroyed once, here.
+            let _ = unsafe { DestroyWindow(hwnd) };
+            return Err(error("SetLayeredWindowAttributes", &e));
+        }
         // SAFETY: `hwnd` was just created by this thread.
         let _ = unsafe { ShowWindow(hwnd, SW_SHOWNOACTIVATE) };
         Ok(Self { hwnd })
