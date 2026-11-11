@@ -28,6 +28,8 @@ vars! {
     session_laps_remain => "SessionLapsRemainEx",
     is_on_track => "IsOnTrack",
     is_replay_playing => "IsReplayPlaying",
+    replay_session_num => "ReplaySessionNum",
+    replay_session_time => "ReplaySessionTime",
     on_pit_road => "OnPitRoad",
     player_car_idx => "PlayerCarIdx",
     speed => "Speed",

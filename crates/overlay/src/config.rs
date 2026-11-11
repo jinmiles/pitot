@@ -29,6 +29,19 @@ pub fn previous_log_file() -> Option<PathBuf> {
     config_dir().map(|dir| dir.join("pitot.previous.log"))
 }
 
+/// Folders searched for a capture of the session while the sim plays a replay: `captures` next to the overlay
+/// executable, where `pitot-bench record` run from that folder writes them, and `captures` inside
+/// [`config_dir`].
+pub fn capture_dirs() -> Vec<PathBuf> {
+    let beside_exe = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join("captures")));
+    let in_config = config_dir().map(|dir| dir.join("captures"));
+    let mut dirs: Vec<PathBuf> = beside_exe.into_iter().chain(in_config).collect();
+    dirs.dedup();
+    dirs
+}
+
 /// Written on first run; kept in sync with [`Config::default`] by a test.
 pub const DEFAULT_TOML: &str = r#"# Pitot overlay configuration. Changes apply when the file is saved.
 #

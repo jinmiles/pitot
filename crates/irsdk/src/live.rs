@@ -210,6 +210,54 @@ impl Snapshot {
     }
 }
 
+/// Copies the requested variables out of rows laid out by another variable table, such as a capture's, into a
+/// snapshot laid out by a live connection, so the same [`VarId`]s read both.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RowMap {
+    spans: Vec<Span>,
+}
+
+impl RowMap {
+    /// Maps rows of `row_len` bytes described by `vars` into the layout of `snapshot`, which a reader of `set`
+    /// filled. A variable missing from `vars`, or there with another type, reads as zero; of an array, the
+    /// elements both have are copied.
+    pub fn new(set: &VarSet, snapshot: &Snapshot, vars: &[VarHeader], row_len: usize) -> Self {
+        let spans = set
+            .names
+            .iter()
+            .zip(&snapshot.fields)
+            .filter_map(|(name, dst)| {
+                let dst = dst.as_ref()?;
+                let src = vars
+                    .iter()
+                    .find(|var| var.name_bytes() == name.as_bytes())
+                    .and_then(|var| Field::new(var, row_len).ok())
+                    .filter(|src| src.var_type() == dst.var_type())?;
+                Some(Span {
+                    src: src.offset(),
+                    dst: dst.offset(),
+                    len: src.byte_len().min(dst.byte_len()),
+                })
+            })
+            .collect();
+        Self { spans }
+    }
+
+    /// Fills `snapshot` from `row` and sets its tick count. Variables without a source in the row are zero.
+    pub fn copy(&self, row: &[u8], tick: i32, snapshot: &mut Snapshot) {
+        snapshot.bytes.fill(0);
+        for span in &self.spans {
+            if let (Some(src), Some(dst)) = (
+                row.get(span.src..span.src + span.len),
+                snapshot.bytes.get_mut(span.dst..span.dst + span.len),
+            ) {
+                dst.copy_from_slice(src);
+            }
+        }
+        snapshot.tick = tick;
+    }
+}
+
 /// Timing policy of a [`LiveReader`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReaderConfig {
@@ -268,6 +316,11 @@ impl LiveReader {
 
     pub fn is_connected(&self) -> bool {
         self.conn.is_some()
+    }
+
+    /// The variables this reader copies.
+    pub fn var_set(&self) -> &VarSet {
+        &self.vars
     }
 
     /// Advances the reader by one event: a connection change, a tick, or a timeout.
@@ -766,6 +819,50 @@ mod tests {
         fn step(&mut self) -> Step {
             self.reader.step(&mut self.snapshot).expect("steps")
         }
+    }
+
+    #[test]
+    fn row_maps_fill_live_layouts_from_other_tables() {
+        let names = names();
+        let mut publisher = publisher(&names);
+        let mut r = reader(&names);
+        assert_eq!(r.step(), Step::Connected);
+        publisher.publish(&row(1.0, 0.25)).expect("publishes");
+        assert!(matches!(r.step(), Step::Tick { .. }));
+
+        // A recording's table: other order, ThrottleRaw stored as an Int, a shorter per-car array.
+        let recorded = vec![
+            VarHeader::new(VarType::Float, 0, 4, "CarIdxLapDistPct").expect("valid"),
+            VarHeader::new(VarType::Int, 16, 1, "ThrottleRaw").expect("valid"),
+            VarHeader::new(VarType::Double, 20, 1, "SessionTime").expect("valid"),
+        ];
+        let mut rec = vec![0u8; 28];
+        for car in 0..4 {
+            rec[car * 4..car * 4 + 4].copy_from_slice(&(car as f32 / 10.0).to_le_bytes());
+        }
+        rec[16..20].copy_from_slice(&7i32.to_le_bytes());
+        rec[20..28].copy_from_slice(&42.5f64.to_le_bytes());
+
+        let map = RowMap::new(r.reader.var_set(), &r.snapshot, &recorded, rec.len());
+        let mut snap = r.snapshot.clone();
+        map.copy(&rec, 99, &mut snap);
+        assert_eq!(snap.tick(), 99);
+        assert_eq!(snap.f64(r.time, 0), Some(42.5));
+        assert_eq!(
+            snap.f32(r.throttle, 0),
+            Some(0.0),
+            "another type reads as zero"
+        );
+        assert_eq!(snap.count(r.laps), 72, "the live layout is kept");
+        assert_eq!(snap.f32(r.laps, 3), Some(0.3));
+        assert_eq!(
+            snap.f32(r.laps, 71),
+            Some(0.0),
+            "elements the row lacks are zero"
+        );
+        assert!(!snap.available(r.lat));
+        // The live snapshot is untouched.
+        assert_eq!(r.snapshot.f32(r.throttle, 0), Some(0.25));
     }
 
     #[test]

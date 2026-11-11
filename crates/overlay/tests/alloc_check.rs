@@ -1,20 +1,25 @@
-//! The data thread and the render thread's view do not allocate per tick. Run with `--features alloc-check`.
+//! The data thread and the render thread's view do not allocate per tick, live or while a capture plays during
+//! a replay. Run with `--features alloc-check`.
 #![cfg(all(windows, feature = "alloc-check"))]
 
 use std::alloc::{GlobalAlloc, Layout, System};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use pitot_irsdk::capture::test_capture::{Item, build};
 use pitot_irsdk::layout::{VarHeader, VarType};
 use pitot_irsdk::live::{ReaderConfig, SdkNames};
 use pitot_irsdk::publish::{Publisher, PublisherConfig};
-use pitot_overlay::pipeline::{Pipeline, View};
+use pitot_overlay::pipeline::{Pipeline, Source, View};
 
 /// Counts allocations on every thread while switched on: the data thread is internal to the pipeline.
 struct Counting;
 
 static COUNTING: AtomicBool = AtomicBool::new(false);
+/// The count covers the whole process, so the tests take turns.
+static SERIAL: Mutex<()> = Mutex::new(());
 static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
 
 fn record() {
@@ -57,6 +62,7 @@ const ROW: usize = 16 + 72 * 4 * 3;
 
 #[test]
 fn pipeline_does_not_allocate_per_tick() {
+    let _turn = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let pid = std::process::id();
     let names = SdkNames::new(
         &format!("Local\\PitotOverlayAllocMap-{pid}"),
@@ -85,7 +91,7 @@ fn pipeline_does_not_allocate_per_tick() {
         retry_interval: Duration::from_millis(5),
         idle_timeout: Duration::from_millis(50),
     };
-    let (pipeline, mut view) = Pipeline::start(names, reader_config).expect("starts");
+    let (pipeline, mut view) = Pipeline::start(names, reader_config, Vec::new()).expect("starts");
     let deadline = Instant::now() + Duration::from_secs(5);
     while !view.is_connected() {
         assert!(Instant::now() < deadline, "connects");
@@ -130,4 +136,116 @@ fn pipeline_does_not_allocate_per_tick() {
         "allocations across the data thread and view"
     );
     drop(pipeline);
+}
+
+const SESSION_INFO: &[u8] = b"WeekendInfo:\n TrackID: 1\n SubSessionID: 4242\n";
+const REPLAY_ROW: usize = 32 + 72 * 4;
+
+#[test]
+fn playing_a_capture_does_not_allocate_per_tick() {
+    let _turn = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let pid = std::process::id();
+    // A capture of 2,000 frames from session time 100 s, in ten-second chunks.
+    let captured = vec![
+        VarHeader::new(VarType::Int, 0, 1, "SessionNum").expect("valid"),
+        VarHeader::new(VarType::Double, 8, 1, "SessionTime").expect("valid"),
+        VarHeader::new(VarType::Float, 16, 1, "ThrottleRaw").expect("valid"),
+        VarHeader::new(VarType::Bool, 20, 1, "IsOnTrack").expect("valid"),
+        VarHeader::new(VarType::Float, 24, 72, "CarIdxLapDistPct").expect("valid"),
+    ];
+    let capture_row = 24 + 72 * 4;
+    let mut items = vec![Item::Session(1, SESSION_INFO.to_vec())];
+    for i in 0..2000 {
+        let mut row = vec![0u8; capture_row];
+        row[8..16].copy_from_slice(&(100.0 + f64::from(i) / 60.0).to_le_bytes());
+        row[16..20].copy_from_slice(&(i as f32 / 2000.0).to_le_bytes());
+        row[20] = 1;
+        items.push(Item::Frame(i, row));
+    }
+    let folder = std::env::temp_dir().join(format!("pitot-alloc-replay-{pid}"));
+    std::fs::create_dir_all(&folder).expect("creates the folder");
+    std::fs::write(
+        folder.join("race.ptc"),
+        build(&captured, capture_row, 600, &items),
+    )
+    .expect("writes");
+
+    let names = SdkNames::new(
+        &format!("Local\\PitotOverlayAllocReplayMap-{pid}"),
+        &format!("Local\\PitotOverlayAllocReplayEvent-{pid}"),
+    );
+    let config = PublisherConfig {
+        vars: vec![
+            VarHeader::new(VarType::Double, 0, 1, "SessionTime").expect("valid"),
+            VarHeader::new(VarType::Double, 8, 1, "ReplaySessionTime").expect("valid"),
+            VarHeader::new(VarType::Int, 16, 1, "ReplaySessionNum").expect("valid"),
+            VarHeader::new(VarType::Bool, 20, 1, "IsReplayPlaying").expect("valid"),
+            VarHeader::new(VarType::Float, 32, 72, "CarIdxLapDistPct").expect("valid"),
+        ],
+        buf_len: REPLAY_ROW,
+        num_buf: 3,
+        tick_rate: 60,
+        session_info_capacity: 4096,
+    };
+    let mut publisher = Publisher::create(&names, &config).expect("creates");
+    publisher.set_connected(true).expect("connects");
+    publisher.set_session_info(SESSION_INFO).expect("fits");
+    let reader_config = ReaderConfig {
+        retry_interval: Duration::from_millis(5),
+        idle_timeout: Duration::from_millis(50),
+    };
+    let (pipeline, mut view) =
+        Pipeline::start(names, reader_config, vec![folder.clone()]).expect("starts");
+
+    let mut row = [0u8; REPLAY_ROW];
+    row[20] = 1;
+    fn cycle(
+        publisher: &mut Publisher,
+        view: &mut View,
+        row: &mut [u8; REPLAY_ROW],
+        n: u32,
+    ) -> usize {
+        // Live time runs on; the replay shows frame `n` of the capture.
+        row[0..8].copy_from_slice(&(1000.0 + f64::from(n) / 60.0).to_le_bytes());
+        row[8..16].copy_from_slice(&(100.0 + f64::from(n) / 60.0).to_le_bytes());
+        publisher.publish(row).expect("publishes");
+        thread::sleep(Duration::from_millis(4));
+        view.poll();
+        view.drain_samples(|_| {})
+    }
+    // Warm-up: the live session info, the search, the first restart, and its session info.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut n = 0;
+    while !(view.source() == Some(Source::Capture { first: true }) && view.session().is_some())
+        || n < 400
+    {
+        assert!(Instant::now() < deadline, "the capture plays");
+        cycle(&mut publisher, &mut view, &mut row, n);
+        n += 1;
+    }
+
+    COUNTING.store(true, Ordering::Relaxed);
+    let mut samples = 0;
+    for _ in 0..600 {
+        samples += cycle(&mut publisher, &mut view, &mut row, n);
+        n += 1;
+    }
+    COUNTING.store(false, Ordering::Relaxed);
+
+    assert!(
+        samples >= 590,
+        "every replayed frame became a sample: {samples}"
+    );
+    assert_eq!(
+        view.source(),
+        Some(Source::Capture { first: true }),
+        "no restart"
+    );
+    assert_eq!(
+        ALLOCATIONS.load(Ordering::Relaxed),
+        0,
+        "allocations across the data thread and view"
+    );
+    drop(pipeline);
+    let _ = std::fs::remove_dir_all(folder);
 }

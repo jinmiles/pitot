@@ -198,10 +198,13 @@ impl<R: Read + Seek> CaptureReader<R> {
             // The recorder stopped, or is still writing this chunk.
             return Ok(false);
         }
+        // Exact sizes: a chunk is megabytes, and doubling past the largest one would keep that much unused.
+        self.compressed.clear();
+        self.compressed.reserve_exact(compressed_len as usize);
         self.compressed.resize(compressed_len as usize, 0);
         read_exact(&mut self.reader, &mut self.compressed)?;
         self.chunk.clear();
-        self.chunk.reserve(len as usize);
+        self.chunk.reserve_exact(len as usize);
         // Zstandard checks the frame's content checksum while decompressing.
         self.decompressor
             .decompress_to_buffer(&self.compressed[..], &mut self.chunk)
