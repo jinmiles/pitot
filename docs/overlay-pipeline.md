@@ -61,7 +61,9 @@ So the overlay shows a [capture](capture-format.md) of the session instead:
    there a capture must have the same track and cover the replayed moment. A matching capture is indexed by
    session time (`pitot_irsdk::capture::Seeker`: one pass over the file, 0.05 s for 3.5 minutes of a 72-car
    session on the lab PC) and handed to the data thread. Without one, widgets hide as before, and the search is
-   repeated at most every 10 s.
+   repeated at most every 10 s. Frames recorded while the sim played a replay (`IsReplayPlaying` set) are not
+   part of the session, since they hold live values: a capture made while watching a replay, such as a saved
+   `.rpy` file, covers nothing and is skipped, and the replay part at the end of a session's capture is left out.
 2. Each tick, the data thread reads `ReplaySessionNum` and `ReplaySessionTime` and moves the capture there. The
    frame is copied into the live layout (`pitot_irsdk::live::RowMap`: variables by name, missing ones zero), and
    the session info in effect at that frame is parsed as usual, so widgets cannot tell it from live data.
