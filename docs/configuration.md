@@ -3,7 +3,9 @@
 The overlay reads `%APPDATA%\Pitot\config.toml`. On first run it writes a commented default file there.
 
 Changes apply when the file is saved, without restarting. The overlay watches the directory with a change
-notification (no polling) and reloads 250 ms after the last write. A file that fails to parse or validate is
+notification (no polling) and reloads 250 ms after the last write. The notification does not say which file
+changed, so the overlay compares `config.toml`'s write time and size first: writes to other files there, such as
+the log, do not reload. A file that fails to parse or validate is
 reported with its line and column, and the previous configuration stays in use. The tray menu's
 *Reload configuration* forces a reload.
 
