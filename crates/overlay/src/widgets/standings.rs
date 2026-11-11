@@ -1591,7 +1591,8 @@ SplitTimeInfo:
             retry_interval: Duration::from_millis(5),
             idle_timeout: Duration::from_millis(50),
         };
-        let (_pipeline, mut view) = Pipeline::start(names, config, Vec::new()).expect("starts");
+        let (_pipeline, mut view) =
+            Pipeline::start(names, config, Vec::new(), None).expect("starts");
         let deadline = Instant::now() + Duration::from_secs(5);
         while view.session().is_none() {
             assert!(Instant::now() < deadline, "session info arrives");

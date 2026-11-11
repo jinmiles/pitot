@@ -15,6 +15,8 @@
 //! between capture and live values, hands the render thread a new connection, so widgets reset.
 
 #[cfg(windows)]
+mod record;
+#[cfg(windows)]
 mod replay;
 mod vars;
 mod wire;
@@ -22,6 +24,8 @@ mod wire;
 pub use vars::Vars;
 pub use wire::{InputSample, SampleRing, SeqBuffer};
 
+#[cfg(windows)]
+pub use record::RecordingConfig;
 #[cfg(windows)]
 pub use threads::{Pipeline, PipelineStats, Source, View, ViewChanges};
 
@@ -57,11 +61,12 @@ mod threads {
     use std::thread::{self, JoinHandle};
     use std::time::{Duration, Instant};
 
-    use pitot_irsdk::capture::Moment;
+    use pitot_irsdk::capture::{CaptureLayout, Moment};
     use pitot_irsdk::live::{LiveReader, ReaderConfig, SdkNames, Snapshot, Step, VarSet};
     use pitot_irsdk::session::{SessionInfo, SessionParser};
     use tracing::info;
 
+    use super::record::{Recorder, RecordingConfig};
     use super::replay::{self, CaptureCache, Found, Plan, Player, SessionIds};
     use super::{
         Display, InputSample, SAMPLE_CAPACITY, SampleRing, SeqBuffer, Vars, ready_session_buffer,
@@ -91,17 +96,28 @@ mod threads {
         samples: SampleRing,
         car_count: usize,
         source: Source,
+        /// While recording, every snapshot starts with the tick's whole row for the recorder; only the requested
+        /// variables after it go to the render thread.
+        row_len: usize,
     }
 
     impl Connection {
-        fn new(template: &Snapshot, car_count: usize, source: Source) -> Arc<Self> {
+        fn new(template: &Snapshot, car_count: usize, source: Source, row_len: usize) -> Arc<Self> {
             Arc::new(Self {
                 template: template.clone(),
-                latest: SeqBuffer::new(template.bytes().len()),
+                latest: SeqBuffer::new(template.bytes().len().saturating_sub(row_len)),
                 samples: SampleRing::new(SAMPLE_CAPACITY),
                 car_count,
                 source,
+                row_len,
             })
+        }
+
+        /// The part of a snapshot the render thread gets.
+        fn publish(&self, snapshot: &Snapshot) {
+            let bytes = snapshot.bytes();
+            self.latest
+                .write(snapshot.tick(), &bytes[self.row_len.min(bytes.len())..]);
         }
     }
 
@@ -145,14 +161,22 @@ mod threads {
 
     impl Pipeline {
         /// Starts reading from `names` and returns the pipeline and the render thread's view. During replays,
-        /// captures of the session are looked up in the folders `captures`.
+        /// captures of the session are looked up in the folders `captures`. With `recording`, sessions are
+        /// recorded while the player drives.
         pub fn start(
             names: SdkNames,
             config: ReaderConfig,
             captures: Vec<PathBuf>,
+            recording: Option<RecordingConfig>,
         ) -> std::io::Result<(Self, View)> {
-            let mut set = VarSet::new();
+            // A recording reads each tick's whole row, ahead of the requested variables.
+            let mut set = if recording.is_some() {
+                VarSet::whole_row()
+            } else {
+                VarSet::new()
+            };
             let vars = Vars::register(&mut set);
+            let recorder = recording.map(Recorder::start).transpose()?;
             let stop = Arc::new(AtomicBool::new(false));
             let stats = Arc::new(PipelineStats::default());
             let (to_render, from_threads) = mpsc::channel();
@@ -190,7 +214,7 @@ mod threads {
                             recycled,
                             found,
                         };
-                        data_loop(reader, vars, &stop, &stats, &channels);
+                        data_loop(reader, vars, &stop, &stats, &channels, recorder);
                     })?
             };
             let view = View {
@@ -393,7 +417,7 @@ mod threads {
             let source = Source::Capture {
                 first: !replay.started,
             };
-            let fresh = Connection::new(live, current.car_count, source);
+            let fresh = Connection::new(live, current.car_count, source, current.row_len);
             if player
                 .restart(at, |s| {
                     fresh.samples.push(sample(s, vars, 0));
@@ -425,8 +449,7 @@ mod threads {
             Arc::clone(current)
         };
         if restart || plan != Plan::Same {
-            let snapshot = player.snapshot();
-            connection.latest.write(snapshot.tick(), snapshot.bytes());
+            connection.publish(player.snapshot());
         }
         if restart {
             replay.started = true;
@@ -455,17 +478,34 @@ mod threads {
         stop: &AtomicBool,
         stats: &PipelineStats,
         channels: &DataChannels,
+        mut recorder: Option<Recorder>,
     ) {
         let mut snapshot = Snapshot::new();
         let mut connection: Option<Arc<Connection>> = None;
         let mut session_text = Vec::new();
         let mut session_update = None;
+        let mut recorded_update = None;
         let mut replay = Replay::default();
         while !stop.load(Ordering::Relaxed) {
             match reader.step(&mut snapshot) {
                 Ok(Step::Connected) => {
                     let car_count = snapshot.count(vars.car_lap_dist_pct);
-                    let fresh = Connection::new(&snapshot, car_count, Source::Sim);
+                    let mut row_len = 0;
+                    if let (Some(recorder), Some(layout)) = (recorder.as_mut(), reader.layout()) {
+                        row_len = layout.buf_len;
+                        recorder.connected(
+                            CaptureLayout {
+                                vars: layout.vars.clone(),
+                                buf_len: layout.buf_len,
+                                tick_rate: layout.tick_rate,
+                                session_info_capacity: layout.session_info_capacity,
+                                player_car_only: false,
+                            },
+                            layout.sdk_version,
+                        );
+                    }
+                    recorded_update = None;
+                    let fresh = Connection::new(&snapshot, car_count, Source::Sim, row_len);
                     ready_session_buffer(
                         &mut session_text,
                         reader.session_info_capacity().unwrap_or(0),
@@ -519,7 +559,12 @@ mod threads {
                     if replay.showing {
                         // Back to live values: widgets reset, and the live session info is sent again.
                         replay.showing = false;
-                        let fresh = Connection::new(&snapshot, current.car_count, Source::SimAgain);
+                        let fresh = Connection::new(
+                            &snapshot,
+                            current.car_count,
+                            Source::SimAgain,
+                            current.row_len,
+                        );
                         if channels
                             .to_render
                             .send(Message::Connected(Arc::clone(&fresh)))
@@ -531,7 +576,7 @@ mod threads {
                         connection = Some(Arc::clone(&fresh));
                         current = fresh;
                     }
-                    current.latest.write(snapshot.tick(), snapshot.bytes());
+                    current.publish(&snapshot);
                     current.samples.push(sample(&snapshot, &vars, missed));
                     let update = reader.session_info_update();
                     if update != session_update
@@ -542,8 +587,23 @@ mod threads {
                             return;
                         }
                     }
+                    // Ticks while the sim plays a replay hold live values, not the session: not recorded.
+                    let replaying = snapshot.bool(vars.is_replay_playing, 0) == Some(true);
+                    if let Some(recorder) = recorder.as_mut().filter(|_| !replaying) {
+                        if session_update != recorded_update
+                            && let Some(update) = session_update
+                        {
+                            recorder.session_info(update, &session_text);
+                            recorded_update = session_update;
+                        }
+                        let row = &snapshot.bytes()[..current.row_len.min(snapshot.bytes().len())];
+                        recorder.frame(snapshot.tick(), snapshot.buffer() as i32, row, missed);
+                    }
                 }
                 Ok(Step::Disconnected) => {
+                    if let Some(recorder) = recorder.as_mut() {
+                        recorder.ended();
+                    }
                     connection = None;
                     replay = Replay::default();
                     if channels.to_render.send(Message::Disconnected).is_err() {
@@ -624,7 +684,9 @@ mod threads {
             }
             if let Some(connection) = &self.connection
                 && connection.latest.version() != self.version
-                && let Some((version, tick)) = connection.latest.read(self.snapshot.bytes_mut())
+                && let Some((version, tick)) = connection
+                    .latest
+                    .read(&mut self.snapshot.bytes_mut()[connection.row_len..])
             {
                 self.version = version;
                 self.snapshot.set_tick(tick);

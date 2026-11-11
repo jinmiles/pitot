@@ -24,9 +24,9 @@ pitot-bench record [--out <file.ptc>] [--seconds <n>] [--level <n>]
 
 ## Replays in the overlay
 
-The overlay plays a capture of the session while the sim plays a replay of it. Record from the folder that holds
-`pitot-overlay.exe` (so the capture lands in its `captures` folder), or move captures to
-`%APPDATA%\Pitot\captures`. See [Replays](configuration.md#replays).
+The overlay records sessions itself and plays them while the sim plays a replay (see
+[Recording and replays](configuration.md#recording-and-replays)), so `pitot-bench record` is not needed for that.
+Captures it writes in the folder that holds `pitot-overlay.exe` (its `captures` folder) are found as well.
 
 ## Checking a recording
 

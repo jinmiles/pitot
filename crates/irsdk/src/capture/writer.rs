@@ -49,6 +49,9 @@ struct IndexEntry {
     frames: u32,
 }
 
+/// Room for session info in a chunk's record buffer beyond its frames; full-grid session info is about 80 KB.
+const SESSION_ROOM: usize = 128 * 1024;
+
 pub struct CaptureWriter<W: Write> {
     out: W,
     options: WriterOptions,
@@ -56,6 +59,8 @@ pub struct CaptureWriter<W: Write> {
     buf_len: usize,
     chunk_frames: u32,
     compressor: zstd::bulk::Compressor<'static>,
+    /// The compressed chunk, kept so writing a chunk does not allocate once it has its size.
+    compressed: Vec<u8>,
     /// Records of the chunk being collected.
     records: Vec<u8>,
     record_count: u32,
@@ -135,7 +140,11 @@ impl<W: Write> CaptureWriter<W> {
             buf_len: layout.buf_len,
             chunk_frames,
             compressor,
-            records: Vec::with_capacity(chunk_frames as usize * (layout.buf_len + 16)),
+            // A chunk's frames and room for its session info; growth beyond is exact (see `room`).
+            records: Vec::with_capacity(
+                chunk_frames as usize * (layout.buf_len + 16) + SESSION_ROOM,
+            ),
+            compressed: Vec::new(),
             record_count: 0,
             frames_in_chunk: 0,
             chunk_first_frame: 0,
@@ -143,12 +152,19 @@ impl<W: Write> CaptureWriter<W> {
             last_time: 0,
             prev_frame: vec![0; layout.buf_len],
             session: None,
-            index: Vec::new(),
+            // An hour and a half of ten-second chunks, so a recording's index does not grow while it runs.
+            index: Vec::with_capacity(512),
             position: (HEADER_SIZE + table.len()) as u64,
             counts: Counts::default(),
             first_time: None,
             options,
         })
+    }
+
+    /// Makes room for `bytes` more record bytes. Growth is exact rather than doubling: the buffer holds a whole
+    /// chunk, and doubling past it would keep megabytes unused.
+    fn room(&mut self, bytes: usize) {
+        self.records.reserve_exact(bytes);
     }
 
     /// Starts a record of `kind` at `time`, opening a chunk first when none is open.
@@ -161,6 +177,10 @@ impl<W: Write> CaptureWriter<W> {
             self.record_count = 0;
             self.frames_in_chunk = 0;
             self.prev_frame.fill(0);
+            if let Some((_, text)) = &self.session {
+                let len = text.len();
+                self.room(len + 20);
+            }
             if let Some((update, text)) = &self.session {
                 self.records.push(KIND_SESSION_CARRY);
                 put_varint(&mut self.records, 0);
@@ -171,6 +191,7 @@ impl<W: Write> CaptureWriter<W> {
                 self.record_count += 1;
             }
         }
+        self.room(11);
         self.records.push(kind);
         // Times never run backwards in a capture; a source that does is clamped.
         put_varint(&mut self.records, time.saturating_sub(self.last_time));
@@ -187,6 +208,7 @@ impl<W: Write> CaptureWriter<W> {
             ));
         }
         self.begin(KIND_FRAME, time);
+        self.room(8 + row.len());
         self.records.extend_from_slice(&tick.to_le_bytes());
         self.records.extend_from_slice(&buffer.to_le_bytes());
         self.records
@@ -203,11 +225,20 @@ impl<W: Write> CaptureWriter<W> {
     /// A session info revision; `text` without its NUL padding.
     pub fn session_info(&mut self, time: u64, update: i32, text: &[u8]) -> io::Result<()> {
         self.begin(KIND_SESSION_INFO, time);
+        self.room(8 + text.len());
         self.records.extend_from_slice(&update.to_le_bytes());
         self.records
             .extend_from_slice(&(text.len() as u32).to_le_bytes());
         self.records.extend_from_slice(text);
-        self.session = Some((update, text.to_vec()));
+        // The revision in effect, carried into every new chunk; its buffer is reused.
+        match &mut self.session {
+            Some((current, kept)) => {
+                *current = update;
+                kept.clear();
+                kept.extend_from_slice(text);
+            }
+            None => self.session = Some((update, text.to_vec())),
+        }
         self.counts.session_info_revisions += 1;
         Ok(())
     }
@@ -215,6 +246,7 @@ impl<W: Write> CaptureWriter<W> {
     /// Ticks the recorder did not see.
     pub fn gap(&mut self, time: u64, missed: u32) -> io::Result<()> {
         self.begin(KIND_GAP, time);
+        self.room(4);
         self.records.extend_from_slice(&missed.to_le_bytes());
         self.counts.gaps += 1;
         self.counts.missed_ticks += u64::from(missed);
@@ -231,7 +263,15 @@ impl<W: Write> CaptureWriter<W> {
         if self.records.is_empty() {
             return Ok(());
         }
-        let compressed = self.compressor.compress(&self.records)?;
+        self.compressed.clear();
+        // Sized for the largest chunk the records buffer holds, so chunks of other lengths fit too.
+        let bound = zstd::zstd_safe::compress_bound(self.records.capacity());
+        if self.compressed.capacity() < bound {
+            self.compressed.reserve_exact(bound);
+        }
+        self.compressor
+            .compress_to_buffer(&self.records[..], &mut self.compressed)?;
+        let compressed = &self.compressed;
         if compressed.len() > MAX_CHUNK_BYTES as usize
             || self.records.len() > MAX_CHUNK_BYTES as usize
         {
@@ -248,7 +288,7 @@ impl<W: Write> CaptureWriter<W> {
         let crc = crc32(&head[..36]);
         put_u32(&mut head, 36, crc);
         self.out.write_all(&head)?;
-        self.out.write_all(&compressed)?;
+        self.out.write_all(compressed)?;
         self.index.push(IndexEntry {
             offset: self.position,
             first_frame: self.chunk_first_frame,

@@ -67,7 +67,7 @@ fn dropped_samples_are_kept_across_connections() {
         retry_interval: Duration::from_millis(5),
         idle_timeout: Duration::from_millis(50),
     };
-    let (_pipeline, mut view) = Pipeline::start(names, config, Vec::new()).expect("starts");
+    let (_pipeline, mut view) = Pipeline::start(names, config, Vec::new(), None).expect("starts");
     wait_for(&mut view, "connection", |v| {
         v.poll().connection && v.is_connected()
     });
@@ -130,7 +130,7 @@ fn telemetry_and_every_sample_reach_the_view() {
         retry_interval: Duration::from_millis(5),
         idle_timeout: Duration::from_millis(50),
     };
-    let (pipeline, mut view) = Pipeline::start(names, config, Vec::new()).expect("starts");
+    let (pipeline, mut view) = Pipeline::start(names, config, Vec::new(), None).expect("starts");
     wait_for(&mut view, "connection", |v| {
         v.poll().connection && v.is_connected()
     });

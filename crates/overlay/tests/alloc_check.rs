@@ -12,7 +12,7 @@ use pitot_irsdk::capture::test_capture::{Item, build};
 use pitot_irsdk::layout::{VarHeader, VarType};
 use pitot_irsdk::live::{ReaderConfig, SdkNames};
 use pitot_irsdk::publish::{Publisher, PublisherConfig};
-use pitot_overlay::pipeline::{Pipeline, Source, View};
+use pitot_overlay::pipeline::{Pipeline, RecordingConfig, Source, View};
 
 /// Counts allocations on every thread while switched on: the data thread is internal to the pipeline.
 struct Counting;
@@ -91,7 +91,8 @@ fn pipeline_does_not_allocate_per_tick() {
         retry_interval: Duration::from_millis(5),
         idle_timeout: Duration::from_millis(50),
     };
-    let (pipeline, mut view) = Pipeline::start(names, reader_config, Vec::new()).expect("starts");
+    let (pipeline, mut view) =
+        Pipeline::start(names, reader_config, Vec::new(), None).expect("starts");
     let deadline = Instant::now() + Duration::from_secs(5);
     while !view.is_connected() {
         assert!(Instant::now() < deadline, "connects");
@@ -118,6 +119,7 @@ fn pipeline_does_not_allocate_per_tick() {
         samples += cycle(&mut publisher, &mut view, &mut row, 0);
     }
 
+    ALLOCATIONS.store(0, Ordering::Relaxed);
     COUNTING.store(true, Ordering::Relaxed);
     let before = samples;
     for n in 120..720 {
@@ -196,7 +198,7 @@ fn playing_a_capture_does_not_allocate_per_tick() {
         idle_timeout: Duration::from_millis(50),
     };
     let (pipeline, mut view) =
-        Pipeline::start(names, reader_config, vec![folder.clone()]).expect("starts");
+        Pipeline::start(names, reader_config, vec![folder.clone()], None).expect("starts");
 
     let mut row = [0u8; REPLAY_ROW];
     row[20] = 1;
@@ -226,6 +228,7 @@ fn playing_a_capture_does_not_allocate_per_tick() {
         n += 1;
     }
 
+    ALLOCATIONS.store(0, Ordering::Relaxed);
     COUNTING.store(true, Ordering::Relaxed);
     let mut samples = 0;
     for _ in 0..600 {
@@ -247,4 +250,80 @@ fn playing_a_capture_does_not_allocate_per_tick() {
     );
     drop(pipeline);
     let _ = std::fs::remove_dir_all(folder);
+}
+
+#[test]
+fn recording_does_not_allocate_per_tick() {
+    let _turn = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let pid = std::process::id();
+    let names = SdkNames::new(
+        &format!("Local\\PitotOverlayAllocRecordMap-{pid}"),
+        &format!("Local\\PitotOverlayAllocRecordEvent-{pid}"),
+    );
+    let config = PublisherConfig {
+        vars: vec![
+            VarHeader::new(VarType::Double, 0, 1, "SessionTime").expect("valid"),
+            VarHeader::new(VarType::Float, 8, 1, "ThrottleRaw").expect("valid"),
+            VarHeader::new(VarType::Bool, 12, 1, "IsOnTrack").expect("valid"),
+            VarHeader::new(VarType::Float, 16, 72, "CarIdxLapDistPct").expect("valid"),
+            VarHeader::new(VarType::Float, 16 + 288, 72, "CarIdxEstTime").expect("valid"),
+            VarHeader::new(VarType::Int, 16 + 576, 72, "CarIdxPosition").expect("valid"),
+        ],
+        buf_len: ROW,
+        num_buf: 3,
+        tick_rate: 60,
+        session_info_capacity: 4096,
+    };
+    let mut publisher = Publisher::create(&names, &config).expect("creates");
+    publisher.set_connected(true).expect("connects");
+    publisher
+        .set_session_info(b"WeekendInfo:\n TrackID: 1\n")
+        .expect("fits");
+    let dir = std::env::temp_dir().join(format!("pitot-alloc-record-{pid}"));
+    let recording = RecordingConfig {
+        dir: dir.clone(),
+        max_bytes: 1 << 30,
+    };
+    let reader_config = ReaderConfig {
+        retry_interval: Duration::from_millis(5),
+        idle_timeout: Duration::from_millis(50),
+    };
+    let (pipeline, mut view) =
+        Pipeline::start(names, reader_config, Vec::new(), Some(recording)).expect("starts");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !view.is_connected() {
+        assert!(Instant::now() < deadline, "connects");
+        view.poll();
+        thread::sleep(Duration::from_millis(2));
+    }
+    let mut row = [0u8; ROW];
+    // Slower than the other tests: the recorder drains once a second, and its queue holds two seconds of 60 Hz
+    // ticks.
+    let mut cycle = |n: u32| -> usize {
+        row[0..8].copy_from_slice(&f64::from(n).to_le_bytes());
+        row[12] = 1;
+        publisher.publish(&row).expect("publishes");
+        thread::sleep(Duration::from_millis(16));
+        view.poll();
+        view.drain_samples(|_| {})
+    };
+    // Warm-up: the buffer pool fills, and chunks are compressed and written.
+    for n in 0..400 {
+        cycle(n);
+    }
+    ALLOCATIONS.store(0, Ordering::Relaxed);
+    COUNTING.store(true, Ordering::Relaxed);
+    let mut samples = 0;
+    for n in 400..1000 {
+        samples += cycle(n);
+    }
+    COUNTING.store(false, Ordering::Relaxed);
+    assert!(samples >= 590, "the pipeline kept up: {samples}");
+    assert_eq!(
+        ALLOCATIONS.load(Ordering::Relaxed),
+        0,
+        "allocations across the data, recorder, and render threads"
+    );
+    drop(pipeline);
+    let _ = std::fs::remove_dir_all(dir);
 }
