@@ -1,6 +1,7 @@
 //! Pitot captures (`.ptc`): what the sim published through SDK shared memory, in compressed ten-second chunks
 //! with an index, checksums, and metadata. The format is specified in `docs/capture-format.md`.
 //!
+//! - [`CaptureWriter`] writes one.
 //! - [`CaptureReader`] reads a capture in order, or from a chunk found through the index.
 //! - [`Seeker`] finds frames by session time, to play a capture in step with the sim's replay.
 //! - [`format`] holds the format's constants and primitives for writers.
@@ -8,6 +9,7 @@
 pub mod format;
 mod reader;
 mod seek;
+mod writer;
 
 use std::fmt;
 use std::io;
@@ -16,8 +18,9 @@ use crate::layout::{LayoutError, VarHeader};
 
 pub use reader::{CaptureReader, ChunkEntry, Record};
 pub use seek::{Moment, Seeker};
+pub use writer::{CaptureWriter, Counts, SourceInfo, WriterOptions};
 
-/// What a capture's frames look like.
+/// What a capture's frames look like, and the shared-memory layout a replay of it publishes.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CaptureLayout {
     pub vars: Vec<VarHeader>,

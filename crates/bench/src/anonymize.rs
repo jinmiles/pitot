@@ -322,6 +322,8 @@ pub fn capture(
             file: None,
             bytes: None,
         },
+        tool: "pitot-bench",
+        tool_version: env!("CARGO_PKG_VERSION"),
     };
     let layout = source.layout().clone();
     let mut writer = CaptureWriter::new(BufWriter::new(File::create(output)?), &layout, options)?;
@@ -580,6 +582,8 @@ RadioInfo:
                 file: None,
                 bytes: None,
             },
+            tool: "pitot-bench",
+            tool_version: env!("CARGO_PKG_VERSION"),
         };
         let mut writer = CaptureWriter::new(
             BufWriter::new(File::create(&input).expect("create")),

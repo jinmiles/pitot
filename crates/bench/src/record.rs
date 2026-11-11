@@ -122,6 +122,8 @@ fn open(options: &RecordOptions, layout: &LiveLayout, n: usize) -> Result<Open, 
                 file: None,
                 bytes: None,
             },
+            tool: "pitot-bench",
+            tool_version: env!("CARGO_PKG_VERSION"),
         },
     )?;
     Ok(Open {

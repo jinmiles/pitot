@@ -42,14 +42,7 @@ impl<R: Read + Seek> CaptureSource<R> {
     }
 
     fn wrap(reader: CaptureReader<R>) -> Self {
-        let l = reader.layout();
-        let layout = SourceLayout {
-            vars: l.vars.clone(),
-            buf_len: l.buf_len,
-            tick_rate: l.tick_rate,
-            session_info_capacity: l.session_info_capacity,
-            player_car_only: l.player_car_only,
-        };
+        let layout = reader.layout().clone();
         Self {
             reader,
             layout,

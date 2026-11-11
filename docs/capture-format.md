@@ -21,7 +21,8 @@ Captures come from the [recorder](recorder.md) or from conversion (`pitot-bench 
 [replay.md](replay.md)). A capture whose recorder stopped early has no index, metadata, or trailer. Its chunks are
 still readable in order, up to the last complete one. The reader is `pitot_irsdk::capture::CaptureReader`, so the
 overlay can read captures too, and `pitot_irsdk::capture::Seeker` finds frames by session time for
-[sim replays](overlay-pipeline.md#sim-replays); the writer is part of `pitot-bench`.
+[sim replays](overlay-pipeline.md#sim-replays). The writer is `pitot_irsdk::capture::CaptureWriter`; its metadata
+names the program that wrote the capture (`tool`).
 
 ## File header
 

@@ -1,15 +1,14 @@
 //! Writes captures: records are collected per chunk, compressed when the chunk is full, and the index, metadata,
 //! and trailer are written at the end.
 
+use std::fmt::Write as _;
 use std::io::{self, Write};
 
-use serde::Serialize;
-
-use crate::replay::SourceLayout;
-use pitot_irsdk::capture::format::*;
+use super::CaptureLayout;
+use super::format::*;
 
 /// Where a capture's data came from, for its metadata.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceInfo {
     /// `live`, `irdt`, or `ibt`.
     pub kind: String,
@@ -27,10 +26,13 @@ pub struct WriterOptions {
     pub clock_hz: u64,
     pub sdk_version: i32,
     pub source: SourceInfo,
+    /// The program writing the capture and its version, for the metadata.
+    pub tool: &'static str,
+    pub tool_version: &'static str,
 }
 
 /// Counts written into the metadata and returned by [`CaptureWriter::finish`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Counts {
     pub frames: u64,
     pub session_info_revisions: u64,
@@ -38,22 +40,6 @@ pub struct Counts {
     pub missed_ticks: u64,
     pub disconnects: u64,
     pub chunks: u64,
-}
-
-#[derive(Debug, Serialize)]
-struct Metadata<'a> {
-    format: &'static str,
-    version: u32,
-    tool: &'static str,
-    tool_version: &'static str,
-    source: &'a SourceInfo,
-    compression: &'static str,
-    level: i32,
-    clock_hz: u64,
-    tick_rate: i32,
-    seconds: f64,
-    #[serde(flatten)]
-    counts: Counts,
 }
 
 struct IndexEntry {
@@ -96,7 +82,7 @@ impl<W: Write> std::fmt::Debug for CaptureWriter<W> {
 
 impl<W: Write> CaptureWriter<W> {
     /// Writes the file header and variable table.
-    pub fn new(mut out: W, layout: &SourceLayout, options: WriterOptions) -> io::Result<Self> {
+    pub fn new(mut out: W, layout: &CaptureLayout, options: WriterOptions) -> io::Result<Self> {
         let invalid = |what: &str| io::Error::new(io::ErrorKind::InvalidInput, what.to_owned());
         if layout.vars.is_empty() || layout.vars.len() > MAX_VARS as usize {
             return Err(invalid("variable count out of range"));
@@ -297,21 +283,8 @@ impl<W: Write> CaptureWriter<W> {
 
         let metadata_offset = self.position;
         let span = time.saturating_sub(self.first_time.unwrap_or(time));
-        let metadata = Metadata {
-            format: "pitot-capture",
-            version: VERSION,
-            tool: "pitot-bench",
-            tool_version: env!("CARGO_PKG_VERSION"),
-            source: &self.options.source,
-            compression: "zstd",
-            level: self.options.level,
-            clock_hz: self.options.clock_hz,
-            tick_rate: self.tick_rate,
-            seconds: span as f64 / self.options.clock_hz as f64,
-            counts: self.counts,
-        };
-        let mut json = serde_json::to_vec_pretty(&metadata).map_err(io::Error::other)?;
-        json.push(b'\n');
+        let seconds = span as f64 / self.options.clock_hz as f64;
+        let json = metadata_json(&self.options, self.tick_rate, seconds, &self.counts);
         self.out.write_all(&json)?;
         self.position += json.len() as u64;
 
@@ -325,5 +298,99 @@ impl<W: Write> CaptureWriter<W> {
         self.out.write_all(&trailer)?;
         self.out.flush()?;
         Ok(self.counts)
+    }
+}
+
+/// `text` as a JSON string, quoted and escaped.
+fn json_string(out: &mut String, text: &str) {
+    out.push('"');
+    for c in text.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => {
+                let _ = write!(out, "\\u{:04x}", c as u32);
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+}
+
+/// The metadata block: what wrote the capture, from what, how it is compressed, and its counts.
+fn metadata_json(
+    options: &WriterOptions,
+    tick_rate: i32,
+    seconds: f64,
+    counts: &Counts,
+) -> Vec<u8> {
+    let mut out = String::with_capacity(512);
+    out.push_str("{\n  \"format\": \"pitot-capture\",\n");
+    let _ = writeln!(out, "  \"version\": {VERSION},");
+    out.push_str("  \"tool\": ");
+    json_string(&mut out, options.tool);
+    out.push_str(",\n  \"tool_version\": ");
+    json_string(&mut out, options.tool_version);
+    out.push_str(",\n  \"source\": {\n    \"kind\": ");
+    json_string(&mut out, &options.source.kind);
+    out.push_str(",\n    \"file\": ");
+    match &options.source.file {
+        Some(file) => json_string(&mut out, file),
+        None => out.push_str("null"),
+    }
+    out.push_str(",\n    \"bytes\": ");
+    match options.source.bytes {
+        Some(bytes) => {
+            let _ = write!(out, "{bytes}");
+        }
+        None => out.push_str("null"),
+    }
+    out.push_str("\n  },\n  \"compression\": \"zstd\",\n");
+    let _ = writeln!(out, "  \"level\": {},", options.level);
+    let _ = writeln!(out, "  \"clock_hz\": {},", options.clock_hz);
+    let _ = writeln!(out, "  \"tick_rate\": {tick_rate},");
+    // Debug keeps a decimal point on whole numbers, so the value stays a JSON float.
+    let _ = writeln!(out, "  \"seconds\": {seconds:?},");
+    let _ = writeln!(out, "  \"frames\": {},", counts.frames);
+    let _ = writeln!(
+        out,
+        "  \"session_info_revisions\": {},",
+        counts.session_info_revisions
+    );
+    let _ = writeln!(out, "  \"gaps\": {},", counts.gaps);
+    let _ = writeln!(out, "  \"missed_ticks\": {},", counts.missed_ticks);
+    let _ = writeln!(out, "  \"disconnects\": {},", counts.disconnects);
+    let _ = writeln!(out, "  \"chunks\": {}", counts.chunks);
+    out.push_str("}\n");
+    out.into_bytes()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn metadata_escapes_strings() {
+        let options = WriterOptions {
+            level: 3,
+            chunk_seconds: 10,
+            clock_hz: 60,
+            sdk_version: 2,
+            source: SourceInfo {
+                kind: "irdt".into(),
+                file: Some("a \"b\"\\c.irdt".into()),
+                bytes: Some(12),
+            },
+            tool: "test",
+            tool_version: "0.0.0",
+        };
+        let json =
+            String::from_utf8(metadata_json(&options, 60, 3.0, &Counts::default())).expect("utf-8");
+        assert!(json.contains(r#""file": "a \"b\"\\c.irdt""#), "{json}");
+        assert!(json.contains(r#""seconds": 3.0,"#), "{json}");
+        assert!(json.contains(r#""tool": "test""#), "{json}");
     }
 }

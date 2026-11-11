@@ -11,7 +11,7 @@ use std::fmt;
 use std::io;
 
 use pitot_irsdk::ibt::IbtError;
-use pitot_irsdk::layout::{LayoutError, VarHeader};
+use pitot_irsdk::layout::LayoutError;
 
 pub use ibt::IbtSource;
 #[cfg(test)]
@@ -90,16 +90,8 @@ impl From<pitot_irsdk::live::LiveError> for ReplayError {
     }
 }
 
-/// Shared-memory layout a source replays into.
-#[derive(Debug, Clone, PartialEq)]
-pub struct SourceLayout {
-    pub vars: Vec<VarHeader>,
-    pub buf_len: usize,
-    pub tick_rate: i32,
-    pub session_info_capacity: usize,
-    /// The recording holds the player's car only (no `CarIdx*` data), as `.ibt` files do.
-    pub player_car_only: bool,
-}
+/// Shared-memory layout a source replays into: the same as a capture's.
+pub use pitot_irsdk::capture::CaptureLayout as SourceLayout;
 
 /// What [`FrameSource::next`] put into the buffer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
