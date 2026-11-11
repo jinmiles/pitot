@@ -43,6 +43,10 @@ struct Frame {
 
 /// Plays a capture by session time.
 ///
+/// Only frames recorded while the sim was not playing a replay (`IsReplayPlaying` clear) count as the
+/// session: during its replays the sim publishes live values, so a capture made while watching a replay
+/// covers nothing.
+///
 /// Opening reads the whole capture once to find where each chunk starts in session time; this takes about a
 /// second per hour of capture. After that, moving to a moment reads from the chunk that holds it, and every
 /// buffer is already sized for the largest chunk and session info text, so moving does not allocate.
@@ -99,11 +103,15 @@ impl<R: Read + Seek> Seeker<R> {
         };
         let session_num = field("SessionNum", VarType::Int)?;
         let session_time = field("SessionTime", VarType::Double)?;
+        let replaying = field("IsReplayPlaying", VarType::Bool).ok();
         let half_tick = 0.5 / f64::from(layout.tick_rate.max(1));
         let buf_len = layout.buf_len;
 
         let mut chunks: Vec<(u64, Moment)> = Vec::new();
         let mut spans: Vec<Span> = Vec::new();
+        // A replay in the recording ends the span before it: the session time ran on, but those frames show
+        // the sim's live values during its replay, not the session as driven.
+        let mut after_replay = false;
         let mut longest_text = 0;
         let mut buf = Vec::new();
         reader.rewind();
@@ -118,8 +126,16 @@ impl<R: Read + Seek> Seeker<R> {
                     if chunks.last().is_none_or(|(offset, _)| *offset != start) {
                         chunks.push((start, m));
                     }
+                    if replaying.is_some_and(|f| f.bool(&buf, 0) == Some(true)) {
+                        after_replay = true;
+                        continue;
+                    }
                     match spans.last_mut() {
-                        Some(span) if span.session == m.session && m.time >= span.last => {
+                        Some(span)
+                            if !after_replay
+                                && span.session == m.session
+                                && m.time >= span.last =>
+                        {
                             span.last = m.time;
                         }
                         _ => spans.push(Span {
@@ -128,13 +144,16 @@ impl<R: Read + Seek> Seeker<R> {
                             last: m.time,
                         }),
                     }
+                    after_replay = false;
                 }
                 Record::SessionInfo { .. } => longest_text = longest_text.max(buf.len()),
                 _ => {}
             }
         }
-        if chunks.is_empty() {
-            return Err(CaptureError::Format("capture has no frames"));
+        if spans.is_empty() {
+            return Err(CaptureError::Format(
+                "capture has no frames recorded outside a replay",
+            ));
         }
         let rows = buf_len.max(longest_text);
         let sized = || Vec::with_capacity(rows);
@@ -172,7 +191,8 @@ impl<R: Read + Seek> Seeker<R> {
         self.session_update.map(|u| (u, &self.session[..]))
     }
 
-    /// Whether the capture has frames of `at`'s session around `at`.
+    /// Whether the capture has frames of `at`'s session around `at`, recorded while the sim was not playing a
+    /// replay.
     pub fn covers(&self, at: Moment) -> bool {
         self.spans.iter().any(|s| {
             s.session == at.session
@@ -373,6 +393,47 @@ mod tests {
             148
         );
         assert_eq!(throttle(&s), 299.0);
+    }
+
+    fn replay_vars() -> Vec<VarHeader> {
+        let mut vars = vars();
+        vars.push(VarHeader::new(VarType::Bool, 20, 1, "IsReplayPlaying").expect("valid"));
+        vars
+    }
+
+    fn replay_row(i: usize, replaying: bool) -> Vec<u8> {
+        let mut row = row(0, i);
+        row.extend_from_slice(&[u8::from(replaying), 0, 0, 0]);
+        row
+    }
+
+    #[test]
+    fn frames_recorded_during_a_replay_do_not_count() {
+        // Driving for 120 frames, watching a replay for 60 (the session time runs on), then driving again.
+        let mut items = vec![Item::Session(1, b"first".to_vec())];
+        for i in 0..240 {
+            items.push(Item::Frame(
+                i as i32,
+                replay_row(i, (120..180).contains(&i)),
+            ));
+        }
+        let bytes = build(&replay_vars(), 24, 60, &items);
+        let s =
+            Seeker::new(CaptureReader::new(Cursor::new(bytes)).expect("opens")).expect("indexes");
+        assert!(s.covers(at(119.0)));
+        assert!(!s.covers(at(150.0)), "the sim's replay");
+        assert!(s.covers(at(180.0)));
+        assert_eq!(s.end(), at(239.0));
+
+        let watched: Vec<Item> = (0..120)
+            .map(|i| Item::Frame(i, replay_row(i as usize, true)))
+            .collect();
+        let bytes = build(&replay_vars(), 24, 60, &watched);
+        let only_replay = Seeker::new(CaptureReader::new(Cursor::new(bytes)).expect("opens"));
+        assert!(
+            only_replay.is_err(),
+            "a capture of watching a replay covers nothing"
+        );
     }
 
     #[test]
