@@ -404,15 +404,23 @@ mod threads {
             }
             fresh
         } else {
-            let moved = match plan {
-                Plan::Forward => player.forward(at, |s| {
+            // The sim's replay clock moves 0.8 to 1.4 frames per tick at 1x, so adding every frame passed would
+            // scroll the trace unevenly. While the replay plays, the trace gets the frame at the replayed moment
+            // once per tick instead, as live. Without `ReplayPlaySpeed`, every frame passed is added.
+            let speed = live.i32(vars.replay_play_speed, 0);
+            let moved = match (plan, speed) {
+                (Plan::Forward, Some(_)) => player.forward(at, |_| {}),
+                (Plan::Forward, None) => player.forward(at, |s| {
                     current.samples.push(sample(s, vars, 0));
                 }),
-                Plan::Back => player.back(at),
+                (Plan::Back, _) => player.back(at),
                 _ => Ok(()),
             };
             if moved.is_err() {
                 return Ok(None);
+            }
+            if matches!(plan, Plan::Forward | Plan::Same) && speed.is_some_and(|s| s != 0) {
+                current.samples.push(sample(player.snapshot(), vars, 0));
             }
             Arc::clone(current)
         };

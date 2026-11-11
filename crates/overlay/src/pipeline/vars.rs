@@ -30,6 +30,7 @@ vars! {
     is_replay_playing => "IsReplayPlaying",
     replay_session_num => "ReplaySessionNum",
     replay_session_time => "ReplaySessionTime",
+    replay_play_speed => "ReplayPlaySpeed",
     on_pit_road => "OnPitRoad",
     player_car_idx => "PlayerCarIdx",
     speed => "Speed",
