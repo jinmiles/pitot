@@ -33,6 +33,14 @@ pub enum Display {
 /// Samples the ring holds: about eight seconds at 60 Hz, far more than one late frame.
 pub const SAMPLE_CAPACITY: usize = 512;
 
+/// Readies the session info buffer for a new connection: room for the whole session info `area`, so copies
+/// during the connection do not allocate. The buffer still holds the previous connection's text, so reserving
+/// without clearing it first would grow the buffer to twice the area.
+fn ready_session_buffer(buffer: &mut Vec<u8>, area: usize) {
+    buffer.clear();
+    buffer.reserve_exact(area);
+}
+
 #[cfg(windows)]
 mod threads {
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -43,7 +51,9 @@ mod threads {
     use pitot_irsdk::live::{LiveReader, ReaderConfig, SdkNames, Snapshot, Step, VarSet};
     use pitot_irsdk::session::{self, SessionInfo};
 
-    use super::{Display, InputSample, SAMPLE_CAPACITY, SampleRing, SeqBuffer, Vars};
+    use super::{
+        Display, InputSample, SAMPLE_CAPACITY, SampleRing, SeqBuffer, Vars, ready_session_buffer,
+    };
 
     /// Buffers for one connection, shared by the data thread (writer) and the render thread (reader).
     #[derive(Debug)]
@@ -190,7 +200,10 @@ mod threads {
                         samples: SampleRing::new(SAMPLE_CAPACITY),
                         car_count,
                     });
-                    session_text.reserve(reader.session_info_capacity().unwrap_or(0));
+                    ready_session_buffer(
+                        &mut session_text,
+                        reader.session_info_capacity().unwrap_or(0),
+                    );
                     session_update = None;
                     connection = Some(Arc::clone(&fresh));
                     if to_render.send(Message::Connected(fresh)).is_err() {
@@ -382,5 +395,28 @@ mod threads {
                 Display::Idle
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ready_session_buffer;
+
+    #[test]
+    fn session_buffer_keeps_its_size_across_connections() {
+        let area = 512 * 1024;
+        let mut buffer = Vec::new();
+        ready_session_buffer(&mut buffer, area);
+        let first = buffer.capacity();
+        assert!(first >= area);
+        // The copy fills the area and keeps only the text.
+        buffer.resize(area, 0);
+        buffer.truncate(79_000);
+        ready_session_buffer(&mut buffer, area);
+        assert_eq!(
+            buffer.capacity(),
+            first,
+            "a reconnect does not grow the buffer"
+        );
     }
 }
