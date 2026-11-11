@@ -197,6 +197,7 @@ dependencies = [
  "saphyr",
  "saphyr-parser",
  "windows",
+ "zstd",
 ]
 
 [[package]]

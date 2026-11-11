@@ -18,8 +18,9 @@ trailer          32 bytes
 ```
 
 Captures come from the [recorder](recorder.md) or from conversion (`pitot-bench convert`, see
-[replay.md](replay.md)). A capture whose recorder stopped early has no index, metadata, or trailer. Its chunks are still readable in
-order, up to the last complete one.
+[replay.md](replay.md)). A capture whose recorder stopped early has no index, metadata, or trailer. Its chunks are
+still readable in order, up to the last complete one. The reader is `pitot_irsdk::capture::CaptureReader`, so the
+overlay can read captures too; the writer is part of `pitot-bench`.
 
 ## File header
 
