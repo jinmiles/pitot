@@ -72,7 +72,9 @@ Notes on the sources:
   swap. Handles avoid that.
 - **GPU engines** are summed per adapter and engine type over the tree, and the busiest is reported, as Task
   Manager shows a process's GPU use. PDH GPU counters need a WDDM 2 driver; without them the GPU columns stay
-  empty.
+  empty. One engine of one process reads 0 to 100%, but PDH sometimes reports a wild value for one sample
+  (1.8e14% for `dwm.exe` once in a 40-minute run). Values outside 0 to 101% are skipped, and up to 101% counts
+  as 100%.
 - **DWM** is read through PDH, which needs no handle, so it works without elevation. DWM's CPU and GPU belong to
   the whole desktop; compare them against runs without an overlay.
 - Counter paths are English (`PdhAddEnglishCounterW`), so localized Windows works.
