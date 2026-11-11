@@ -29,11 +29,11 @@ use windows::Win32::System::Registry::{
 };
 use windows::Win32::System::SystemInformation::{GetLocalTime, GetSystemTimeAsFileTime};
 use windows::Win32::System::Threading::{
-    ALL_PROCESSOR_GROUPS, GetActiveProcessorCount, GetCurrentProcess, GetCurrentThread,
-    GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
-    PROCESS_TERMINATE, PROCESS_VM_READ, TerminateProcess, WaitForSingleObject,
+    ALL_PROCESSOR_GROUPS, GetActiveProcessorCount, GetCurrentProcess, GetProcessTimes, OpenProcess,
+    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE, PROCESS_VM_READ,
+    TerminateProcess, WaitForSingleObject,
 };
-use windows::Win32::System::WindowsProgramming::{QueryProcessCycleTime, QueryThreadCycleTime};
+use windows::Win32::System::WindowsProgramming::QueryProcessCycleTime;
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetWindowThreadProcessId, PostMessageW, WM_CLOSE,
 };
@@ -334,13 +334,10 @@ pub fn current_process_cycles() -> Result<u64, SysError> {
     Ok(cycles)
 }
 
-/// CPU cycles the calling thread has used.
-pub fn current_thread_cycles() -> Result<u64, SysError> {
-    let mut cycles = 0;
-    // SAFETY: the pseudo handle for the current thread is always valid; `cycles` is a valid out pointer.
-    unsafe { QueryThreadCycleTime(GetCurrentThread(), &mut cycles) }
-        .map_err(win("QueryThreadCycleTime"))?;
-    Ok(cycles)
+/// The processor's time-stamp counter, which the cycle times above count in.
+pub fn time_stamp_counter() -> u64 {
+    // SAFETY: `rdtsc` exists on every x86-64 processor and only reads a counter.
+    unsafe { std::arch::x86_64::_rdtsc() }
 }
 
 /// Logical processors across all processor groups.
