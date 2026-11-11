@@ -1,7 +1,7 @@
 //! The Windows sampler: process handles for CPU and memory, PDH for GPU and DWM.
 
 use std::collections::{BTreeSet, HashMap};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use super::Sample;
 use super::gpu::{self, EngineLoad};
@@ -43,7 +43,26 @@ pub struct Collector {
     first: Option<Instant>,
     last: Option<Instant>,
     own_cpu: u64,
+    own_cycles: u64,
+    cycle_rate_mhz: Option<f64>,
     unreadable: BTreeSet<String>,
+}
+
+/// The rate of the CPU cycle counter in MHz, from a few 10 ms busy loops on this thread against the monotonic
+/// clock. Being preempted only lowers a loop's rate, so the highest is kept. Current x64 CPUs count cycles at a
+/// fixed rate (the invariant time-stamp counter, at the nominal clock speed), whatever the actual clock speed.
+pub fn cycle_rate_mhz() -> Option<f64> {
+    let mut best: f64 = 0.0;
+    for _ in 0..5 {
+        let start = Instant::now();
+        let before = sys::current_thread_cycles().ok()?;
+        while start.elapsed() < Duration::from_millis(10) {
+            std::hint::spin_loop();
+        }
+        let cycles = sys::current_thread_cycles().ok()?.saturating_sub(before);
+        best = best.max(cycles as f64 / start.elapsed().as_secs_f64() / 1.0e6);
+    }
+    (best > 0.0).then_some(best)
 }
 
 impl Collector {
@@ -69,12 +88,19 @@ impl Collector {
             first: None,
             last: None,
             own_cpu: sys::current_process_cpu().unwrap_or(0),
+            own_cycles: sys::current_process_cycles().unwrap_or(0),
+            cycle_rate_mhz: cycle_rate_mhz(),
             unreadable: BTreeSet::new(),
         }
     }
 
     pub fn logical_processors(&self) -> u32 {
         self.cores
+    }
+
+    /// The cycle counter rate measured when the collector was created; `None` if it could not be read.
+    pub fn cycle_rate_mhz(&self) -> Option<f64> {
+        self.cycle_rate_mhz
     }
 
     pub fn gpu_available(&self) -> bool {
@@ -165,6 +191,9 @@ impl Collector {
         let own_cpu = sys::current_process_cpu().unwrap_or(self.own_cpu);
         let collector = own_cpu.saturating_sub(self.own_cpu);
         self.own_cpu = own_cpu;
+        let own_cycles = sys::current_process_cycles().unwrap_or(self.own_cycles);
+        let collector_cycles = own_cycles.saturating_sub(self.own_cycles);
+        self.own_cycles = own_cycles;
 
         let Some(last) = self.last.replace(now) else {
             self.first = Some(now);
@@ -190,6 +219,7 @@ impl Collector {
             dwm_cpu_ms: dwm_cpu.map(|pct| pct / 100.0 * dt * 1000.0),
             dwm_gpu_pct: dwm_gpu,
             collector_cpu_ms: collector as f64 / 10_000.0,
+            collector_mcycles: collector_cycles as f64 / 1.0e6,
         }))
     }
 
@@ -231,5 +261,18 @@ impl Collector {
         };
         tree::select(&entries, &self.target, created, &mut self.selected);
         self.entries = entries;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cycle_rate_mhz;
+
+    #[test]
+    fn cycle_rate_is_steady() {
+        let a = cycle_rate_mhz().expect("cycle counter readable");
+        let b = cycle_rate_mhz().expect("cycle counter readable");
+        assert!((100.0..20_000.0).contains(&a), "{a} MHz");
+        assert!((a - b).abs() / a < 0.05, "{a} and {b} MHz");
     }
 }
