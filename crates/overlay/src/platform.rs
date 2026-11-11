@@ -4,7 +4,7 @@
 //! All Win32 `unsafe` for windowing lives here; callers use the safe types below.
 
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::time::Duration;
 
 use windows::Win32::Foundation::{
@@ -34,12 +34,13 @@ use windows::Win32::UI::Shell::{
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow,
     DispatchMessageW, GetCursorPos, HTTRANSPARENT, IDI_APPLICATION, LWA_ALPHA, LoadIconW,
-    MF_STRING, MSG, MWMO_INPUTAVAILABLE, MsgWaitForMultipleObjectsEx, PM_REMOVE, PeekMessageW,
-    PostQuitMessage, QS_ALLINPUT, RegisterClassExW, SW_SHOWNOACTIVATE, SetForegroundWindow,
-    SetLayeredWindowAttributes, ShowWindow, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON,
-    TrackPopupMenu, TranslateMessage, WINDOW_EX_STYLE, WM_APP, WM_CLOSE, WM_CONTEXTMENU,
-    WM_NCHITTEST, WM_QUIT, WM_RBUTTONUP, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
-    WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+    MF_CHECKED, MF_SEPARATOR, MF_STRING, MSG, MWMO_INPUTAVAILABLE, MsgWaitForMultipleObjectsEx,
+    PM_REMOVE, PeekMessageW, PostQuitMessage, QS_ALLINPUT, RegisterClassExW, SW_SHOWNOACTIVATE,
+    SetForegroundWindow, SetLayeredWindowAttributes, ShowWindow, TPM_NONOTIFY, TPM_RETURNCMD,
+    TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, WINDOW_EX_STYLE, WM_APP, WM_CLOSE,
+    WM_CONTEXTMENU, WM_LBUTTONUP, WM_NCHITTEST, WM_QUIT, WM_RBUTTONUP, WNDCLASSEXW, WS_EX_LAYERED,
+    WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    WS_EX_TRANSPARENT, WS_POPUP,
 };
 use windows::core::{PCWSTR, w};
 
@@ -166,22 +167,28 @@ pub fn monitors() -> Vec<Monitor> {
 }
 
 const TRAY_MESSAGE: u32 = WM_APP + 1;
-const CMD_RELOAD: usize = 1;
-const CMD_QUIT: usize = 2;
+const CMD_RELOAD: u8 = 1;
+const CMD_QUIT: u8 = 2;
+const CMD_HIDE: u8 = 3;
 
-/// Tray menu choice waiting to be handled by the app loop.
+/// Tray menu choice waiting to be handled by the app loop: one of the `CMD_` values, or 0.
 static PENDING: AtomicU8 = AtomicU8::new(0);
+/// Whether the menu shows *Hide widgets* checked; set by the app through [`Tray::set_hidden`].
+static HIDDEN: AtomicBool = AtomicBool::new(false);
 
 /// A command chosen from the tray menu.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrayCommand {
     Reload,
+    /// Hide the widgets if they are shown, show them if they are hidden.
+    ToggleHidden,
 }
 
 /// Takes the pending tray command, if any. Quit ends the message loop instead.
 pub fn take_tray_command() -> Option<TrayCommand> {
     match PENDING.swap(0, Ordering::Relaxed) {
-        1 => Some(TrayCommand::Reload),
+        CMD_RELOAD => Some(TrayCommand::Reload),
+        CMD_HIDE => Some(TrayCommand::ToggleHidden),
         _ => None,
     }
 }
@@ -202,7 +209,13 @@ unsafe extern "system" fn window_proc(
             unsafe { PostQuitMessage(0) };
             LRESULT(0)
         }
-        TRAY_MESSAGE if matches!(lparam.0 as u32, WM_RBUTTONUP | WM_CONTEXTMENU) => {
+        // Either button opens the menu: a left click is what most people try first.
+        TRAY_MESSAGE
+            if matches!(
+                lparam.0 as u32,
+                WM_LBUTTONUP | WM_RBUTTONUP | WM_CONTEXTMENU
+            ) =>
+        {
             show_tray_menu(hwnd);
             LRESULT(0)
         }
@@ -217,18 +230,31 @@ fn show_tray_menu(hwnd: HWND) {
         let Ok(menu) = CreatePopupMenu() else {
             return;
         };
-        let _ = AppendMenuW(menu, MF_STRING, CMD_RELOAD, w!("Reload configuration"));
-        let _ = AppendMenuW(menu, MF_STRING, CMD_QUIT, w!("Quit Pitot"));
+        let hide = if HIDDEN.load(Ordering::Relaxed) {
+            MF_STRING | MF_CHECKED
+        } else {
+            MF_STRING
+        };
+        let _ = AppendMenuW(menu, hide, usize::from(CMD_HIDE), w!("Hide widgets"));
+        let _ = AppendMenuW(
+            menu,
+            MF_STRING,
+            usize::from(CMD_RELOAD),
+            w!("Reload configuration"),
+        );
+        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
+        let _ = AppendMenuW(menu, MF_STRING, usize::from(CMD_QUIT), w!("Quit Pitot"));
         let mut cursor = POINT::default();
         let _ = GetCursorPos(&mut cursor);
         // Required so the menu closes when the user clicks elsewhere.
         let _ = SetForegroundWindow(hwnd);
         let flags = TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON;
-        let chosen = TrackPopupMenu(menu, flags, cursor.x, cursor.y, None, hwnd, None).0 as usize;
+        // With TPM_RETURNCMD the result is the chosen item's id, or 0.
+        let chosen = TrackPopupMenu(menu, flags, cursor.x, cursor.y, None, hwnd, None).0;
         let _ = DestroyMenu(menu);
-        match chosen {
-            CMD_RELOAD => PENDING.store(1, Ordering::Relaxed),
-            CMD_QUIT => PostQuitMessage(0),
+        match u8::try_from(chosen) {
+            Ok(CMD_QUIT) => PostQuitMessage(0),
+            Ok(command @ (CMD_RELOAD | CMD_HIDE)) => PENDING.store(command, Ordering::Relaxed),
             _ => {}
         }
     }
@@ -328,7 +354,8 @@ impl Drop for OverlayWindow {
     }
 }
 
-/// The notification-area icon with Reload and Quit, owned by a hidden window.
+/// The notification-area icon with its menu (Hide widgets, Reload configuration, Quit), owned by a hidden
+/// window.
 #[derive(Debug)]
 pub struct Tray {
     window: OverlayWindow,
@@ -351,6 +378,11 @@ impl Tray {
             return Err(last_error("Shell_NotifyIconW"));
         }
         Ok(Self { window })
+    }
+
+    /// Shows *Hide widgets* checked or not the next time the menu opens.
+    pub fn set_hidden(&self, hidden: bool) {
+        HIDDEN.store(hidden, Ordering::Relaxed);
     }
 }
 
@@ -543,6 +575,15 @@ pub fn pump_messages() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tray_choices_reach_the_app_once() {
+        PENDING.store(CMD_HIDE, Ordering::Relaxed);
+        assert_eq!(take_tray_command(), Some(TrayCommand::ToggleHidden));
+        assert_eq!(take_tray_command(), None, "taken once");
+        PENDING.store(CMD_RELOAD, Ordering::Relaxed);
+        assert_eq!(take_tray_command(), Some(TrayCommand::Reload));
+    }
 
     #[test]
     fn second_instance_is_refused_until_the_first_exits() {

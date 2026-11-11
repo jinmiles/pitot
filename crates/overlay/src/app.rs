@@ -181,7 +181,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         return Err("no monitors found".into());
     }
     let mut layout = Layout::build(&config, &monitors)?;
-    let _tray = Tray::create()?;
+    let tray = Tray::create()?;
     let mut renderer = Some(Renderer::new()?);
     let mut scene = match renderer.as_mut() {
         Some(device) => Some(Scene::build(device, &layout)?),
@@ -190,13 +190,22 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let (pipeline, mut view) = Pipeline::start(SdkNames::sim(), ReaderConfig::default())?;
     let timer = Timer::new()?;
     let mut reload_at: Option<Instant> = None;
+    // Chosen from the tray menu: no widget is updated or drawn.
+    let mut hidden = false;
 
     loop {
         if !platform::pump_messages() {
             break;
         }
-        if platform::take_tray_command() == Some(TrayCommand::Reload) {
-            reload_at = Some(Instant::now());
+        match platform::take_tray_command() {
+            Some(TrayCommand::Reload) => reload_at = Some(Instant::now()),
+            Some(TrayCommand::ToggleHidden) => {
+                hidden = !hidden;
+                tray.set_hidden(hidden);
+                info!(hidden, "widgets hidden from the tray menu");
+                layout.slots.iter_mut().for_each(|s| s.stale = true);
+            }
+            None => {}
         }
         if reload_at.is_some_and(|at| Instant::now() >= at) {
             reload_at = None;
@@ -242,7 +251,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         let now = Instant::now();
         if let (Some(device), Some(current)) = (renderer.as_mut(), scene.as_mut())
-            && let Err(e) = frame(device, current, &mut layout.slots, &mut view, now)
+            && let Err(e) = frame(device, current, &mut layout.slots, &mut view, now, hidden)
         {
             // Device loss: rebuild the device and the scene on the next pass, after a short pause so a missing
             // device does not spin.
@@ -258,7 +267,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             layout
                 .slots
                 .iter()
-                .filter(|s| s.widget.visible(display))
+                .filter(|s| !hidden && s.widget.visible(display))
                 .map(|s| s.next_due),
             view.is_connected(),
             now,
@@ -297,17 +306,18 @@ fn log_counters(view: &View, event: &str) {
     );
 }
 
-/// Updates and draws the widgets that are due, then commits once.
+/// Updates and draws the widgets that are due, then commits once. `hidden` hides every widget.
 fn frame(
     renderer: &mut Renderer,
     scene: &mut Scene,
     slots: &mut [Slot],
     view: &mut View,
     now: Instant,
+    hidden: bool,
 ) -> Result<(), RenderError> {
     let display = view.display();
     for (slot, layers) in slots.iter_mut().zip(scene.layers.iter_mut()) {
-        let visible = slot.widget.visible(display);
+        let visible = !hidden && slot.widget.visible(display);
         for layer in layers.iter_mut() {
             renderer.set_visible(layer, visible)?;
         }
