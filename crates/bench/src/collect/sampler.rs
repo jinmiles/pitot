@@ -48,21 +48,32 @@ pub struct Collector {
     unreadable: BTreeSet<String>,
 }
 
-/// The rate of the CPU cycle counter in MHz, from a few 10 ms busy loops on this thread against the monotonic
-/// clock. Being preempted only lowers a loop's rate, so the highest is kept. Current x64 CPUs count cycles at a
-/// fixed rate (the invariant time-stamp counter, at the nominal clock speed), whatever the actual clock speed.
+/// The rate of the CPU cycle counter in MHz: the time-stamp counter against the monotonic clock over 100 ms.
+/// Process cycle times count in that counter, which runs at a fixed rate on current x64 CPUs (the invariant
+/// time-stamp counter, at the nominal clock speed), whatever the actual clock speed. Both are wall clocks, so
+/// a busy machine does not change the result, as it did for cycles of a busy loop on this thread, which miss
+/// the time the thread is preempted or the core serves interrupts.
 pub fn cycle_rate_mhz() -> Option<f64> {
-    let mut best: f64 = 0.0;
-    for _ in 0..5 {
-        let start = Instant::now();
-        let before = sys::current_thread_cycles().ok()?;
-        while start.elapsed() < Duration::from_millis(10) {
-            std::hint::spin_loop();
+    let (t0, c0) = clock_and_counter()?;
+    std::thread::sleep(Duration::from_millis(100));
+    let (t1, c1) = clock_and_counter()?;
+    let rate = c1.wrapping_sub(c0) as f64 / t1.duration_since(t0).as_secs_f64() / 1.0e6;
+    (rate > 0.0).then_some(rate)
+}
+
+/// The monotonic clock and the time-stamp counter read together: retried until the counter read falls between
+/// two clock reads at most 10 us apart, so a preemption in between cannot skew the pair.
+fn clock_and_counter() -> Option<(Instant, u64)> {
+    for _ in 0..100 {
+        let before = Instant::now();
+        let counter = sys::time_stamp_counter();
+        let after = Instant::now();
+        let gap = after.duration_since(before);
+        if gap <= Duration::from_micros(10) {
+            return Some((before + gap / 2, counter));
         }
-        let cycles = sys::current_thread_cycles().ok()?.saturating_sub(before);
-        best = best.max(cycles as f64 / start.elapsed().as_secs_f64() / 1.0e6);
     }
-    (best > 0.0).then_some(best)
+    None
 }
 
 impl Collector {

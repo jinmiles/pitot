@@ -54,11 +54,13 @@ Notes on the sources:
 
 - **CPU time comes from cycles.** `QueryProcessCycleTime` counts the cycles a process's threads run on a
   counter that has a fixed rate on current x64 CPUs (the invariant time-stamp counter, at the nominal clock speed),
-  whatever the actual clock speed. At the start of every run the collector measures that rate: five 10 ms busy
-  loops on its own thread against the monotonic clock, keeping the highest, since being preempted only lowers it.
-  Cycles over the rate are CPU time, exact per row. The rows keep the raw counts; the summary and the
-  [report](report.md) do the conversion. On the lab PC (i7-9700, nominal 3.0 GHz) the rate is 2,990 to 3,000 MHz
-  with one core busy and with all eight busy.
+  whatever the actual clock speed. At the start of every run the collector measures that rate: the time-stamp
+  counter against the monotonic clock over 100 ms. Cycles over the rate are CPU time, exact per row. The rows keep
+  the raw counts; the summary and the [report](report.md) do the conversion. On the lab PC (i7-9700, nominal
+  3.0 GHz) the rate is 3,000.0 MHz. Runs before this measured the cycles of busy loops on the collector's own
+  thread instead, which read 2,985 to 2,997 MHz on an idle machine and 2,661 MHz once under heavy load from other
+  processes, because a thread's cycles leave out the time it is preempted or its core serves interrupts; CPU time
+  from such a run is high by the same ratio, 0.1 to 0.5% on an idle machine.
 - **Clock ticks** are how the OS counts CPU time (`GetProcessTimes`, the `cpu_ms` columns): in whole ticks of
   15.6 ms by default. A one-second row of a light process reads 0, 15.6, or 31.2 ms, and a process that runs for
   a moment at the same point of every tick is counted a whole tick every time, or never. On the lab PC, three
