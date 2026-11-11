@@ -8,9 +8,10 @@ The sim publishes session info as YAML text in shared memory and in `.ibt` files
 | Section | Fields |
 |---|---|
 | `WeekendInfo` | Track ID, names, length, category, event type, official flag, number of car classes, series and session IDs |
-| `DriverInfo` | Player and pace car index, fuel capacity, and per car: names, user ID, team, car number, class (ID, name, color, relative speed, estimated lap time), iRating, license and color, incidents, spectator, pace car, and AI flags |
+| `DriverInfo` | Player and pace car index, fuel capacity, the player's tire compounds (`DriverTires`: index and type), and per car: names, user ID, team, car number, car name and short name, class (ID, name, color, relative speed, estimated lap time), iRating, license and color, incidents, spectator, pace car, and AI flags |
 | `SessionInfo` | Per session: number, type, name, laps and time (or unlimited), and result positions |
 | `SplitTimeInfo` | Sector numbers and start positions |
+| `QualifyResultsInfo` | The qualifying result positions a race starts from, with the same fields as session results |
 
 Drivers are stored by `CarIdx` in a list sized by the caller, normally the live `CarIdx*` array length. Missing or
 unexpected fields are `None` instead of failing the extraction.
@@ -22,8 +23,9 @@ The sim's text is not strict YAML. Before parsing:
 1. **Decode.** The text is Windows-1252 unless `WeekendInfo` declares `Encoding: UTF8`. Recordings checked so far
    declare `Encoding: ISO_8859_1`; bytes 0x80-0x9F are read as Windows-1252, and the five undefined bytes become
    U+FFFD.
-2. **Keep only the needed sections.** `WeekendInfo`, `SessionInfo`, `DriverInfo`, and `SplitTimeInfo` are kept;
-   setup, camera, radio, and qualifying sections are dropped, so a malformed unused section cannot break parsing.
+2. **Keep only the needed sections.** `WeekendInfo`, `SessionInfo`, `DriverInfo`, `SplitTimeInfo`, and
+   `QualifyResultsInfo` are kept; setup, camera, and radio sections are dropped, so a malformed unused section
+   cannot break parsing.
 3. **Remove non-printable characters.**
 4. **Quote free text.** `UserName`, `TeamName`, `AbbrevName`, `Initials`, and `DriverSetupName` are written
    unquoted, so names such as `*Star` or `A: B` would otherwise be misread. These values, and any value that

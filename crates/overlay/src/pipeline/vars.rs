@@ -62,4 +62,7 @@ vars! {
     car_last_lap_time => "CarIdxLastLapTime",
     car_best_lap_time => "CarIdxBestLapTime",
     car_class => "CarIdxClass",
+    car_tire_compound => "CarIdxTireCompound",
+    air_temp => "AirTemp",
+    track_temp => "TrackTempCrew",
 }
