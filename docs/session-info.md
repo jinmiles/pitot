@@ -29,18 +29,25 @@ The sim's text is not strict YAML. Before parsing:
    unquoted, so names such as `*Star` or `A: B` would otherwise be misread. These values, and any value that
    starts with a comma, are wrapped in double quotes with `"` and `\` escaped.
 
-The prepared text is parsed with `saphyr`.
+## Reading the fields
+
+The prepared text is read with `saphyr-parser` as a stream of events, and each wanted field is stored as it
+arrives. No document tree is built: a tree of the whole text is about 800 KB of short-lived allocations for
+41 cars, and building one on every update fragmented the process heap so that the overlay's committed memory
+kept rising for about two hours of a race before it leveled off. Scalars are typed with `saphyr`'s core schema
+rules, the same as before. Only the first document is read.
 
 ## Cost
 
-Measured on real recordings and a 64-car variant of a 40-car AI race (release build, median of 30 runs):
+Measured on real recordings and on the last revision of a 41-car AI race widened to 64 cars (release build,
+median of 30 runs; peak is the most heap memory live at once during the parse):
 
-| Input | Size | Parse | Allocations |
-|---|---|---|---|
-| 16 cars | 46.9 KB | 1.7 ms | 5,402 |
-| 24 cars | 60.7 KB | 2.3 ms | 7,726 |
-| 41 cars | 78.7 KB | 2.8 ms | 9,145 |
-| 64 cars | 103.8 KB | 4.0 ms | 12,795 |
+| Input | Size | Parse | Allocations | Peak |
+|---|---|---|---|---|
+| 16 cars | 46.9 KB | 1.3 ms | 3,568 | 121 KB |
+| 24 cars | 60.7 KB | 1.8 ms | 5,115 | 141 KB |
+| 41 cars | 78.7 KB | 2.2 ms | 5,975 | 160 KB |
+| 64 cars | 110.8 KB | 3.2 ms | 9,111 | 222 KB |
 
 The text changed 70 times in a ten-minute live race, so parsing stays off the data thread and runs only when
 `sessionInfoUpdate` changes.

@@ -3,15 +3,22 @@
 //! The sim's text is not strict YAML: it is Windows-1252 unless `WeekendInfo` declares `Encoding: UTF8`, and
 //! free-text fields such as driver and team names are written unquoted. [`parse`] therefore decodes the text,
 //! keeps only the `WeekendInfo`, `SessionInfo`, `DriverInfo`, and `SplitTimeInfo` sections, quotes free-text
-//! values, and then parses the result with a YAML parser. Missing or unexpected fields become `None` rather
+//! values, and then reads the result with a YAML parser. Missing or unexpected fields become `None` rather
 //! than failing the whole extraction.
+//!
+//! The fields are taken from the parser's events as they come, without building a document tree. A tree of
+//! the full text is about 9,000 short-lived allocations per update; built on every update, it fragments the
+//! heap so that the process's committed memory keeps creeping up for hours.
 //!
 //! Call it off the data thread, only when `sessionInfoUpdate` changes. Errors carry a position only, never
 //! session text, because the text contains other drivers' names and IDs.
 
+use std::borrow::Cow;
 use std::fmt;
+use std::mem;
 
-use saphyr::{LoadableYamlNode, Yaml};
+use saphyr::Scalar;
+use saphyr_parser::{Event, Parser};
 
 /// Top-level sections kept for parsing; everything else (setup, cameras, radio) is dropped first.
 const SECTIONS: [&str; 4] = ["WeekendInfo", "SessionInfo", "DriverInfo", "SplitTimeInfo"];
@@ -169,27 +176,21 @@ pub fn decode(raw: &[u8]) -> String {
 /// of the live connection.
 pub fn parse(raw: &[u8], max_cars: usize) -> Result<SessionInfo, SessionError> {
     let text = prepare(&decode(raw));
-    let docs = Yaml::load_from_str(&text).map_err(|e| SessionError::Syntax {
-        line: e.marker().line(),
-        col: e.marker().col(),
-    })?;
-    let doc = docs.first().ok_or(SessionError::Empty)?;
-    Ok(SessionInfo {
-        weekend: doc
-            .as_mapping_get("WeekendInfo")
-            .map(weekend_info)
-            .unwrap_or_default(),
-        driver_info: driver_info(doc.as_mapping_get("DriverInfo"), max_cars),
-        sessions: seq(doc.as_mapping_get("SessionInfo"), "Sessions")
-            .map(session)
-            .collect(),
-        sectors: seq(doc.as_mapping_get("SplitTimeInfo"), "Sectors")
-            .map(|s| Sector {
-                num: int(s, "SectorNum"),
-                start_pct: float(s, "SectorStartPct"),
-            })
-            .collect(),
-    })
+    let mut walk = Walk::new(max_cars);
+    // Character input allocates about half as often as `Parser::new_from_str` (saphyr-parser 0.3).
+    for event in Parser::new_from_iter(text.chars()) {
+        let (event, _) = event.map_err(|e| SessionError::Syntax {
+            line: e.marker().line(),
+            col: e.marker().col(),
+        })?;
+        if walk.event(event) == Flow::Done {
+            break;
+        }
+    }
+    if walk.documents == 0 {
+        return Err(SessionError::Empty);
+    }
+    Ok(walk.info)
 }
 
 /// Keeps the wanted top-level sections, drops control characters, and quotes free-text values and values
@@ -250,147 +251,350 @@ fn quoted(line: &str) -> Option<String> {
     Some(format!("{prefix}{key}: \"{escaped}\""))
 }
 
-fn weekend_info(w: &Yaml) -> WeekendInfo {
-    WeekendInfo {
-        track_id: int(w, "TrackID"),
-        track_name: text(w, "TrackName"),
-        track_display_name: text(w, "TrackDisplayName"),
-        track_length_km: float(w, "TrackLength"),
-        category: text(w, "Category"),
-        event_type: text(w, "EventType"),
-        official: int(w, "Official").map(|v| v != 0),
-        num_car_classes: int(w, "NumCarClasses"),
-        series_id: int(w, "SeriesID"),
-        session_id: int(w, "SessionID"),
-        sub_session_id: int(w, "SubSessionID"),
+/// Where a node sits in the document, as far as extraction cares.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Node {
+    /// The document's top-level mapping.
+    Root,
+    Weekend,
+    DriverInfo,
+    Drivers,
+    Driver,
+    SessionInfo,
+    Sessions,
+    Session,
+    Results,
+    Result,
+    SplitTimeInfo,
+    Sectors,
+    Sector,
+    /// Anything not extracted, and everything inside it.
+    Skip,
+}
+
+impl Node {
+    /// The node that a mapping (`map`) or a sequence starting under `parent` is. `key` is the parent mapping's
+    /// key for it, or `None` for a sequence item.
+    fn child(parent: Option<Self>, key: Option<&str>, map: bool) -> Self {
+        use Node::*;
+        match (parent, key, map) {
+            (None, None, true) => Root,
+            (Some(Root), Some("WeekendInfo"), true) => Weekend,
+            (Some(Root), Some("DriverInfo"), true) => DriverInfo,
+            (Some(Root), Some("SessionInfo"), true) => SessionInfo,
+            (Some(Root), Some("SplitTimeInfo"), true) => SplitTimeInfo,
+            (Some(DriverInfo), Some("Drivers"), false) => Drivers,
+            (Some(Drivers), None, true) => Driver,
+            (Some(SessionInfo), Some("Sessions"), false) => Sessions,
+            (Some(Sessions), None, true) => Session,
+            (Some(Session), Some("ResultsPositions"), false) => Results,
+            (Some(Results), None, true) => Result,
+            (Some(SplitTimeInfo), Some("Sectors"), false) => Sectors,
+            (Some(Sectors), None, true) => Sector,
+            _ => Skip,
+        }
     }
 }
 
-fn driver_info(d: Option<&Yaml>, max_cars: usize) -> DriverInfo {
-    let mut info = DriverInfo {
-        drivers: vec![None; max_cars],
-        ..DriverInfo::default()
-    };
-    let Some(d) = d else {
-        return info;
-    };
-    info.player_car_idx = index(d, "DriverCarIdx");
-    info.pace_car_idx = index(d, "PaceCarIdx");
-    info.fuel_max_liters = float(d, "DriverCarFuelMaxLtr");
-    info.max_fuel_pct = float(d, "DriverCarMaxFuelPct");
-    info.est_lap_time = float(d, "DriverCarEstLapTime");
-    for entry in seq(Some(d), "Drivers") {
-        let slot = index(entry, "CarIdx")
-            .and_then(|car_idx| Some((car_idx, info.drivers.get_mut(car_idx)?)));
-        let Some((car_idx, slot)) = slot else {
-            info.dropped += 1;
-            continue;
+struct Frame<'i> {
+    node: Node,
+    map: bool,
+    /// In a mapping: the key whose value comes next, or `None` when a key comes next.
+    key: Option<Cow<'i, str>>,
+}
+
+#[derive(PartialEq, Eq)]
+enum Flow {
+    Continue,
+    Done,
+}
+
+/// Extraction state while the parser's events are read. List entries are built here and moved into `info`
+/// when their mapping ends.
+struct Walk<'i> {
+    stack: Vec<Frame<'i>>,
+    info: SessionInfo,
+    documents: usize,
+    driver_idx: Option<usize>,
+    driver: Driver,
+    session: Session,
+    result: ResultPosition,
+    sector: Sector,
+}
+
+impl<'i> Walk<'i> {
+    fn new(max_cars: usize) -> Self {
+        Self {
+            stack: Vec::with_capacity(8),
+            info: SessionInfo {
+                driver_info: DriverInfo {
+                    drivers: vec![None; max_cars],
+                    ..DriverInfo::default()
+                },
+                ..SessionInfo::default()
+            },
+            documents: 0,
+            driver_idx: None,
+            driver: Driver::default(),
+            session: Session::default(),
+            result: ResultPosition::default(),
+            sector: Sector::default(),
+        }
+    }
+
+    fn event(&mut self, event: Event<'i>) -> Flow {
+        match event {
+            Event::DocumentStart(_) => self.documents += 1,
+            // Only the first document is read.
+            Event::DocumentEnd => return Flow::Done,
+            Event::MappingStart(..) => self.start(true),
+            Event::SequenceStart(..) => self.start(false),
+            Event::MappingEnd | Event::SequenceEnd => self.end(),
+            Event::Scalar(value, style, _, tag) => {
+                let Some(top) = self.stack.last_mut().filter(|top| top.map) else {
+                    return Flow::Continue;
+                };
+                match top.key.take() {
+                    None => top.key = Some(value),
+                    Some(key) => {
+                        let node = top.node;
+                        if let Some(value) =
+                            Scalar::parse_from_cow_and_metadata(value, style, tag.as_ref())
+                        {
+                            self.value(node, &key, value);
+                        }
+                    }
+                }
+            }
+            // The sim writes no anchors. An alias in a mapping is a key or a value that is not extracted.
+            Event::Alias(_) => {
+                if let Some(top) = self.stack.last_mut().filter(|top| top.map) {
+                    top.key = match top.key {
+                        Some(_) => None,
+                        None => Some(Cow::Borrowed("")),
+                    };
+                }
+            }
+            Event::StreamStart | Event::StreamEnd | Event::Nothing => {}
+        }
+        Flow::Continue
+    }
+
+    fn start(&mut self, map: bool) {
+        let node = match self.stack.last() {
+            None => Node::child(None, None, map),
+            Some(top) if !top.map => Node::child(Some(top.node), None, map),
+            Some(top) => match top.key.as_deref() {
+                Some(key) => Node::child(Some(top.node), Some(key), map),
+                // A container used as a mapping key, which nothing extracted has.
+                None => Node::Skip,
+            },
         };
-        *slot = Some(Driver {
-            car_idx,
-            user_name: text(entry, "UserName"),
-            abbrev_name: text(entry, "AbbrevName"),
-            initials: text(entry, "Initials"),
-            user_id: int(entry, "UserID"),
-            team_name: text(entry, "TeamName"),
-            car_number: text(entry, "CarNumber"),
-            car_screen_name_short: text(entry, "CarScreenNameShort"),
-            car_class_id: int(entry, "CarClassID"),
-            car_class_short_name: text(entry, "CarClassShortName"),
-            car_class_rel_speed: int(entry, "CarClassRelSpeed"),
-            car_class_est_lap_time: float(entry, "CarClassEstLapTime"),
-            car_class_color: color(entry, "CarClassColor"),
-            irating: int(entry, "IRating"),
-            license: text(entry, "LicString"),
-            license_color: color(entry, "LicColor"),
-            incidents: int(entry, "CurDriverIncidentCount"),
-            is_spectator: flag(entry, "IsSpectator"),
-            is_pace_car: flag(entry, "CarIsPaceCar"),
-            is_ai: flag(entry, "CarIsAI"),
+        match node {
+            Node::Driver => {
+                self.driver_idx = None;
+                self.driver = Driver::default();
+            }
+            Node::Session => self.session = Session::default(),
+            Node::Result => self.result = ResultPosition::default(),
+            Node::Sector => self.sector = Sector::default(),
+            _ => {}
+        }
+        self.stack.push(Frame {
+            node,
+            map,
+            key: None,
         });
     }
-    info
-}
 
-fn session(s: &Yaml) -> Session {
-    let laps = text(s, "SessionLaps");
-    let time = text(s, "SessionTime");
-    Session {
-        num: int(s, "SessionNum"),
-        session_type: text(s, "SessionType"),
-        name: text(s, "SessionName"),
-        laps: int(s, "SessionLaps"),
-        unlimited_laps: laps.as_deref() == Some("unlimited"),
-        time_seconds: float(s, "SessionTime"),
-        unlimited_time: time.as_deref() == Some("unlimited"),
-        results: seq(Some(s), "ResultsPositions")
-            .map(|r| ResultPosition {
-                position: int(r, "Position"),
-                class_position: int(r, "ClassPosition"),
-                car_idx: index(r, "CarIdx"),
-                lap: int(r, "Lap"),
-                time: float(r, "Time"),
-                fastest_lap: int(r, "FastestLap"),
-                fastest_time: float(r, "FastestTime"),
-                last_time: float(r, "LastTime"),
-                laps_led: int(r, "LapsLed"),
-                laps_complete: int(r, "LapsComplete"),
-                incidents: int(r, "Incidents"),
-                reason_out: text(r, "ReasonOutStr"),
-            })
-            .collect(),
+    fn end(&mut self) {
+        let Some(frame) = self.stack.pop() else {
+            return;
+        };
+        match frame.node {
+            Node::Driver => {
+                let drivers = &mut self.info.driver_info.drivers;
+                match self
+                    .driver_idx
+                    .and_then(|car_idx| Some((car_idx, drivers.get_mut(car_idx)?)))
+                {
+                    Some((car_idx, slot)) => {
+                        *slot = Some(Driver {
+                            car_idx,
+                            ..mem::take(&mut self.driver)
+                        });
+                    }
+                    None => self.info.driver_info.dropped += 1,
+                }
+            }
+            Node::Session => self.info.sessions.push(mem::take(&mut self.session)),
+            Node::Result => self.session.results.push(mem::take(&mut self.result)),
+            Node::Sector => self.info.sectors.push(mem::take(&mut self.sector)),
+            _ => {}
+        }
+        if let Some(parent) = self.stack.last_mut().filter(|parent| parent.map) {
+            // The container was the value of the parent's key. If it was a key instead, its value comes next,
+            // under a key that matches nothing.
+            parent.key = match parent.key {
+                Some(_) => None,
+                None => Some(Cow::Borrowed("")),
+            };
+        }
+    }
+
+    fn value(&mut self, node: Node, key: &str, v: Scalar<'i>) {
+        match node {
+            Node::Weekend => {
+                let w = &mut self.info.weekend;
+                match key {
+                    "TrackID" => w.track_id = int(&v),
+                    "TrackName" => w.track_name = text(v),
+                    "TrackDisplayName" => w.track_display_name = text(v),
+                    "TrackLength" => w.track_length_km = float(&v),
+                    "Category" => w.category = text(v),
+                    "EventType" => w.event_type = text(v),
+                    "Official" => w.official = int(&v).map(|v| v != 0),
+                    "NumCarClasses" => w.num_car_classes = int(&v),
+                    "SeriesID" => w.series_id = int(&v),
+                    "SessionID" => w.session_id = int(&v),
+                    "SubSessionID" => w.sub_session_id = int(&v),
+                    _ => {}
+                }
+            }
+            Node::DriverInfo => {
+                let d = &mut self.info.driver_info;
+                match key {
+                    "DriverCarIdx" => d.player_car_idx = index(&v),
+                    "PaceCarIdx" => d.pace_car_idx = index(&v),
+                    "DriverCarFuelMaxLtr" => d.fuel_max_liters = float(&v),
+                    "DriverCarMaxFuelPct" => d.max_fuel_pct = float(&v),
+                    "DriverCarEstLapTime" => d.est_lap_time = float(&v),
+                    _ => {}
+                }
+            }
+            Node::Driver => {
+                let d = &mut self.driver;
+                match key {
+                    "CarIdx" => self.driver_idx = index(&v),
+                    "UserName" => d.user_name = text(v),
+                    "AbbrevName" => d.abbrev_name = text(v),
+                    "Initials" => d.initials = text(v),
+                    "UserID" => d.user_id = int(&v),
+                    "TeamName" => d.team_name = text(v),
+                    "CarNumber" => d.car_number = text(v),
+                    "CarScreenNameShort" => d.car_screen_name_short = text(v),
+                    "CarClassID" => d.car_class_id = int(&v),
+                    "CarClassShortName" => d.car_class_short_name = text(v),
+                    "CarClassRelSpeed" => d.car_class_rel_speed = int(&v),
+                    "CarClassEstLapTime" => d.car_class_est_lap_time = float(&v),
+                    "CarClassColor" => d.car_class_color = color(&v),
+                    "IRating" => d.irating = int(&v),
+                    "LicString" => d.license = text(v),
+                    "LicColor" => d.license_color = color(&v),
+                    "CurDriverIncidentCount" => d.incidents = int(&v),
+                    "IsSpectator" => d.is_spectator = flag(&v),
+                    "CarIsPaceCar" => d.is_pace_car = flag(&v),
+                    "CarIsAI" => d.is_ai = flag(&v),
+                    _ => {}
+                }
+            }
+            Node::Session => {
+                let s = &mut self.session;
+                match key {
+                    "SessionNum" => s.num = int(&v),
+                    "SessionType" => s.session_type = text(v),
+                    "SessionName" => s.name = text(v),
+                    "SessionLaps" => {
+                        s.laps = int(&v);
+                        s.unlimited_laps = is_unlimited(&v);
+                    }
+                    "SessionTime" => {
+                        s.time_seconds = float(&v);
+                        s.unlimited_time = is_unlimited(&v);
+                    }
+                    _ => {}
+                }
+            }
+            Node::Result => {
+                let r = &mut self.result;
+                match key {
+                    "Position" => r.position = int(&v),
+                    "ClassPosition" => r.class_position = int(&v),
+                    "CarIdx" => r.car_idx = index(&v),
+                    "Lap" => r.lap = int(&v),
+                    "Time" => r.time = float(&v),
+                    "FastestLap" => r.fastest_lap = int(&v),
+                    "FastestTime" => r.fastest_time = float(&v),
+                    "LastTime" => r.last_time = float(&v),
+                    "LapsLed" => r.laps_led = int(&v),
+                    "LapsComplete" => r.laps_complete = int(&v),
+                    "Incidents" => r.incidents = int(&v),
+                    "ReasonOutStr" => r.reason_out = text(v),
+                    _ => {}
+                }
+            }
+            Node::Sector => match key {
+                "SectorNum" => self.sector.num = int(&v),
+                "SectorStartPct" => self.sector.start_pct = float(&v),
+                _ => {}
+            },
+            _ => {}
+        }
     }
 }
 
-fn seq<'a, 'i>(parent: Option<&'a Yaml<'i>>, key: &str) -> impl Iterator<Item = &'a Yaml<'i>> {
-    parent
-        .and_then(|p| p.as_mapping_get(key))
-        .and_then(Yaml::as_sequence)
-        .into_iter()
-        .flatten()
-}
-
-fn text(y: &Yaml, key: &str) -> Option<String> {
-    let v = y.as_mapping_get(key)?;
-    if let Some(s) = v.as_str() {
-        return Some(s.to_owned());
+fn text(v: Scalar) -> Option<String> {
+    match v {
+        // A copy, so the result does not keep the parser buffers' spare capacity.
+        Scalar::String(s) => Some(String::from(&*s)),
+        Scalar::Integer(i) => Some(i.to_string()),
+        Scalar::FloatingPoint(f) => Some(f.0.to_string()),
+        Scalar::Boolean(b) => Some(b.to_string()),
+        Scalar::Null => None,
     }
-    v.as_integer()
-        .map(|i| i.to_string())
-        .or_else(|| v.as_floating_point().map(|f| f.to_string()))
-        .or_else(|| v.as_bool().map(|b| b.to_string()))
 }
 
-fn int(y: &Yaml, key: &str) -> Option<i64> {
-    let v = y.as_mapping_get(key)?;
-    v.as_integer().or_else(|| v.as_str()?.trim().parse().ok())
+fn is_unlimited(v: &Scalar) -> bool {
+    matches!(v, Scalar::String(s) if s == "unlimited")
 }
 
-fn index(y: &Yaml, key: &str) -> Option<usize> {
-    int(y, key).and_then(|i| usize::try_from(i).ok())
+fn int(v: &Scalar) -> Option<i64> {
+    match v {
+        Scalar::Integer(i) => Some(*i),
+        Scalar::String(s) => s.trim().parse().ok(),
+        _ => None,
+    }
+}
+
+fn index(v: &Scalar) -> Option<usize> {
+    int(v).and_then(|i| usize::try_from(i).ok())
 }
 
 /// A number, or a string that starts with one, such as `5.93 km` or `600.0000 sec`.
-fn float(y: &Yaml, key: &str) -> Option<f64> {
-    let v = y.as_mapping_get(key)?;
-    v.as_floating_point()
-        .or_else(|| v.as_integer().map(|i| i as f64))
-        .or_else(|| v.as_str()?.split_whitespace().next()?.parse().ok())
+fn float(v: &Scalar) -> Option<f64> {
+    match v {
+        Scalar::FloatingPoint(f) => Some(f.0),
+        Scalar::Integer(i) => Some(*i as f64),
+        Scalar::String(s) => s.split_whitespace().next()?.parse().ok(),
+        _ => None,
+    }
 }
 
-fn flag(y: &Yaml, key: &str) -> bool {
-    int(y, key).is_some_and(|v| v != 0)
+fn flag(v: &Scalar) -> bool {
+    int(v).is_some_and(|v| v != 0)
 }
 
 /// `0xRRGGBB`, written by the sim as a plain scalar that YAML may already read as a hex integer.
-fn color(y: &Yaml, key: &str) -> Option<u32> {
-    let v = y.as_mapping_get(key)?;
-    if let Some(i) = v.as_integer() {
-        return u32::try_from(i).ok();
+fn color(v: &Scalar) -> Option<u32> {
+    match v {
+        Scalar::Integer(i) => u32::try_from(*i).ok(),
+        Scalar::String(s) => {
+            let s = s.trim();
+            let hex = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X"))?;
+            u32::from_str_radix(hex, 16).ok()
+        }
+        _ => None,
     }
-    let s = v.as_str()?.trim();
-    let hex = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X"))?;
-    u32::from_str_radix(hex, 16).ok()
 }
 
 /// Windows-1252 to Unicode. 0x80-0x9F differ from ISO 8859-1; the five undefined bytes map to U+FFFD.
@@ -599,6 +803,22 @@ CarSetup:
         let err = parse(b"DriverInfo:\n Drivers:\n - CarIdx: [1\n", 4).expect_err("invalid");
         assert!(matches!(err, SessionError::Syntax { .. }));
         assert_eq!(parse(b"", 4).expect_err("empty"), SessionError::Empty);
+    }
+
+    #[test]
+    fn ignores_values_nested_under_other_keys() {
+        let text = b"DriverInfo:\n Drivers:\n - CarIdx: 0\n   Extra:\n    UserName: Nested\n    CarIdx: 3\n   \
+                     Flags: [1, {CarIdx: 2}]\n   UserName: Outer\n";
+        let d = parse(text, 4).expect("parses").driver_info;
+        let outer = d.drivers[0].as_ref().expect("driver 0");
+        assert_eq!(outer.user_name.as_deref(), Some("Outer"));
+        assert!(d.drivers[2].is_none() && d.drivers[3].is_none());
+    }
+
+    #[test]
+    fn reads_the_first_document() {
+        let text = b"---\nWeekendInfo:\n TrackID: 5\n...\n---\nWeekendInfo:\n TrackID: 6\n...\n";
+        assert_eq!(parse(text, 0).expect("parses").weekend.track_id, Some(5));
     }
 
     #[test]

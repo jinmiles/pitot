@@ -195,6 +195,7 @@ name = "pitot-irsdk"
 version = "0.0.0"
 dependencies = [
  "saphyr",
+ "saphyr-parser",
  "windows",
 ]
 
