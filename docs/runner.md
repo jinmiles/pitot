@@ -67,8 +67,11 @@ order follows from the seed, which is recorded, so a series can be repeated in t
    `not_running` and nothing is measured.
 5. **Collection.** The [collector](collector.md) samples the app's process tree for `measure_s`. Baselines collect
    an empty tree, which records DWM and the GPU for comparison.
-6. **Stop.** The measured tree and every process the run started are terminated, without asking the app to close,
-   the same for every app. The replay is given time to finish and write its summary.
+6. **Stop.** The app is asked to close the way closing its windows would: `WM_CLOSE` to every top-level window,
+   shown or hidden, of the measured tree. It gets 5 s to exit, so it can write what it keeps on exit (Pitot logs
+   its data counters). Then whatever is left of the tree and of the processes the run started is terminated, as
+   for an app without windows or one that hides instead of exiting. Every app is stopped the same way, after the
+   measurement has ended. The replay is given time to finish and write its summary.
 7. **Restore.** Backed-up files are put back and added files are removed.
 8. **Cool-down.** `cooldown_s` before the next run.
 

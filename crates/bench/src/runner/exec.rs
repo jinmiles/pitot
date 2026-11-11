@@ -24,6 +24,8 @@ const REPLAY_SLACK: Duration = Duration::from_secs(10);
 const REPLAY_START: Duration = Duration::from_secs(30);
 /// How long stopped processes may take to exit.
 const EXIT_WAIT: Duration = Duration::from_secs(10);
+/// How long an app may take to exit after its windows were asked to close.
+const CLOSE_WAIT: Duration = Duration::from_secs(5);
 
 #[derive(Debug)]
 pub enum RunnerError {
@@ -505,9 +507,17 @@ fn members(target: &Target) -> Result<Vec<(u32, u64)>, RunnerError> {
         .collect())
 }
 
-/// Stops the measured tree (which can hold processes outside the job), then the rest of the job, and waits until
-/// the tree is gone.
+/// Asks the measured tree to close, as closing its windows would, and gives it [`CLOSE_WAIT`] to exit. Then stops
+/// what is left of the tree (which can hold processes outside the job) and of the job, and waits until the tree is
+/// gone.
 fn stop(target: &Target, child: Option<Child>, job: &Job) -> Result<(), RunnerError> {
+    let pids: Vec<u32> = members(target)?.iter().map(|&(pid, _)| pid).collect();
+    if sys::close_windows(&pids) > 0 {
+        let deadline = Instant::now() + CLOSE_WAIT;
+        while Instant::now() < deadline && !members(target)?.is_empty() {
+            thread::sleep(Duration::from_millis(100));
+        }
+    }
     for (pid, created) in members(target)? {
         let _ = sys::terminate(pid, created);
     }

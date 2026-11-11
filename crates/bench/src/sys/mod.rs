@@ -1,9 +1,11 @@
-//! Win32 calls without a safe wrapper: process enumeration, per-process times and memory, process termination,
-//! job objects, PDH counters, the clock, and registry strings. All of this crate's `unsafe` lives in this module.
+//! Win32 calls without a safe wrapper: process enumeration, per-process times and memory, closing an app's
+//! windows, process termination, job objects, PDH counters, the clock, and registry strings. All of this crate's `unsafe` lives in this module.
 
 use std::fmt;
 
-use windows::Win32::Foundation::{CloseHandle, ERROR_SUCCESS, FILETIME, HANDLE, WAIT_OBJECT_0};
+use windows::Win32::Foundation::{
+    CloseHandle, ERROR_SUCCESS, FILETIME, HANDLE, HWND, LPARAM, WAIT_OBJECT_0, WPARAM,
+};
 use windows::Win32::System::Console::{CTRL_BREAK_EVENT, CTRL_C_EVENT, SetConsoleCtrlHandler};
 use windows::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
@@ -32,7 +34,10 @@ use windows::Win32::System::Threading::{
     PROCESS_TERMINATE, PROCESS_VM_READ, TerminateProcess, WaitForSingleObject,
 };
 use windows::Win32::System::WindowsProgramming::{QueryProcessCycleTime, QueryThreadCycleTime};
-use windows::core::{HSTRING, PCWSTR};
+use windows::Win32::UI::WindowsAndMessaging::{
+    EnumWindows, GetWindowThreadProcessId, PostMessageW, WM_CLOSE,
+};
+use windows::core::{BOOL, HSTRING, PCWSTR};
 
 use crate::collect::ProcessEntry;
 
@@ -286,6 +291,34 @@ pub fn stop_on_ctrl_c() -> Result<&'static std::sync::atomic::AtomicBool, SysErr
     Ok(&STOP)
 }
 
+/// Posts `WM_CLOSE` to every top-level window, shown or hidden, of the processes in `pids`, as closing an app's
+/// windows does. Returns how many windows were asked.
+pub fn close_windows(pids: &[u32]) -> usize {
+    struct Search<'a> {
+        pids: &'a [u32],
+        asked: usize,
+    }
+    unsafe extern "system" fn each(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        // SAFETY: `lparam` is the `Search` that `close_windows` passed; it outlives the enumeration and nothing
+        // else uses it meanwhile.
+        let search = unsafe { &mut *(lparam.0 as *mut Search) };
+        let mut pid = 0;
+        // SAFETY: `hwnd` comes from the enumeration; `pid` is a valid out pointer.
+        unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+        // SAFETY: posting a message touches no memory of this process; a window that is gone fails the call.
+        if search.pids.contains(&pid)
+            && unsafe { PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0)) }.is_ok()
+        {
+            search.asked += 1;
+        }
+        true.into()
+    }
+    let mut search = Search { pids, asked: 0 };
+    // SAFETY: the callback runs only during the call and gets a pointer to `search`, which lives on this frame.
+    let _ = unsafe { EnumWindows(Some(each), LPARAM(&raw mut search as isize)) };
+    search.asked
+}
+
 /// CPU time of this process, in 100 ns units.
 pub fn current_process_cpu() -> Result<u64, SysError> {
     // SAFETY: the pseudo handle for the current process is always valid and needs no closing.
@@ -502,5 +535,15 @@ impl Drop for PdhQuery {
     fn drop(&mut self) {
         // SAFETY: closes the query owned by `self`, once, which also frees its counters.
         let _ = unsafe { PdhCloseQuery(self.query) };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn closes_nothing_without_windows() {
+        // PID 0 is the idle process, which has no windows.
+        assert_eq!(super::close_windows(&[0]), 0);
+        assert_eq!(super::close_windows(&[]), 0);
     }
 }
