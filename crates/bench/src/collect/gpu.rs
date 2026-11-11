@@ -36,7 +36,14 @@ impl EngineLoad {
         self.engines.iter_mut().for_each(|e| e.load = 0.0);
     }
 
+    /// Adds one engine instance's utilization. An instance is one engine of one process, so it reads 0 to 100%.
+    /// PDH sometimes reports a wild value for one sample (1.8e14% once in a 40-minute run); values outside 0 to
+    /// 101% are skipped as counter glitches, and up to 101% is timing jitter, counted as 100%.
     pub fn add(&mut self, adapter: &str, kind: &str, load: f64) {
+        if !(0.0..=101.0).contains(&load) {
+            return;
+        }
+        let load = load.min(100.0);
         match self
             .engines
             .iter_mut()
@@ -101,5 +108,16 @@ mod tests {
             3,
             "engines are kept for the next sample"
         );
+    }
+
+    #[test]
+    fn skips_counter_glitches() {
+        let mut load = EngineLoad::default();
+        load.add("luid_a", "3D", 1.8e14);
+        load.add("luid_a", "3D", -0.5);
+        load.add("luid_a", "3D", f64::NAN);
+        assert_eq!(load.busiest(), 0.0);
+        load.add("luid_a", "3D", 100.4);
+        assert_eq!(load.busiest(), 100.0, "jitter above 100% is capped");
     }
 }
