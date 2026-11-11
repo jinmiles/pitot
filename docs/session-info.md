@@ -37,17 +37,25 @@ arrives. No document tree is built: a tree of the whole text is about 800 KB of 
 kept rising for about two hours of a race before it leveled off. Scalars are typed with `saphyr`'s core schema
 rules, the same as before. Only the first document is read.
 
+`SessionParser` keeps the prepared text's buffer between updates, and the raw text is decoded into it line by
+line, so an update allocates no buffer the size of the text. The overlay parses every update with one
+`SessionParser`.
+
 ## Cost
 
 Measured on real recordings and on the last revision of a 41-car AI race widened to 64 cars (release build,
-median of 30 runs; peak is the most heap memory live at once during the parse):
+median of 30 runs; peak is the most heap memory live at once during the parse, for a `SessionParser` that has
+parsed the text before, as in the overlay):
 
 | Input | Size | Parse | Allocations | Peak |
 |---|---|---|---|---|
-| 16 cars | 46.9 KB | 1.3 ms | 3,568 | 121 KB |
-| 24 cars | 60.7 KB | 1.8 ms | 5,115 | 141 KB |
-| 41 cars | 78.7 KB | 2.2 ms | 5,975 | 160 KB |
-| 64 cars | 110.8 KB | 3.2 ms | 9,111 | 222 KB |
+| 16 cars | 46.9 KB | 1.1 ms | 3,247 | 74 KB |
+| 24 cars | 60.7 KB | 1.6 ms | 4,636 | 81 KB |
+| 41 cars | 78.7 KB | 1.9 ms | 5,556 | 81 KB |
+| 64 cars | 110.8 KB | 2.9 ms | 8,462 | 82 KB |
+
+A single `session::parse` also allocates the prepared text, which raises the peak to 121 KB for 16 cars and
+193 KB for 64.
 
 The text changed 70 times in a ten-minute live race, so parsing stays off the data thread and runs only when
 `sessionInfoUpdate` changes.

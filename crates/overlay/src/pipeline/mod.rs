@@ -49,7 +49,7 @@ mod threads {
     use std::thread::{self, JoinHandle};
 
     use pitot_irsdk::live::{LiveReader, ReaderConfig, SdkNames, Snapshot, Step, VarSet};
-    use pitot_irsdk::session::{self, SessionInfo};
+    use pitot_irsdk::session::{SessionInfo, SessionParser};
 
     use super::{
         Display, InputSample, SAMPLE_CAPACITY, SampleRing, SeqBuffer, Vars, ready_session_buffer,
@@ -100,6 +100,8 @@ mod threads {
             let stats = Arc::new(PipelineStats::default());
             let (to_render, from_threads) = mpsc::channel();
             let (to_session, session_jobs) = mpsc::channel::<(Weak<Connection>, Vec<u8>)>();
+            // Text buffers go back to the data thread once parsed, so updates reuse them instead of allocating.
+            let (recycle, recycled) = mpsc::channel::<Vec<u8>>();
 
             let session = {
                 let to_render = to_render.clone();
@@ -107,12 +109,17 @@ mod threads {
                 thread::Builder::new()
                     .name("pitot-session".into())
                     .spawn(move || {
+                        let mut parser = SessionParser::new();
                         // Blocks until the data thread sends text, and ends when it exits.
                         while let Ok((connection, text)) = session_jobs.recv() {
-                            let Some(car_count) = connection.upgrade().map(|c| c.car_count) else {
+                            let car_count = connection.upgrade().map(|c| c.car_count);
+                            let parsed = car_count.map(|count| parser.parse(&text, count));
+                            // Fails only once the data thread has exited.
+                            let _ = recycle.send(text);
+                            let Some(parsed) = parsed else {
                                 continue;
                             };
-                            match session::parse(&text, car_count) {
+                            match parsed {
                                 Ok(info) => {
                                     stats.session_parses.fetch_add(1, Ordering::Relaxed);
                                     if to_render
@@ -136,7 +143,15 @@ mod threads {
                     .name("pitot-data".into())
                     .spawn(move || {
                         let reader = LiveReader::new(names, set, config);
-                        data_loop(reader, vars, &stop, &stats, &to_render, &to_session);
+                        data_loop(
+                            reader,
+                            vars,
+                            &stop,
+                            &stats,
+                            &to_render,
+                            &to_session,
+                            &recycled,
+                        );
                     })?
             };
             let view = View {
@@ -185,6 +200,7 @@ mod threads {
         stats: &PipelineStats,
         to_render: &Sender<Message>,
         to_session: &Sender<(Weak<Connection>, Vec<u8>)>,
+        recycled: &Receiver<Vec<u8>>,
     ) {
         let mut snapshot = Snapshot::new();
         let mut connection: Option<Arc<Connection>> = None;
@@ -232,8 +248,11 @@ mod threads {
                         && let Ok(Some(copied)) = reader.copy_session_info(&mut session_text)
                     {
                         session_update = Some(copied);
-                        // Copying the text allocates, but only when the session info changes.
-                        let job = (Arc::downgrade(current), session_text.clone());
+                        // A buffer the session thread is done with, so only the first updates allocate.
+                        let mut text = recycled.try_recv().unwrap_or_default();
+                        text.clear();
+                        text.extend_from_slice(&session_text);
+                        let job = (Arc::downgrade(current), text);
                         if to_session.send(job).is_err() {
                             return;
                         }

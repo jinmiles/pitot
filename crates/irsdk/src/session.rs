@@ -157,11 +157,7 @@ pub struct Sector {
 /// Decodes the raw session info bytes to text: UTF-8 when `WeekendInfo` declares `Encoding: UTF8`,
 /// Windows-1252 otherwise. Bytes Windows-1252 leaves undefined become U+FFFD.
 pub fn decode(raw: &[u8]) -> String {
-    let head = &raw[..raw.len().min(256)];
-    let utf8 = head
-        .split(|&b| b == b'\n')
-        .any(|line| line.trim_ascii() == b"Encoding: UTF8");
-    if utf8 {
+    if declares_utf8(raw) {
         return String::from_utf8_lossy(raw).into_owned();
     }
     if raw.is_ascii() {
@@ -172,34 +168,80 @@ pub fn decode(raw: &[u8]) -> String {
     text
 }
 
-/// Parses raw session info bytes. `max_cars` sizes [`DriverInfo::drivers`]; pass the `CarIdx*` array length
-/// of the live connection.
-pub fn parse(raw: &[u8], max_cars: usize) -> Result<SessionInfo, SessionError> {
-    let text = prepare(&decode(raw));
-    let mut walk = Walk::new(max_cars);
-    // Character input allocates about half as often as `Parser::new_from_str` (saphyr-parser 0.3).
-    for event in Parser::new_from_iter(text.chars()) {
-        let (event, _) = event.map_err(|e| SessionError::Syntax {
-            line: e.marker().line(),
-            col: e.marker().col(),
-        })?;
-        if walk.event(event) == Flow::Done {
-            break;
-        }
-    }
-    if walk.documents == 0 {
-        return Err(SessionError::Empty);
-    }
-    Ok(walk.info)
+fn declares_utf8(raw: &[u8]) -> bool {
+    raw[..raw.len().min(256)]
+        .split(|&b| b == b'\n')
+        .any(|line| line.trim_ascii() == b"Encoding: UTF8")
 }
 
-/// Keeps the wanted top-level sections, drops control characters, and quotes free-text values and values
-/// that start with a comma.
-fn prepare(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
+/// Parses raw session info bytes. `max_cars` sizes [`DriverInfo::drivers`]; pass the `CarIdx*` array length
+/// of the live connection. For repeated updates, [`SessionParser`] keeps its text buffer.
+pub fn parse(raw: &[u8], max_cars: usize) -> Result<SessionInfo, SessionError> {
+    SessionParser::new().parse(raw, max_cars)
+}
+
+/// Parses session info updates one after another, keeping the prepared text's buffer between them. A new
+/// buffer the size of the text on every update would land between longer-lived allocations and fragment the
+/// heap.
+#[derive(Debug, Default)]
+pub struct SessionParser {
+    prepared: String,
+    line: String,
+}
+
+impl SessionParser {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Parses raw session info bytes, like [`parse`].
+    pub fn parse(&mut self, raw: &[u8], max_cars: usize) -> Result<SessionInfo, SessionError> {
+        prepare(raw, &mut self.prepared, &mut self.line);
+        let mut walk = Walk::new(max_cars);
+        // Character input allocates about half as often as `Parser::new_from_str` (saphyr-parser 0.3).
+        for event in Parser::new_from_iter(self.prepared.chars()) {
+            let (event, _) = event.map_err(|e| SessionError::Syntax {
+                line: e.marker().line(),
+                col: e.marker().col(),
+            })?;
+            if walk.event(event) == Flow::Done {
+                break;
+            }
+        }
+        if walk.documents == 0 {
+            return Err(SessionError::Empty);
+        }
+        Ok(walk.info)
+    }
+}
+
+/// Decodes `raw` like [`decode`], keeps the wanted top-level sections, drops control characters, and quotes
+/// free-text values and values that start with a comma. Writes the result to `out`; `line` holds a decoded
+/// line that is not ASCII.
+fn prepare(raw: &[u8], out: &mut String, line: &mut String) {
+    out.clear();
+    out.reserve(raw.len());
+    let utf8 = declares_utf8(raw);
     let mut keep = false;
-    for line in text.lines() {
-        if let Some(name) = top_level_key(line) {
+    // The line endings of `str::lines`: `\n` or `\r\n`, and the last line may have none. A `\n` byte is never
+    // part of a multi-byte character, so lines decode on their own.
+    for bytes in raw.split_inclusive(|&b| b == b'\n') {
+        let bytes = bytes
+            .strip_suffix(b"\n")
+            .map_or(bytes, |b| b.strip_suffix(b"\r").unwrap_or(b));
+        let text = match std::str::from_utf8(bytes) {
+            Ok(text) if bytes.is_ascii() || utf8 => text,
+            _ => {
+                line.clear();
+                if utf8 {
+                    line.push_str(&String::from_utf8_lossy(bytes));
+                } else {
+                    line.extend(bytes.iter().map(|&b| windows_1252(b)));
+                }
+                line.as_str()
+            }
+        };
+        if let Some(name) = top_level_key(text) {
             keep = SECTIONS.contains(&name);
         }
         if !keep {
@@ -208,19 +250,17 @@ fn prepare(text: &str) -> String {
         // Allocate only for the rare lines that need changing.
         let is_stray = |c: char| c != '\t' && c.is_control();
         let cleaned;
-        let line = if line.contains(is_stray) {
-            cleaned = line.chars().filter(|&c| !is_stray(c)).collect::<String>();
+        let text = if text.contains(is_stray) {
+            cleaned = text.chars().filter(|&c| !is_stray(c)).collect::<String>();
             cleaned.as_str()
         } else {
-            line
+            text
         };
-        match quoted(line) {
-            Some(fixed) => out.push_str(&fixed),
-            None => out.push_str(line),
+        if !push_quoted(text, out) {
+            out.push_str(text);
         }
         out.push('\n');
     }
-    out
 }
 
 /// Name of a top-level mapping key line such as `DriverInfo:`.
@@ -231,24 +271,36 @@ fn top_level_key(line: &str) -> Option<&str> {
         .then_some(name)
 }
 
-/// Rewrites `key: value` as `key: "value"` for free-text keys and comma-led values.
-fn quoted(line: &str) -> Option<String> {
+/// Writes `key: value` as `key: "value"` to `out` for free-text keys and comma-led values. Returns whether the
+/// line was one of those.
+fn push_quoted(line: &str, out: &mut String) -> bool {
     let indent = line.len() - line.trim_start_matches([' ', '-']).len();
     let (prefix, rest) = line.split_at(indent);
-    let (key, value) = rest.split_once(": ")?;
+    let Some((key, value)) = rest.split_once(": ") else {
+        return false;
+    };
     if value.is_empty() || !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
-        return None;
+        return false;
     }
     if !(FREE_TEXT_KEYS.contains(&key) || value.starts_with(',')) {
-        return None;
+        return false;
     }
     // A value the sim already wrapped in double quotes is taken as raw text and quoted again consistently.
     let raw = value
         .strip_prefix('"')
         .and_then(|v| v.strip_suffix('"'))
         .unwrap_or(value);
-    let escaped = raw.replace('\\', "\\\\").replace('"', "\\\"");
-    Some(format!("{prefix}{key}: \"{escaped}\""))
+    out.push_str(prefix);
+    out.push_str(key);
+    out.push_str(": \"");
+    for c in raw.chars() {
+        if c == '\\' || c == '"' {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out.push('"');
+    true
 }
 
 /// Where a node sits in the document, as far as extraction cares.
@@ -819,6 +871,21 @@ CarSetup:
     fn reads_the_first_document() {
         let text = b"---\nWeekendInfo:\n TrackID: 5\n...\n---\nWeekendInfo:\n TrackID: 6\n...\n";
         assert_eq!(parse(text, 0).expect("parses").weekend.track_id, Some(5));
+    }
+
+    #[test]
+    fn parser_reuses_its_buffers() {
+        let mut parser = SessionParser::new();
+        assert_eq!(parser.parse(SAMPLE.as_bytes(), 72), Ok(sample()));
+        let sizes = (parser.prepared.capacity(), parser.line.capacity());
+        let other = b"---\nWeekendInfo:\n TrackID: 5\n...\n";
+        assert_eq!(parser.parse(other, 4), parse(other, 4));
+        assert_eq!(parser.parse(SAMPLE.as_bytes(), 72), Ok(sample()));
+        assert_eq!(
+            (parser.prepared.capacity(), parser.line.capacity()),
+            sizes,
+            "the same text again fits the buffers"
+        );
     }
 
     #[test]
