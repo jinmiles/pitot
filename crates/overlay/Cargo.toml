@@ -13,6 +13,9 @@ alloc-check = []
 [dependencies]
 pitot-irsdk.workspace = true
 serde = { version = "1", features = ["derive"] }
+# Only to build the capture compressor for size: the overlay compresses ten seconds of frames at a time, where
+# speed hardly matters.
+zstd = { version = "0.13", default-features = false, features = ["thin"] }
 tracing = { version = "0.1.44", default-features = false, features = ["std", "release_max_level_info"] }
 toml = { version = "1.2.1", default-features = false, features = ["std", "serde", "parse"] }
 

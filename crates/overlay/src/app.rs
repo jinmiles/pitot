@@ -12,7 +12,7 @@ use pitot_irsdk::live::{ReaderConfig, SdkNames};
 use tracing::{debug, info, warn};
 
 use crate::config::{self, Config, WidgetConfig};
-use crate::pipeline::{Display, Pipeline, Source, View};
+use crate::pipeline::{Display, Pipeline, RecordingConfig, Source, View};
 use crate::platform::{
     self, DirectoryWatch, Monitor, MoveHandle, OverlayWindow, ScreenRect, Timer, Tray, TrayCommand,
     Wake, WidgetMove,
@@ -259,10 +259,20 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         Some(device) => Some(Scene::build(device, &layout)?),
         None => None,
     };
+    let recording = config
+        .recording
+        .enabled
+        .then(config::recordings_dir)
+        .flatten()
+        .map(|dir| RecordingConfig {
+            dir,
+            max_bytes: (f64::from(config.recording.max_gb) * 1.0e9) as u64,
+        });
     let (pipeline, mut view) = Pipeline::start(
         SdkNames::sim(),
         ReaderConfig::default(),
         config::capture_dirs(),
+        recording,
     )?;
     let timer = Timer::new()?;
     let mut reload_at: Option<Instant> = None;

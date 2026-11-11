@@ -29,14 +29,18 @@ pub fn previous_log_file() -> Option<PathBuf> {
     config_dir().map(|dir| dir.join("pitot.previous.log"))
 }
 
-/// Folders searched for a capture of the session while the sim plays a replay: `captures` next to the overlay
-/// executable, where `pitot-bench record` run from that folder writes them, and `captures` inside
-/// [`config_dir`].
+/// Where the overlay records sessions: `captures` inside [`config_dir`].
+pub fn recordings_dir() -> Option<PathBuf> {
+    config_dir().map(|dir| dir.join("captures"))
+}
+
+/// Folders searched for a capture of the session while the sim plays a replay: [`recordings_dir`], and
+/// `captures` next to the overlay executable, where `pitot-bench record` run from that folder writes them.
 pub fn capture_dirs() -> Vec<PathBuf> {
     let beside_exe = std::env::current_exe()
         .ok()
         .and_then(|exe| exe.parent().map(|dir| dir.join("captures")));
-    let in_config = config_dir().map(|dir| dir.join("captures"));
+    let in_config = recordings_dir();
     let mut dirs: Vec<PathBuf> = beside_exe.into_iter().chain(in_config).collect();
     dirs.dedup();
     dirs
@@ -51,6 +55,13 @@ pub const DEFAULT_TOML: &str = r#"# Pitot overlay configuration. Changes apply w
 
 [general]
 font = "Segoe UI"
+
+# Records each session while you drive into %APPDATA%\Pitot\captures, so a replay of it (in the session or
+# from a saved .rpy file) can show the widgets. The oldest recordings are deleted once the folder holds more
+# than max_gb gigabytes (about 0.23 GB per hour). Changes apply at the next start.
+[recording]
+enabled = true
+max_gb = 5.0
 
 [widgets.status]
 enabled = true
@@ -98,6 +109,7 @@ opacity = 0.82
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Config {
     pub general: General,
+    pub recording: Recording,
     pub widgets: Widgets,
 }
 
@@ -111,6 +123,24 @@ impl Default for General {
     fn default() -> Self {
         Self {
             font: "Segoe UI".to_owned(),
+        }
+    }
+}
+
+/// Recording sessions for replays.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Recording {
+    pub enabled: bool,
+    /// Gigabytes the recordings may take before the oldest are deleted.
+    pub max_gb: f32,
+}
+
+impl Default for Recording {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_gb: 5.0,
         }
     }
 }
@@ -167,6 +197,7 @@ pub struct WidgetConfig {
 #[serde(default, deny_unknown_fields)]
 struct FileConfig {
     general: General,
+    recording: Recording,
     widgets: FileWidgets,
 }
 
@@ -220,6 +251,10 @@ pub enum ConfigError {
     },
     /// A widget's position cannot be written into the file without changing more than its position.
     Unplaceable,
+    /// A setting outside the widgets is outside its allowed range.
+    OutOfRange {
+        key: &'static str,
+    },
 }
 
 impl fmt::Display for ConfigError {
@@ -234,6 +269,7 @@ impl fmt::Display for ConfigError {
             Self::Unplaceable => f.write_str(
                 "cannot save the position: write the widget as a [widgets.<name>] table with x and y",
             ),
+            Self::OutOfRange { key } => write!(f, "invalid configuration: {key} is out of range"),
         }
     }
 }
@@ -255,6 +291,7 @@ impl Config {
         let w = file.widgets;
         let config = Self {
             general: file.general,
+            recording: file.recording,
             widgets: Widgets {
                 status: w.status.apply(defaults.status),
                 inputs: w.inputs.apply(defaults.inputs),
@@ -293,6 +330,11 @@ impl Config {
     }
 
     fn validate(&self) -> Result<(), ConfigError> {
+        if !(0.1..=10_000.0).contains(&self.recording.max_gb) {
+            return Err(ConfigError::OutOfRange {
+                key: "recording.max_gb",
+            });
+        }
         for (widget, c) in self.widgets() {
             let invalid = |field| Err(ConfigError::Invalid { widget, field });
             if c.rate_hz.is_some_and(|r| !(0.1..=120.0).contains(&r)) {
@@ -465,6 +507,19 @@ mod tests {
             Config::parse(include_str!("../../../benchmarks/pitot/inputs.toml")).expect("inputs");
         assert_eq!(enabled(&inputs), 1);
         assert_eq!(inputs.widgets.inputs, defaults.inputs);
+    }
+
+    #[test]
+    fn recording_is_on_by_default_and_checked() {
+        let config = Config::parse("").expect("parses");
+        assert!(config.recording.enabled);
+        assert_eq!(config.recording.max_gb, 5.0);
+        let off = Config::parse("[recording]\nenabled = false\n").expect("parses");
+        assert!(!off.recording.enabled);
+        assert!(matches!(
+            Config::parse("[recording]\nmax_gb = 0.0\n"),
+            Err(ConfigError::OutOfRange { .. })
+        ));
     }
 
     #[test]

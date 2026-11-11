@@ -22,15 +22,30 @@ Clicks outside the handles still reach the windows below. A right click on a han
 choosing *Move widgets* again ends moving. The overlay's own write to the file does not trigger a reload. A
 widget's monitor and size are set in the file.
 
-## Replays
+## Recording and replays
 
-While the sim plays a replay, during the session or from a saved `.rpy` file, widgets show what they showed at
-the replayed moment, if a capture of the session is available (see
-[Sim replays](overlay-pipeline.md#sim-replays)). Captures (`*.ptc`, from
-[`pitot-bench record`](recorder.md)) are looked up in:
+The overlay records each session while the player drives, into `%APPDATA%\Pitot\captures`, one
+[capture](capture-format.md) per sim connection named by its local start time (`20261112-153000.ptc`). While the
+sim plays a replay of that session, during the session or from a saved `.rpy` file later, widgets show what they
+showed at the replayed moment (see [Sim replays](overlay-pipeline.md#sim-replays)). Nothing else needs to run.
 
-- `captures` next to `pitot-overlay.exe`, where `pitot-bench record` writes them when it runs from that folder,
-- `%APPDATA%\Pitot\captures`.
+```toml
+[recording]
+enabled = true
+max_gb = 5.0
+```
+
+- `enabled`: record sessions. Off, replays show widgets only from captures already there.
+- `max_gb`: once the recordings take more than this many gigabytes, the oldest are deleted (after each
+  recording and at start). A full-grid session takes about 0.17 GB per hour.
+- Changes apply at the next start.
+- Ticks while the sim plays a replay are not recorded (they hold live values, not the session), and a
+  connection with nothing recorded, such as watching a saved replay, leaves no file.
+- Captures hold other drivers' names and IDs from the session info. They stay on this PC; anonymize them with
+  [`pitot-bench anonymize`](anonymize.md) before sharing.
+
+Captures are looked up in `%APPDATA%\Pitot\captures` and in `captures` next to `pitot-overlay.exe`, where
+[`pitot-bench record`](recorder.md) writes them when it runs from that folder.
 
 The log says whether a capture was found (`replay: playing the capture of this session`) and when the widgets
 switch to it and back. Without a capture, widgets hide during replays.

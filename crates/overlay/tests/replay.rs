@@ -163,7 +163,7 @@ fn replays_show_the_capture_at_the_replayed_moment() {
         idle_timeout: Duration::from_millis(50),
     };
     let (_pipeline, mut view) =
-        Pipeline::start(names, config, vec![folder.clone()]).expect("starts");
+        Pipeline::start(names, config, vec![folder.clone()], None).expect("starts");
 
     wait_for(&mut view, &mut sim, None, "live driving", |v| {
         v.display() == Display::Driving && v.session().is_some()
@@ -291,7 +291,7 @@ fn playing_replays_add_one_sample_per_tick() {
         idle_timeout: Duration::from_millis(50),
     };
     let (_pipeline, mut view) =
-        Pipeline::start(names, config, vec![folder.clone()]).expect("starts");
+        Pipeline::start(names, config, vec![folder.clone()], None).expect("starts");
     wait_for(&mut view, &mut sim, None, "live driving", |v| {
         v.display() == Display::Driving && v.session().is_some()
     });

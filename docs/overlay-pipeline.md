@@ -8,6 +8,7 @@ without per-tick allocations.
 | Thread | Wakes on | Work |
 |---|---|---|
 | `pitot-data` | the data-valid event (60 Hz while driving), at most once per second otherwise | `LiveReader::step`; publishes the tick and an input sample; copies session info when `sessionInfoUpdate` changes; during a sim replay, publishes a capture's frame instead (see below) |
+| `pitot-record` | once a second, while recording | writes the rows the data thread handed over into the capture (see below) |
 | `pitot-session` | work from the data thread | `SessionParser::parse`, then hands the result to the render thread and the text buffer back to the data thread; searches for a capture when a replay starts |
 | render (caller) | its own schedule | `View::poll` and `View::drain_samples` once per frame |
 
@@ -38,6 +39,26 @@ Every shared value is an atomic, so the pipeline has no `unsafe` and no data rac
 Widgets hide and the render loop can sleep outside `Driving`. While a capture plays during a sim replay, the
 values are the capture's, so the state is the one recorded at the replayed moment.
 
+## Recording
+
+With recording on (the default, see [configuration](configuration.md#recording-and-replays)), the data thread
+reads each tick's whole row ahead of the requested variables; only the variables go to the render thread. While
+the sim does not play a replay, it copies the row into a buffer from a pool and hands it to the `pitot-record`
+thread over a bounded queue, with session info whenever it changes and gaps when ticks were missed. The recorder
+wakes once a second, writes what arrived into the capture, and returns the buffers. So recording adds no wake-up
+per tick, and nothing allocates per tick once a connection has filled the pool (120 buffers, two seconds of ticks;
+a full queue drops rows and records them as a gap).
+
+The overlay writes two-second chunks (Zstandard level 3, built for size): the writer holds a chunk's rows and its
+compressed form, about 1 MB each for a full-grid session, and a replay decodes one chunk at a time. Ten-second
+chunks, as `pitot-bench` writes, took over 20 MB while recording.
+
+Lab PC (Parsec virtual display, four widgets, release build, the home PC capture of an online practice session
+replayed at 1x, `pitot-bench collect` for 60 s after 12 s, two runs each, alternating, same build): overlay CPU
+26.49 and 26.45 ms/s without recording, 28.57 and 28.75 ms/s with it (+2.2 ms/s; the busiest second 34 ms/s against
+30); private bytes 17.2 and 16.8 MiB without, 23.3 and 22.1 MiB with (+5 to 6 MiB). Each 75 s recording was 3.45 MB,
+about 0.17 GB per hour, with 4,498 frames and none missed.
+
 ## Sim replays
 
 While the sim plays a replay, its telemetry stays live. A capture recorded on the home PC during an online
@@ -56,7 +77,7 @@ player's own values were reset (speed 0, throttle 0, fuel 40). Only these say wh
 So the overlay shows a [capture](capture-format.md) of the session instead:
 
 1. When a replay starts, the session thread looks for captures (`*.ptc`) in the
-   [capture folders](configuration.md#replays), newest first. A capture belongs to the session when the session
+   [capture folders](configuration.md#recording-and-replays), newest first. A capture belongs to the session when the session
    info that opens it has the live session's `SubSessionID`. Offline sessions all report `SubSessionID` 0, so
    there a capture must have the same track and cover the replayed moment. A matching capture is indexed by
    session time (`pitot_irsdk::capture::Seeker`: one pass over the file, 0.05 s for 3.5 minutes of a 72-car
@@ -82,14 +103,15 @@ So the overlay shows a [capture](capture-format.md) of the session instead:
    again. The capture's buffers are freed.
 
 Opening the capture reads at most one chunk at a time, and every buffer is sized for the largest chunk and
-session info text while indexing, so playing does not allocate per tick. The decoded chunk (ten seconds of
-frames) is the main cost: about 6.5 MiB of private bytes for the 72-car capture, released when the replay ends.
+session info text while indexing, so playing does not allocate per tick. The decoded chunk is the main cost:
+about 6.5 MiB of private bytes for a 72-car capture in ten-second chunks, about a fifth of that in the overlay's
+own two-second chunks, released when the replay ends.
 
 ## Measurements
 
 - `cargo test -p pitot-overlay --features alloc-check --test alloc_check` counts allocations on every thread
   while 600 ticks flow through the data thread and the view: 0. The same for 600 ticks of a sim replay played
-  from a capture: 0.
+  from a capture, and for 600 ticks recorded (data, recorder, and render threads): 0.
 - Sim replay on the lab PC (Parsec virtual display, four widgets, release build): a replay stream made from the
   home PC capture (10 s live, then the replay at 1x, paused, back 20 s, 4x, 1/4 speed, then live again) with
   `pitot-bench replay`. The capture was found and shown 0.2 s after the replay started, and live values returned
