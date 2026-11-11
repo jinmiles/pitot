@@ -9,6 +9,19 @@ the log, do not reload. A file that fails to parse or validate is
 reported with its line and column, and the previous configuration stays in use. The tray menu's
 *Reload configuration* forces a reload.
 
+## Moving widgets
+
+Choose *Move widgets* in the tray menu to place widgets with the mouse. Every enabled widget shows, also without
+the sim, under a tinted handle. Drag a handle with the left button; the widget follows and stays on its monitor.
+Releasing the button saves the widget's `x` and `y` to `config.toml`. Only those two numbers change in the file,
+so comments and layout stay. A missing `x` or `y` goes on the line after the widget's `[widgets.<name>]` header,
+and a missing table is added at the end. A widget written as an inline table without `x` and `y` cannot be saved
+this way; the log says so, and the widget keeps its new place until the file is reloaded or the overlay exits.
+
+Clicks outside the handles still reach the windows below. A right click on a handle opens the tray menu, and
+choosing *Move widgets* again ends moving. The overlay's own write to the file does not trigger a reload. A
+widget's monitor and size are set in the file.
+
 ## One instance
 
 Only one overlay runs per Windows session. Launching it again while it runs exits at once and leaves the running

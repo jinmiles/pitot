@@ -34,6 +34,7 @@ pub const DEFAULT_TOML: &str = r#"# Pitot overlay configuration. Changes apply w
 #
 # Positions are in physical pixels from the top-left corner of the widget's monitor.
 # `monitor` counts monitors from the left (0 is the leftmost); leave it out to use the primary monitor.
+# *Move widgets* in the tray menu places widgets with the mouse and saves their x and y here.
 
 [general]
 font = "Segoe UI"
@@ -204,6 +205,8 @@ pub enum ConfigError {
         widget: &'static str,
         field: &'static str,
     },
+    /// A widget's position cannot be written into the file without changing more than its position.
+    Unplaceable,
 }
 
 impl fmt::Display for ConfigError {
@@ -214,6 +217,9 @@ impl fmt::Display for ConfigError {
             Self::Invalid { widget, field } => write!(
                 f,
                 "invalid configuration: widgets.{widget}.{field} is out of range"
+            ),
+            Self::Unplaceable => f.write_str(
+                "cannot save the position: write the widget as a [widgets.<name>] table with x and y",
             ),
         }
     }
@@ -260,6 +266,19 @@ impl Config {
         ]
     }
 
+    /// The configuration of the widget called `name`, as listed by [`Config::widgets`].
+    pub fn widget_mut(&mut self, name: &str) -> Option<&mut WidgetConfig> {
+        let w = &mut self.widgets;
+        match name {
+            "status" => Some(&mut w.status),
+            "inputs" => Some(&mut w.inputs),
+            "relative" => Some(&mut w.relative),
+            "standings" => Some(&mut w.standings),
+            "fuel" => Some(&mut w.fuel),
+            _ => None,
+        }
+    }
+
     fn validate(&self) -> Result<(), ConfigError> {
         for (widget, c) in self.widgets() {
             let invalid = |field| Err(ConfigError::Invalid { widget, field });
@@ -293,6 +312,90 @@ pub fn load_or_create(path: &Path) -> Result<Config, ConfigError> {
         }
         Err(e) => Err(e.into()),
     }
+}
+
+/// Returns `text` with widget `name` placed at (`x`, `y`). Only the numbers of its `x` and `y` keys change, so
+/// comments and layout stay as they are. A missing key goes on the line after the widget's `[widgets.<name>]`
+/// header, and a missing table is added at the end. Fails when the widget is written in a form this cannot
+/// edit in place (an inline table or dotted keys) or when `text` does not parse.
+pub fn with_position(text: &str, name: &str, x: i32, y: i32) -> Result<String, ConfigError> {
+    let before = Config::parse(text)?;
+    let parse_error = |e: toml::de::Error| ConfigError::Parse(e.to_string());
+    let document = toml::de::DeTable::parse(text).map_err(parse_error)?;
+    let widget = match document.get_ref().get("widgets").map(|w| w.get_ref()) {
+        Some(toml::de::DeValue::Table(widgets)) => widgets.get_key_value(name),
+        _ => None,
+    };
+    // Edits as (byte range, replacement), applied from the end so earlier ranges stay valid.
+    let mut edits: Vec<(std::ops::Range<usize>, String)> = Vec::new();
+    match widget {
+        Some((key, value)) => {
+            let toml::de::DeValue::Table(table) = value.get_ref() else {
+                return Err(ConfigError::Unplaceable);
+            };
+            let mut missing = String::new();
+            for (field, number) in [("x", x), ("y", y)] {
+                match table.get(field) {
+                    Some(old) => edits.push((old.span(), number.to_string())),
+                    None => missing.push_str(&format!("{field} = {number}\n")),
+                }
+            }
+            if !missing.is_empty() {
+                // Only a `[widgets.<name>]` header line can take new keys on the line below it.
+                let line_start = text[..key.span().start].rfind('\n').map_or(0, |i| i + 1);
+                if !text[line_start..].trim_start().starts_with('[') {
+                    return Err(ConfigError::Unplaceable);
+                }
+                let line_end = text[key.span().end..]
+                    .find('\n')
+                    .map_or(text.len(), |i| key.span().end + i + 1);
+                if line_end == text.len() && !text.ends_with('\n') {
+                    missing.insert(0, '\n');
+                }
+                edits.push((line_end..line_end, missing));
+            }
+        }
+        None => {
+            let gap = if text.is_empty() || text.ends_with("\n\n") {
+                ""
+            } else if text.ends_with('\n') {
+                "\n"
+            } else {
+                "\n\n"
+            };
+            edits.push((
+                text.len()..text.len(),
+                format!("{gap}[widgets.{name}]\nx = {x}\ny = {y}\n"),
+            ));
+        }
+    }
+    edits.sort_by_key(|(range, _)| std::cmp::Reverse(range.start));
+    let mut out = text.to_owned();
+    for (range, replacement) in edits {
+        out.replace_range(range, &replacement);
+    }
+    // The edit must place the widget and change nothing else.
+    let after = Config::parse(&out)?;
+    let mut expected = before;
+    if let Some(widget) = expected.widget_mut(name) {
+        widget.x = x;
+        widget.y = y;
+    }
+    if after != expected {
+        return Err(ConfigError::Unplaceable);
+    }
+    Ok(out)
+}
+
+/// Saves widget `name` at (`x`, `y`) in the file at `path` (see [`with_position`]). Writes a temporary file
+/// next to it first and moves it over the old one, so a failed write leaves the old file.
+pub fn save_position(path: &Path, name: &str, x: i32, y: i32) -> Result<(), ConfigError> {
+    let text = fs::read_to_string(path)?;
+    let placed = with_position(&text, name, x, y)?;
+    let temporary = path.with_extension("toml.tmp");
+    fs::write(&temporary, placed)?;
+    fs::rename(&temporary, path)?;
+    Ok(())
 }
 
 /// When a file was last written and how long it is. The configuration directory also holds the log, and a change
@@ -421,6 +524,80 @@ mod tests {
         assert_eq!(stamp(&path), Some(first), "another file changed");
         fs::write(&path, "[widgets.status]\nenabled = false\n").expect("edits");
         assert_ne!(stamp(&path), Some(first), "the file itself changed");
+        fs::remove_dir_all(&dir).expect("cleans up");
+    }
+
+    #[test]
+    fn saving_a_position_changes_only_its_numbers() {
+        let placed = with_position(DEFAULT_TOML, "standings", 1200, -40).expect("placed");
+        let config = Config::parse(&placed).expect("parses");
+        assert_eq!(
+            (config.widgets.standings.x, config.widgets.standings.y),
+            (1200, -40)
+        );
+        let changed: Vec<(&str, &str)> = DEFAULT_TOML
+            .lines()
+            .zip(placed.lines())
+            .filter(|(a, b)| a != b)
+            .collect();
+        assert_eq!(changed, [("x = 24", "x = 1200"), ("y = 260", "y = -40")]);
+        assert_eq!(DEFAULT_TOML.lines().count(), placed.lines().count());
+
+        let commented = "[widgets.fuel]\nx = 5 # left edge\ny = 6\n";
+        assert_eq!(
+            with_position(commented, "fuel", 50, 60).expect("placed"),
+            "[widgets.fuel]\nx = 50 # left edge\ny = 60\n"
+        );
+        let inline = "[widgets]\nfuel = { x = 1, y = 2 }\n";
+        assert_eq!(
+            with_position(inline, "fuel", 3, 4).expect("placed"),
+            "[widgets]\nfuel = { x = 3, y = 4 }\n"
+        );
+    }
+
+    #[test]
+    fn saving_a_position_adds_missing_keys_and_tables() {
+        let place = |text: &str, name: &str| with_position(text, name, 7, 8);
+        assert_eq!(
+            place("[widgets.fuel]\nenabled = true\n", "fuel").expect("placed"),
+            "[widgets.fuel]\nx = 7\ny = 8\nenabled = true\n"
+        );
+        assert_eq!(
+            place("[widgets.fuel]\ny = 2\n", "fuel").expect("placed"),
+            "[widgets.fuel]\nx = 7\ny = 8\n"
+        );
+        assert_eq!(
+            place("[widgets.fuel]", "fuel").expect("placed"),
+            "[widgets.fuel]\nx = 7\ny = 8\n"
+        );
+        assert_eq!(
+            place("[general]\nfont = \"Arial\"", "relative").expect("placed"),
+            "[general]\nfont = \"Arial\"\n\n[widgets.relative]\nx = 7\ny = 8\n"
+        );
+        assert_eq!(
+            place("", "relative").expect("placed"),
+            "[widgets.relative]\nx = 7\ny = 8\n"
+        );
+        assert!(matches!(
+            place("[widgets]\nfuel = { enabled = true }\n", "fuel"),
+            Err(ConfigError::Unplaceable)
+        ));
+        assert!(matches!(
+            place("[widgets.fuel\n", "fuel"),
+            Err(ConfigError::Parse(_))
+        ));
+    }
+
+    #[test]
+    fn saved_positions_replace_the_file() {
+        let dir = std::env::temp_dir().join(format!("pitot-position-{}", std::process::id()));
+        fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("config.toml");
+        fs::write(&path, DEFAULT_TOML).expect("write");
+        save_position(&path, "fuel", 10, 20).expect("saved");
+        let config = load_or_create(&path).expect("loads");
+        assert_eq!((config.widgets.fuel.x, config.widgets.fuel.y), (10, 20));
+        assert!(!path.with_extension("toml.tmp").exists());
         fs::remove_dir_all(&dir).expect("cleans up");
     }
 

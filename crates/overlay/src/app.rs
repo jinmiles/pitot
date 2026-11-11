@@ -12,9 +12,10 @@ use pitot_irsdk::live::{ReaderConfig, SdkNames};
 use tracing::{debug, info, warn};
 
 use crate::config::{self, Config, WidgetConfig};
-use crate::pipeline::{Pipeline, View};
+use crate::pipeline::{Display, Pipeline, View};
 use crate::platform::{
-    self, DirectoryWatch, Monitor, OverlayWindow, Timer, Tray, TrayCommand, Wake,
+    self, DirectoryWatch, Monitor, MoveHandle, OverlayWindow, ScreenRect, Timer, Tray, TrayCommand,
+    Wake, WidgetMove,
 };
 use crate::render::{Canvas, Layer, RenderError, Renderer, WindowTarget};
 use crate::widgets::{
@@ -40,9 +41,14 @@ fn next_wake(shown_due: impl Iterator<Item = Instant>, connected: bool, now: Ins
 }
 
 struct Slot {
+    /// The widget's name in the configuration.
+    name: &'static str,
     widget: Box<dyn Widget>,
     /// Index into `Layout::windows`.
     window: usize,
+    /// Screen position of the window's (the monitor's) top-left corner.
+    origin: (i32, i32),
+    /// Position in the window, as configured.
     x: i32,
     y: i32,
     interval: Duration,
@@ -102,8 +108,10 @@ impl Layout {
                 .rate_hz
                 .map_or(widget.interval(), |hz| Duration::from_secs_f32(1.0 / hz));
             slots.push(Slot {
+                name,
                 widget,
                 window,
+                origin: (monitors[monitor].rect.x, monitors[monitor].rect.y),
                 x: widget_config.x,
                 y: widget_config.y,
                 interval,
@@ -121,6 +129,8 @@ struct Scene {
     _targets: Vec<WindowTarget>,
     /// Per slot, the widget's layers.
     layers: Vec<Vec<Layer>>,
+    /// Per slot, each layer's position in the widget.
+    offsets: Vec<Vec<(i32, i32)>>,
 }
 
 impl Scene {
@@ -130,8 +140,10 @@ impl Scene {
             targets.push(renderer.attach(window)?);
         }
         let mut layers = Vec::with_capacity(layout.slots.len());
+        let mut offsets = Vec::with_capacity(layout.slots.len());
         for slot in &layout.slots {
             let mut widget_layers = Vec::new();
+            let mut widget_offsets = Vec::new();
             for spec in slot.widget.layers().into_iter().take(MAX_LAYERS) {
                 widget_layers.push(renderer.layer(
                     &targets[slot.window],
@@ -141,15 +153,75 @@ impl Scene {
                     spec.height,
                     spec.scrolling,
                 )?);
+                widget_offsets.push((spec.x, spec.y));
             }
             layers.push(widget_layers);
+            offsets.push(widget_offsets);
         }
         renderer.commit_now()?;
         Ok(Self {
             _targets: targets,
             layers,
+            offsets,
         })
     }
+
+    /// Moves slot `id`'s layers to the slot's position, without redrawing them.
+    fn place(
+        &mut self,
+        renderer: &mut Renderer,
+        id: usize,
+        slot: &Slot,
+    ) -> Result<(), RenderError> {
+        let (Some(layers), Some(offsets)) = (self.layers.get_mut(id), self.offsets.get(id)) else {
+            return Ok(());
+        };
+        for (layer, (dx, dy)) in layers.iter_mut().zip(offsets) {
+            renderer.move_layer(layer, slot.x + dx, slot.y + dy)?;
+        }
+        Ok(())
+    }
+}
+
+/// Which widgets show.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Shown {
+    /// Each widget decides from the display state.
+    Normal,
+    /// None: *Hide widgets* is chosen.
+    Hidden,
+    /// All of them, also without the sim: widgets are being moved.
+    All,
+}
+
+impl Shown {
+    fn visible(self, widget: &dyn Widget, display: Display) -> bool {
+        match self {
+            Self::Normal => widget.visible(display),
+            Self::Hidden => false,
+            Self::All => true,
+        }
+    }
+}
+
+/// A move handle over each widget, for dragging them while *Move widgets* is chosen.
+fn move_handles(slots: &[Slot]) -> Vec<MoveHandle> {
+    slots
+        .iter()
+        .enumerate()
+        .filter_map(|(id, slot)| {
+            let (width, height) = slot.widget.size();
+            let rect = ScreenRect {
+                x: slot.origin.0 + slot.x,
+                y: slot.origin.1 + slot.y,
+                width: i32::try_from(width).unwrap_or(i32::MAX),
+                height: i32::try_from(height).unwrap_or(i32::MAX),
+            };
+            MoveHandle::create(id, rect)
+                .inspect_err(|e| warn!("widgets.{} cannot be moved: {e}", slot.name))
+                .ok()
+        })
+        .collect()
 }
 
 /// Loads the configuration file, falling back to defaults (and saying why) when it cannot be used.
@@ -192,6 +264,9 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut reload_at: Option<Instant> = None;
     // Chosen from the tray menu: no widget is updated or drawn.
     let mut hidden = false;
+    // While *Move widgets* is chosen: a handle over each widget.
+    let mut handles: Option<Vec<MoveHandle>> = None;
+    let mut moves: Vec<WidgetMove> = Vec::new();
 
     loop {
         if !platform::pump_messages() {
@@ -205,7 +280,56 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 info!(hidden, "widgets hidden from the tray menu");
                 layout.slots.iter_mut().for_each(|s| s.stale = true);
             }
+            Some(TrayCommand::ToggleMove) => {
+                handles = match handles.take() {
+                    Some(_) => None,
+                    None => Some(move_handles(&layout.slots)),
+                };
+                tray.set_moving(handles.is_some());
+                if handles.is_some() && hidden {
+                    hidden = false;
+                    tray.set_hidden(false);
+                }
+                info!(
+                    moving = handles.is_some(),
+                    "moving widgets from the tray menu"
+                );
+                layout.slots.iter_mut().for_each(|s| s.stale = true);
+            }
             None => {}
+        }
+        platform::take_moves(&mut moves);
+        for moved in moves.drain(..) {
+            let Some(slot) = layout.slots.get_mut(moved.id) else {
+                continue;
+            };
+            slot.x = moved.x - slot.origin.0;
+            slot.y = moved.y - slot.origin.1;
+            if let (Some(device), Some(current)) = (renderer.as_mut(), scene.as_mut())
+                && let Err(e) = current.place(device, moved.id, slot)
+            {
+                debug!("widget not moved on screen, rebuilding the scene: {e}");
+                scene = None;
+            }
+            if moved.done {
+                if let Some(widget) = config.widget_mut(slot.name) {
+                    (widget.x, widget.y) = (slot.x, slot.y);
+                }
+                let saved = config::config_file()
+                    .ok_or_else(|| "no APPDATA directory".to_owned())
+                    .and_then(|path| {
+                        config::save_position(&path, slot.name, slot.x, slot.y)
+                            .map_err(|e| e.to_string())
+                    });
+                match saved {
+                    // The watch sees the write; the new stamp keeps it from reloading.
+                    Ok(()) => {
+                        stamp = config_stamp();
+                        info!(widget = slot.name, x = slot.x, y = slot.y, "widget moved");
+                    }
+                    Err(e) => warn!(widget = slot.name, "widget moved but not saved: {e}"),
+                }
+            }
         }
         if reload_at.is_some_and(|at| Instant::now() >= at) {
             reload_at = None;
@@ -215,8 +339,13 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                     Ok(fresh) => {
                         // Release GPU objects before their windows go away.
                         scene = None;
+                        let moving = handles.take().is_some();
                         layout = Layout::build(&fresh, &platform::monitors())?;
                         config = fresh;
+                        // New windows go above the old handles, so the handles are made again.
+                        if moving {
+                            handles = Some(move_handles(&layout.slots));
+                        }
                         info!("configuration reloaded");
                     }
                     Err(e) => warn!("keeping the previous configuration: {e}"),
@@ -249,9 +378,16 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 .ok();
             layout.slots.iter_mut().for_each(|s| s.stale = true);
         }
+        let shown = if handles.is_some() {
+            Shown::All
+        } else if hidden {
+            Shown::Hidden
+        } else {
+            Shown::Normal
+        };
         let now = Instant::now();
         if let (Some(device), Some(current)) = (renderer.as_mut(), scene.as_mut())
-            && let Err(e) = frame(device, current, &mut layout.slots, &mut view, now, hidden)
+            && let Err(e) = frame(device, current, &mut layout.slots, &mut view, now, shown)
         {
             // Device loss: rebuild the device and the scene on the next pass, after a short pause so a missing
             // device does not spin.
@@ -267,7 +403,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             layout
                 .slots
                 .iter()
-                .filter(|s| !hidden && s.widget.visible(display))
+                .filter(|s| shown.visible(s.widget.as_ref(), display))
                 .map(|s| s.next_due),
             view.is_connected(),
             now,
@@ -306,18 +442,18 @@ fn log_counters(view: &View, event: &str) {
     );
 }
 
-/// Updates and draws the widgets that are due, then commits once. `hidden` hides every widget.
+/// Updates and draws the widgets that are due, then commits once.
 fn frame(
     renderer: &mut Renderer,
     scene: &mut Scene,
     slots: &mut [Slot],
     view: &mut View,
     now: Instant,
-    hidden: bool,
+    shown: Shown,
 ) -> Result<(), RenderError> {
     let display = view.display();
     for (slot, layers) in slots.iter_mut().zip(scene.layers.iter_mut()) {
-        let visible = !hidden && slot.widget.visible(display);
+        let visible = shown.visible(slot.widget.as_ref(), display);
         for layer in layers.iter_mut() {
             renderer.set_visible(layer, visible)?;
         }
