@@ -47,7 +47,8 @@ ticks of 15.6 ms, rounds every sample to whole ticks: a one-second sample of a l
 Runs collected before the rate was measured have no `cycle_rate_mhz`. For them CPU time is the clock-tick count,
 and the busiest sample is that sample's cycles at the run's average CPU time per cycle (`total cpu_ms / total
 cpu_mcycles`). The report's notes say how many runs that applies to. The collector's own CPU follows the same
-rule.
+rule. DWM's CPU time comes from PDH, which counts clock ticks: `dwm.exe` cannot be opened without elevation, so its
+cycles are out of reach, and its run-to-run spread is wider.
 
 **Growth.** A slope over a three-minute run mostly shows start-up allocations and caches filling. Memory growth
 budgets need long runs, such as the 60-minute scenario.
