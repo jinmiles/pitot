@@ -37,7 +37,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     MWMO_INPUTAVAILABLE, MsgWaitForMultipleObjectsEx, PM_REMOVE, PeekMessageW, PostQuitMessage,
     QS_ALLINPUT, RegisterClassExW, SW_SHOWNOACTIVATE, SetForegroundWindow, ShowWindow,
     TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, WM_APP,
-    WM_CONTEXTMENU, WM_NCHITTEST, WM_QUIT, WM_RBUTTONUP, WNDCLASSEXW, WS_EX_NOACTIVATE,
+    WM_CLOSE, WM_CONTEXTMENU, WM_NCHITTEST, WM_QUIT, WM_RBUTTONUP, WNDCLASSEXW, WS_EX_NOACTIVATE,
     WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 use windows::core::{PCWSTR, w};
@@ -194,6 +194,13 @@ unsafe extern "system" fn window_proc(
     match msg {
         // Clicks pass through to the windows below.
         WM_NCHITTEST => LRESULT(HTTRANSPARENT as isize),
+        // Closing any window quits like the tray's Quit, so tools that close apps the usual way end the overlay
+        // cleanly instead of leaving it running without that window.
+        WM_CLOSE => {
+            // SAFETY: posts WM_QUIT to this thread's own message queue.
+            unsafe { PostQuitMessage(0) };
+            LRESULT(0)
+        }
         TRAY_MESSAGE if matches!(lparam.0 as u32, WM_RBUTTONUP | WM_CONTEXTMENU) => {
             show_tray_menu(hwnd);
             LRESULT(0)
