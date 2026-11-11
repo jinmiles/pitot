@@ -95,7 +95,7 @@ pub(crate) fn maker_letter(car_name: &str) -> Option<char> {
 }
 
 /// A duration as `h:mm:ss`, or `m:ss` under an hour.
-fn write_clock(out: &mut FixedText, seconds: f64) {
+pub(crate) fn write_clock(out: &mut FixedText, seconds: f64) {
     let s = seconds.max(0.0) as u64;
     let (h, m, s) = (s / 3600, s / 60 % 60, s % 60);
     if h > 0 {
@@ -106,7 +106,7 @@ fn write_clock(out: &mut FixedText, seconds: f64) {
 }
 
 /// A session length as `2h`, `22h13m`, or `45m`.
-fn write_length(out: &mut FixedText, seconds: f64) {
+pub(crate) fn write_length(out: &mut FixedText, seconds: f64) {
     let minutes = (seconds.max(0.0) / 60.0).round() as u64;
     let (h, m) = (minutes / 60, minutes % 60);
     match (h, m) {

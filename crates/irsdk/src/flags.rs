@@ -30,4 +30,10 @@ pub mod session_flags {
     pub const RANDOM_WAVING: u32 = 0x0000_2000;
     pub const CAUTION: u32 = 0x0000_4000;
     pub const CAUTION_WAVING: u32 = 0x0000_8000;
+    /// Per-car bits, as `CarIdxSessionFlags` and the player's `SessionFlags` report them.
+    pub const BLACK: u32 = 0x0001_0000;
+    pub const DISQUALIFY: u32 = 0x0002_0000;
+    pub const SERVICEABLE: u32 = 0x0004_0000;
+    pub const FURLED: u32 = 0x0008_0000;
+    pub const REPAIR: u32 = 0x0010_0000;
 }

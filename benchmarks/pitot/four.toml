@@ -21,8 +21,8 @@ opacity = 0.82
 enabled = true
 x = 1460
 y = 560
-width = 430
-height = 280
+width = 460
+height = 300
 rate_hz = 10.0
 opacity = 0.82
 
