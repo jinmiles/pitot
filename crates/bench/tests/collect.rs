@@ -29,11 +29,13 @@ fn measures_this_process() {
     assert!(sample.processes >= 1, "{sample:?}");
     assert!(sample.cpu_ms >= 200.0, "busy for 400 ms: {sample:?}");
     assert!(sample.cpu_mcycles > 0.0, "{sample:?}");
-    // The busy thread's cycles at the counter's rate come to about its 400 ms.
+    // Cycles at the counter's rate come to the CPU time the clock-tick counters report for the same interval
+    // (within their 15.6 ms ticks). Not to the 400 ms of wall time: on a busy two-core runner the thread is
+    // descheduled for part of it.
     let rate = collector.cycle_rate_mhz().expect("cycle counter readable");
     let cycle_ms = sample.cpu_mcycles / rate * 1000.0;
     assert!(
-        cycle_ms >= 380.0,
+        (cycle_ms - sample.cpu_ms).abs() <= 0.15 * sample.cpu_ms + 32.0,
         "{cycle_ms} ms from cycles at {rate} MHz: {sample:?}"
     );
     assert!(sample.private_bytes > 0 && sample.working_set_bytes > 0);
