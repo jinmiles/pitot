@@ -1,5 +1,6 @@
-//! Statistics for reports: means with Student-t confidence intervals, Welch's difference of means, and least
-//! squares slopes. Platform independent and free of dependencies.
+//! Statistics for reports: means with Student-t confidence intervals, Welch's difference of means (or Crawford
+//! and Howell's for a single run against a sample), and least squares slopes. Platform independent and free of
+//! dependencies.
 
 use serde::{Deserialize, Serialize};
 
@@ -52,31 +53,34 @@ impl Estimate {
         })
     }
 
-    /// `a - b` with Welch's interval, which does not assume equal variances. `None` unless both have at least two
-    /// values.
+    /// `a - b` with Welch's interval, which does not assume equal variances. When one side has a single value,
+    /// such as the one app run of a 60-minute series, the interval comes from the other side's spread: Crawford
+    /// and Howell's test of a single case against a sample, with standard error `s * sqrt((n + 1) / n)` and
+    /// `n - 1` degrees of freedom. `None` if either side is empty or both have a single value.
     pub fn difference(a: &[f64], b: &[f64]) -> Option<Self> {
-        if a.len() < 2 || b.len() < 2 {
+        if a.is_empty() || b.is_empty() || (a.len() < 2 && b.len() < 2) {
             return None;
         }
         let (ma, mb) = (mean(a), mean(b));
-        let (va, vb) = (
-            variance(a, ma) / a.len() as f64,
-            variance(b, mb) / b.len() as f64,
-        );
-        let se = (va + vb).sqrt();
         let d = ma - mb;
-        if se == 0.0 {
-            return Some(Self {
-                n: a.len().min(b.len()),
-                mean: d,
-                sd: 0.0,
-                ci_low: Some(d),
-                ci_high: Some(d),
-            });
-        }
-        let df = (va + vb).powi(2)
-            / (va.powi(2) / (a.len() - 1) as f64 + vb.powi(2) / (b.len() - 1) as f64);
-        let half = t_quantile(0.5 + CONFIDENCE / 2.0, df) * se;
+        let (se, df) = if a.len() < 2 || b.len() < 2 {
+            let (sample, m) = if a.len() < 2 { (b, mb) } else { (a, ma) };
+            let n = sample.len() as f64;
+            ((variance(sample, m) * (n + 1.0) / n).sqrt(), n - 1.0)
+        } else {
+            let (va, vb) = (
+                variance(a, ma) / a.len() as f64,
+                variance(b, mb) / b.len() as f64,
+            );
+            let df = (va + vb).powi(2)
+                / (va.powi(2) / (a.len() - 1) as f64 + vb.powi(2) / (b.len() - 1) as f64);
+            ((va + vb).sqrt(), df)
+        };
+        let half = if se == 0.0 {
+            0.0
+        } else {
+            t_quantile(0.5 + CONFIDENCE / 2.0, df) * se
+        };
         Some(Self {
             n: a.len().min(b.len()),
             mean: d,
@@ -256,7 +260,29 @@ mod tests {
         assert!(close(d.sd, 0.20415, 1e-5), "{d:?}");
         assert!(close(d.ci_low.unwrap(), 0.36638, 1e-4), "{d:?}");
         assert!(close(d.ci_high.unwrap(), 1.30695, 1e-4), "{d:?}");
-        assert!(Estimate::difference(&a, &[1.0]).is_none());
+        assert!(Estimate::difference(&[1.0], &[2.0]).is_none());
+        assert!(Estimate::difference(&a, &[]).is_none());
+    }
+
+    #[test]
+    fn single_run_against_a_sample() {
+        // Crawford and Howell: 10 - 2 = 8, standard error sqrt(2) * sqrt(3 / 2) = 1.73205, one degree of freedom
+        // (t = 12.7062), so 8 +- 22.0078.
+        let d = Estimate::difference(&[10.0], &[1.0, 3.0]).expect("one run against two");
+        assert_eq!((d.n, d.mean), (1, 8.0));
+        assert!(close(d.sd, 1.73205, 1e-5), "{d:?}");
+        assert!(close(d.ci_low.unwrap(), -14.0078, 1e-3), "{d:?}");
+        assert!(close(d.ci_high.unwrap(), 30.0078, 1e-3), "{d:?}");
+        let flipped = Estimate::difference(&[1.0, 3.0], &[10.0]).expect("two against one");
+        assert_eq!(flipped.mean, -8.0);
+        assert!(
+            close(flipped.ci_high.unwrap(), 14.0078, 1e-3),
+            "{flipped:?}"
+        );
+        // Five baselines with a small spread: a large single increase is clear.
+        let clear = Estimate::difference(&[60.0], &[2.0, 2.5, 1.5, 3.0, 2.0])
+            .expect("one run against five");
+        assert!(clear.ci_low.unwrap() > 50.0, "{clear:?}");
     }
 
     #[test]

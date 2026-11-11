@@ -51,6 +51,11 @@ budgets need long runs, such as the 60-minute scenario.
 - **Against the baselines.** DWM, the GPU, and the collector belong to the whole desktop. For these, the report
   gives each app's runs minus the interleaved baseline runs, with Welch's interval, which does not assume equal
   variances. An interval that contains zero means no measurable difference.
+- **One app run.** Long scenarios, such as the 60-minute one, measure the app once between two baselines. Welch's
+  interval needs two runs on each side, so the difference then uses the baselines' spread: Crawford and Howell's
+  test of a single case against a sample, with standard error `s * sqrt((n + 1) / n)` and `n - 1` degrees of
+  freedom over the `n` baselines. With two baselines that is one degree of freedom, so only large differences
+  are conclusive.
 - Baselines have no app, so the app's own values are shown as `-` for them.
 - Runs that were not measured (app not running after the warm-up, launch failed) are listed and left out of the
   means.

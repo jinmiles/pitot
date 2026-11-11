@@ -133,8 +133,8 @@ pub fn markdown(report: &Report) -> String {
         let _ = writeln!(out, "\n## Against the baselines\n");
         let _ = writeln!(
             out,
-            "Desktop-wide values of each app's runs minus the interleaved baseline runs, with Welch's 95% interval. \
-An interval that contains zero is no measurable difference.\n"
+            "Desktop-wide values of each app's runs minus the interleaved baseline runs, with Welch's 95% interval \
+(for an app with one run, from the baselines' spread). An interval that contains zero is no measurable difference.\n"
         );
         let mut header = "| Metric | Unit |".to_owned();
         let mut rule = "|---|---|".to_owned();
