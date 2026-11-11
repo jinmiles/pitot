@@ -169,6 +169,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     platform::enable_dpi_awareness();
     let mut config = load_config();
     let watch = config::config_dir().and_then(|dir| DirectoryWatch::new(&dir).ok());
+    let config_stamp = || config::config_file().and_then(|path| config::stamp(&path));
+    let mut stamp = config_stamp();
     let monitors = platform::monitors();
     info!(
         version = env!("CARGO_PKG_VERSION"),
@@ -265,8 +267,13 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             next = next.min(at);
         }
         timer.set(next.saturating_duration_since(Instant::now()))?;
+        // The directory also holds the log, whose writes signal the watch too; only a changed file reloads.
         if platform::wait(&timer, watch.as_ref(), Duration::from_secs(1)) == Wake::Changed {
-            reload_at = Some(Instant::now() + RELOAD_DELAY);
+            let current = config_stamp();
+            if current != stamp {
+                stamp = current;
+                reload_at = Some(Instant::now() + RELOAD_DELAY);
+            }
         }
     }
     log_counters(&view, "data counters at exit");

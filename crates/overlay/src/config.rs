@@ -5,6 +5,7 @@ use std::fmt;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use serde::Deserialize;
 
@@ -294,6 +295,23 @@ pub fn load_or_create(path: &Path) -> Result<Config, ConfigError> {
     }
 }
 
+/// When a file was last written and how long it is. The configuration directory also holds the log, and a change
+/// notification on the directory does not say which file changed; comparing stamps tells.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Stamp {
+    modified: Option<SystemTime>,
+    len: u64,
+}
+
+/// The file's stamp, or `None` if it cannot be read (for example, it does not exist).
+pub fn stamp(path: &Path) -> Option<Stamp> {
+    let meta = fs::metadata(path).ok()?;
+    Some(Stamp {
+        modified: meta.modified().ok(),
+        len: meta.len(),
+    })
+}
+
 /// Orders monitors for the `monitor` setting: left to right, then top to bottom. Returns indices into `rects`,
 /// where each rect is `(x, y)` of the monitor's top-left corner.
 pub fn monitor_order(rects: &[(i32, i32)]) -> Vec<usize> {
@@ -388,6 +406,21 @@ mod tests {
         assert_eq!(fs::read_to_string(&path).expect("written"), DEFAULT_TOML);
         fs::write(&path, "[widgets.status]\nenabled = false\n").expect("edits");
         assert!(!load_or_create(&path).expect("reads").widgets.status.enabled);
+        fs::remove_dir_all(&dir).expect("cleans up");
+    }
+
+    #[test]
+    fn stamp_changes_only_with_its_own_file() {
+        let dir = std::env::temp_dir().join(format!("pitot-stamp-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).expect("creates");
+        let (path, log) = (dir.join("config.toml"), dir.join("pitot.log"));
+        assert_eq!(stamp(&path), None, "missing file");
+        fs::write(&path, DEFAULT_TOML).expect("writes");
+        let first = stamp(&path).expect("stamp");
+        fs::write(&log, "a log line\n").expect("writes the log");
+        assert_eq!(stamp(&path), Some(first), "another file changed");
+        fs::write(&path, "[widgets.status]\nenabled = false\n").expect("edits");
+        assert_ne!(stamp(&path), Some(first), "the file itself changed");
         fs::remove_dir_all(&dir).expect("cleans up");
     }
 
