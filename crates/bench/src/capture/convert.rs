@@ -5,8 +5,8 @@ use std::io::{BufWriter, Read, Seek};
 use std::path::Path;
 
 use super::reader::{CaptureSource, Record};
-use super::writer::{CaptureWriter, Counts, SourceInfo, WriterOptions};
 use crate::replay::{FrameSource, IbtSource, IrdtSource, Item, ReplayError};
+use pitot_irsdk::capture::{CaptureWriter, Counts, SourceInfo, WriterOptions};
 
 /// Clock of record times for sources without their own, such as `.ibt` files: 100 ns units.
 const SYNTHETIC_CLOCK_HZ: u64 = 10_000_000;
@@ -36,6 +36,8 @@ pub fn irdt(input: &Path, output: &Path, level: i32) -> Result<Counts, ReplayErr
         clock_hz: source.clock_hz(),
         sdk_version: source.sdk_version(),
         source: source_info("irdt", input),
+        tool: "pitot-bench",
+        tool_version: env!("CARGO_PKG_VERSION"),
     };
     let mut writer = CaptureWriter::new(
         BufWriter::new(File::create(output)?),
@@ -71,6 +73,8 @@ pub fn ibt(input: &Path, output: &Path, level: i32) -> Result<Counts, ReplayErro
         clock_hz: SYNTHETIC_CLOCK_HZ,
         sdk_version: source.sdk_version(),
         source: source_info("ibt", input),
+        tool: "pitot-bench",
+        tool_version: env!("CARGO_PKG_VERSION"),
     };
     let session_tick = layout
         .vars

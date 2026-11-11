@@ -4,10 +4,9 @@
 
 pub mod convert;
 mod reader;
-mod writer;
 
+pub use pitot_irsdk::capture::{CaptureWriter, Counts, SourceInfo, WriterOptions};
 pub use reader::{CaptureSource, ChunkEntry, Record};
-pub use writer::{CaptureWriter, Counts, SourceInfo, WriterOptions};
 
 #[cfg(test)]
 mod tests {
@@ -54,6 +53,8 @@ mod tests {
                 file: None,
                 bytes: None,
             },
+            tool: "pitot-bench",
+            tool_version: env!("CARGO_PKG_VERSION"),
         }
     }
 
