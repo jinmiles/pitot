@@ -9,6 +9,8 @@ publish.workspace = true
 [features]
 # Builds the counting-allocator test that checks the live read path for heap allocations.
 alloc-check = []
+# Exposes a small capture builder for other crates' tests.
+test-capture = []
 
 [dependencies]
 saphyr = "0.3.3"

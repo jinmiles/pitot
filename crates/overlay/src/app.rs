@@ -12,7 +12,7 @@ use pitot_irsdk::live::{ReaderConfig, SdkNames};
 use tracing::{debug, info, warn};
 
 use crate::config::{self, Config, WidgetConfig};
-use crate::pipeline::{Display, Pipeline, View};
+use crate::pipeline::{Display, Pipeline, Source, View};
 use crate::platform::{
     self, DirectoryWatch, Monitor, MoveHandle, OverlayWindow, ScreenRect, Timer, Tray, TrayCommand,
     Wake, WidgetMove,
@@ -259,7 +259,11 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         Some(device) => Some(Scene::build(device, &layout)?),
         None => None,
     };
-    let (pipeline, mut view) = Pipeline::start(SdkNames::sim(), ReaderConfig::default())?;
+    let (pipeline, mut view) = Pipeline::start(
+        SdkNames::sim(),
+        ReaderConfig::default(),
+        config::capture_dirs(),
+    )?;
     let timer = Timer::new()?;
     let mut reload_at: Option<Instant> = None;
     // Chosen from the tray menu: no widget is updated or drawn.
@@ -354,10 +358,14 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         let changes = view.poll();
         if changes.connection {
-            if view.is_connected() {
-                info!("sim connected");
-            } else {
-                log_counters(&view, "sim disconnected");
+            match view.source() {
+                Some(Source::Sim) => info!("sim connected"),
+                Some(Source::Capture { first: true }) => {
+                    info!("replay: showing the session capture")
+                }
+                Some(Source::SimAgain) => info!("replay: showing live values again"),
+                Some(Source::Capture { first: false }) => {}
+                None => log_counters(&view, "sim disconnected"),
             }
             for slot in &mut layout.slots {
                 slot.widget.reset();

@@ -9,7 +9,13 @@
 //!
 //! Buffers are created per connection, so per-car arrays are sized from the sim's `CarIdx*` length. They reach
 //! the render thread over a channel only when the connection changes.
+//!
+//! While the sim plays a replay, the data thread publishes a capture of the session at the replayed moment
+//! instead of the live values (see `replay`). Each restart of the capture's input trace, and each switch
+//! between capture and live values, hands the render thread a new connection, so widgets reset.
 
+#[cfg(windows)]
+mod replay;
 mod vars;
 mod wire;
 
@@ -17,14 +23,15 @@ pub use vars::Vars;
 pub use wire::{InputSample, SampleRing, SeqBuffer};
 
 #[cfg(windows)]
-pub use threads::{Pipeline, PipelineStats, View, ViewChanges};
+pub use threads::{Pipeline, PipelineStats, Source, View, ViewChanges};
 
 /// Whether widgets should show and the render loop should run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Display {
     /// No sim connection.
     Disconnected,
-    /// Connected, but the player is not driving (garage, menus, replay, spectating): widgets hide.
+    /// Connected, but the player is not driving (garage, menus, spectating, or a replay without a capture):
+    /// widgets hide.
     Idle,
     /// The player is in the car on track; inputs are the driver's own.
     Driving,
@@ -43,17 +50,37 @@ fn ready_session_buffer(buffer: &mut Vec<u8>, area: usize) {
 
 #[cfg(windows)]
 mod threads {
+    use std::path::PathBuf;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::mpsc::{self, Receiver, Sender};
     use std::sync::{Arc, Weak};
     use std::thread::{self, JoinHandle};
+    use std::time::{Duration, Instant};
 
+    use pitot_irsdk::capture::Moment;
     use pitot_irsdk::live::{LiveReader, ReaderConfig, SdkNames, Snapshot, Step, VarSet};
     use pitot_irsdk::session::{SessionInfo, SessionParser};
+    use tracing::info;
 
+    use super::replay::{self, CaptureCache, Found, Plan, Player, SessionIds};
     use super::{
         Display, InputSample, SAMPLE_CAPACITY, SampleRing, SeqBuffer, Vars, ready_session_buffer,
     };
+
+    /// Least time between two searches for a capture during one replay.
+    const SEARCH_INTERVAL: Duration = Duration::from_secs(10);
+
+    /// Where a connection's values come from.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Source {
+        /// The sim, as it publishes them.
+        Sim,
+        /// The sim connection again, after a capture played during a replay.
+        SimAgain,
+        /// A capture of the session, at the moment the sim's replay shows. `first` marks the first connection
+        /// of a replay; later ones restart the trace after a jump.
+        Capture { first: bool },
+    }
 
     /// Buffers for one connection, shared by the data thread (writer) and the render thread (reader).
     #[derive(Debug)]
@@ -63,12 +90,37 @@ mod threads {
         latest: SeqBuffer,
         samples: SampleRing,
         car_count: usize,
+        source: Source,
+    }
+
+    impl Connection {
+        fn new(template: &Snapshot, car_count: usize, source: Source) -> Arc<Self> {
+            Arc::new(Self {
+                template: template.clone(),
+                latest: SeqBuffer::new(template.bytes().len()),
+                samples: SampleRing::new(SAMPLE_CAPACITY),
+                car_count,
+                source,
+            })
+        }
     }
 
     enum Message {
         Connected(Arc<Connection>),
         Disconnected,
         Session(Weak<Connection>, Arc<SessionInfo>),
+    }
+
+    /// Work for the session thread.
+    enum Job {
+        /// Session info text to parse for a connection. Live text identifies the session for capture searches.
+        Parse {
+            connection: Weak<Connection>,
+            text: Vec<u8>,
+            live: bool,
+        },
+        /// Look for a capture of the live session that covers the replayed moment.
+        Find { at: Moment },
     }
 
     /// Counters for diagnostics and tests.
@@ -92,16 +144,22 @@ mod threads {
     }
 
     impl Pipeline {
-        /// Starts reading from `names` and returns the pipeline and the render thread's view.
-        pub fn start(names: SdkNames, config: ReaderConfig) -> std::io::Result<(Self, View)> {
+        /// Starts reading from `names` and returns the pipeline and the render thread's view. During replays,
+        /// captures of the session are looked up in the folders `captures`.
+        pub fn start(
+            names: SdkNames,
+            config: ReaderConfig,
+            captures: Vec<PathBuf>,
+        ) -> std::io::Result<(Self, View)> {
             let mut set = VarSet::new();
             let vars = Vars::register(&mut set);
             let stop = Arc::new(AtomicBool::new(false));
             let stats = Arc::new(PipelineStats::default());
             let (to_render, from_threads) = mpsc::channel();
-            let (to_session, session_jobs) = mpsc::channel::<(Weak<Connection>, Vec<u8>)>();
+            let (to_session, session_jobs) = mpsc::channel::<Job>();
             // Text buffers go back to the data thread once parsed, so updates reuse them instead of allocating.
             let (recycle, recycled) = mpsc::channel::<Vec<u8>>();
+            let (to_data, found) = mpsc::channel::<Option<Found>>();
 
             let session = {
                 let to_render = to_render.clone();
@@ -109,31 +167,14 @@ mod threads {
                 thread::Builder::new()
                     .name("pitot-session".into())
                     .spawn(move || {
-                        let mut parser = SessionParser::new();
-                        // Blocks until the data thread sends text, and ends when it exits.
-                        while let Ok((connection, text)) = session_jobs.recv() {
-                            let car_count = connection.upgrade().map(|c| c.car_count);
-                            let parsed = car_count.map(|count| parser.parse(&text, count));
-                            // Fails only once the data thread has exited.
-                            let _ = recycle.send(text);
-                            let Some(parsed) = parsed else {
-                                continue;
-                            };
-                            match parsed {
-                                Ok(info) => {
-                                    stats.session_parses.fetch_add(1, Ordering::Relaxed);
-                                    if to_render
-                                        .send(Message::Session(connection, Arc::new(info)))
-                                        .is_err()
-                                    {
-                                        break;
-                                    }
-                                }
-                                Err(_) => {
-                                    stats.session_errors.fetch_add(1, Ordering::Relaxed);
-                                }
-                            }
-                        }
+                        session_loop(
+                            &session_jobs,
+                            &to_render,
+                            &recycle,
+                            &to_data,
+                            &stats,
+                            &captures,
+                        );
                     })?
             };
             let data = {
@@ -143,15 +184,13 @@ mod threads {
                     .name("pitot-data".into())
                     .spawn(move || {
                         let reader = LiveReader::new(names, set, config);
-                        data_loop(
-                            reader,
-                            vars,
-                            &stop,
-                            &stats,
-                            &to_render,
-                            &to_session,
-                            &recycled,
-                        );
+                        let channels = DataChannels {
+                            to_render,
+                            to_session,
+                            recycled,
+                            found,
+                        };
+                        data_loop(reader, vars, &stop, &stats, &channels);
                     })?
             };
             let view = View {
@@ -193,74 +232,313 @@ mod threads {
         }
     }
 
+    /// Parses session info and searches for captures. Blocks until the data thread sends work, and ends when it
+    /// exits.
+    fn session_loop(
+        jobs: &Receiver<Job>,
+        to_render: &Sender<Message>,
+        recycle: &Sender<Vec<u8>>,
+        to_data: &Sender<Option<Found>>,
+        stats: &PipelineStats,
+        captures: &[PathBuf],
+    ) {
+        let mut parser = SessionParser::new();
+        let mut cache = CaptureCache::default();
+        let mut live_ids: Option<SessionIds> = None;
+        while let Ok(job) = jobs.recv() {
+            match job {
+                Job::Parse {
+                    connection,
+                    text,
+                    live,
+                } => {
+                    let car_count = connection.upgrade().map(|c| c.car_count);
+                    let parsed = car_count.map(|count| parser.parse(&text, count));
+                    // Fails only once the data thread has exited.
+                    let _ = recycle.send(text);
+                    match parsed {
+                        None => {}
+                        Some(Ok(info)) => {
+                            stats.session_parses.fetch_add(1, Ordering::Relaxed);
+                            if live {
+                                live_ids = Some(SessionIds::of(&info));
+                            }
+                            if to_render
+                                .send(Message::Session(connection, Arc::new(info)))
+                                .is_err()
+                            {
+                                return;
+                            }
+                        }
+                        Some(Err(_)) => {
+                            stats.session_errors.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                }
+                Job::Find { at } => {
+                    let found = live_ids
+                        .and_then(|ids| replay::find(captures, ids, at, &mut parser, &mut cache));
+                    match &found {
+                        Some(f) => {
+                            info!(capture = %f.name, "replay: playing the capture of this session")
+                        }
+                        None => info!("replay: no capture of this session"),
+                    }
+                    if to_data.send(found).is_err() {
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    struct DataChannels {
+        to_render: Sender<Message>,
+        to_session: Sender<Job>,
+        recycled: Receiver<Vec<u8>>,
+        found: Receiver<Option<Found>>,
+    }
+
+    impl DataChannels {
+        /// Sends session info text to parse for `connection`, in a buffer the session thread is done with, so
+        /// only the first updates allocate. `false` once the session thread has exited.
+        fn parse(&self, connection: &Arc<Connection>, text: &[u8], live: bool) -> bool {
+            let mut buffer = self.recycled.try_recv().unwrap_or_default();
+            buffer.clear();
+            buffer.extend_from_slice(text);
+            self.to_session
+                .send(Job::Parse {
+                    connection: Arc::downgrade(connection),
+                    text: buffer,
+                    live,
+                })
+                .is_ok()
+        }
+    }
+
+    /// The data thread's state for the sim's replays.
+    #[derive(Debug, Default)]
+    struct Replay {
+        player: Option<Player>,
+        searching: bool,
+        last_search: Option<Instant>,
+        /// The current connection shows the capture.
+        showing: bool,
+        /// A connection of this replay showed the capture already.
+        started: bool,
+    }
+
+    impl Replay {
+        fn may_search(&self, now: Instant) -> bool {
+            !self.searching
+                && self
+                    .last_search
+                    .is_none_or(|at| now - at >= SEARCH_INTERVAL)
+        }
+    }
+
+    fn sample(snapshot: &Snapshot, vars: &Vars, missed: u32) -> InputSample {
+        InputSample {
+            tick: snapshot.tick(),
+            session_time: snapshot.f64(vars.session_time, 0).unwrap_or(0.0),
+            throttle: snapshot.f32(vars.throttle, 0).unwrap_or(0.0),
+            brake: snapshot.f32(vars.brake, 0).unwrap_or(0.0),
+            clutch: snapshot.f32(vars.clutch, 0).unwrap_or(1.0),
+            steering: snapshot.f32(vars.steering, 0).unwrap_or(0.0),
+            abs_active: snapshot.bool(vars.abs_active, 0).unwrap_or(false),
+            missed_before: missed,
+        }
+    }
+
+    /// The render or session thread has exited.
+    struct Gone;
+
+    /// Publishes the capture at the moment the sim's replay shows. Returns the connection that now shows it, or
+    /// `None` to show the live values instead. A search needs the live session info sent first (`live_sent`):
+    /// it identifies the session, and the session thread handles jobs in order.
+    fn play_replay(
+        replay: &mut Replay,
+        current: &Arc<Connection>,
+        live: &Snapshot,
+        live_sent: bool,
+        vars: &Vars,
+        channels: &DataChannels,
+    ) -> Result<Option<Arc<Connection>>, Gone> {
+        let at = Moment::new(
+            live.i32(vars.replay_session_num, 0).unwrap_or(-1),
+            live.f64(vars.replay_session_time, 0).unwrap_or(f64::NAN),
+        );
+        let plan = replay.player.as_ref().map_or(Plan::Outside, |p| p.plan(at));
+        if plan == Plan::Outside {
+            let search = replay.player.as_ref().is_none_or(|p| {
+                let end = p.end();
+                p.growing() && at.session == end.session && at.time > end.time
+            });
+            let now = Instant::now();
+            if search && live_sent && replay.may_search(now) {
+                replay.searching = true;
+                replay.last_search = Some(now);
+                channels
+                    .to_session
+                    .send(Job::Find { at })
+                    .map_err(|_| Gone)?;
+            }
+            return Ok(None);
+        }
+        let Some(player) = replay.player.as_mut() else {
+            return Ok(None);
+        };
+        let restart = plan == Plan::Restart || !replay.showing;
+        let connection = if restart {
+            let source = Source::Capture {
+                first: !replay.started,
+            };
+            let fresh = Connection::new(live, current.car_count, source);
+            if player
+                .restart(at, |s| {
+                    fresh.samples.push(sample(s, vars, 0));
+                })
+                .is_err()
+            {
+                return Ok(None);
+            }
+            fresh
+        } else {
+            let moved = match plan {
+                Plan::Forward => player.forward(at, |s| {
+                    current.samples.push(sample(s, vars, 0));
+                }),
+                Plan::Back => player.back(at),
+                _ => Ok(()),
+            };
+            if moved.is_err() {
+                return Ok(None);
+            }
+            Arc::clone(current)
+        };
+        if restart || plan != Plan::Same {
+            let snapshot = player.snapshot();
+            connection.latest.write(snapshot.tick(), snapshot.bytes());
+        }
+        if restart {
+            replay.started = true;
+            channels
+                .to_render
+                .send(Message::Connected(Arc::clone(&connection)))
+                .map_err(|_| Gone)?;
+            // The new connection has no session info yet, so the one in effect is sent even if unchanged.
+            player.take_session_change();
+            if let Some(text) = player.session()
+                && !channels.parse(&connection, text, false)
+            {
+                return Err(Gone);
+            }
+        } else if let Some(text) = player.take_session_change()
+            && !channels.parse(&connection, text, false)
+        {
+            return Err(Gone);
+        }
+        Ok(Some(connection))
+    }
+
     fn data_loop(
         mut reader: LiveReader,
         vars: Vars,
         stop: &AtomicBool,
         stats: &PipelineStats,
-        to_render: &Sender<Message>,
-        to_session: &Sender<(Weak<Connection>, Vec<u8>)>,
-        recycled: &Receiver<Vec<u8>>,
+        channels: &DataChannels,
     ) {
         let mut snapshot = Snapshot::new();
         let mut connection: Option<Arc<Connection>> = None;
         let mut session_text = Vec::new();
         let mut session_update = None;
+        let mut replay = Replay::default();
         while !stop.load(Ordering::Relaxed) {
             match reader.step(&mut snapshot) {
                 Ok(Step::Connected) => {
                     let car_count = snapshot.count(vars.car_lap_dist_pct);
-                    let fresh = Arc::new(Connection {
-                        template: snapshot.clone(),
-                        latest: SeqBuffer::new(snapshot.bytes().len()),
-                        samples: SampleRing::new(SAMPLE_CAPACITY),
-                        car_count,
-                    });
+                    let fresh = Connection::new(&snapshot, car_count, Source::Sim);
                     ready_session_buffer(
                         &mut session_text,
                         reader.session_info_capacity().unwrap_or(0),
                     );
                     session_update = None;
+                    replay = Replay::default();
                     connection = Some(Arc::clone(&fresh));
-                    if to_render.send(Message::Connected(fresh)).is_err() {
+                    if channels.to_render.send(Message::Connected(fresh)).is_err() {
                         return;
                     }
                 }
                 Ok(Step::Tick { missed }) => {
-                    let Some(current) = connection.as_ref() else {
+                    let Some(mut current) = connection.clone() else {
                         continue;
                     };
                     stats.ticks.fetch_add(1, Ordering::Relaxed);
                     stats.missed.fetch_add(u64::from(missed), Ordering::Relaxed);
+                    if let Ok(found) = channels.found.try_recv() {
+                        replay.searching = false;
+                        if let Some(found) = found {
+                            replay.player = Some(Player::new(found, reader.var_set(), &snapshot));
+                        }
+                    }
+                    if snapshot.bool(vars.is_replay_playing, 0) == Some(true) {
+                        let live_sent = session_update.is_some();
+                        match play_replay(
+                            &mut replay,
+                            &current,
+                            &snapshot,
+                            live_sent,
+                            &vars,
+                            channels,
+                        ) {
+                            Err(Gone) => return,
+                            Ok(Some(shown)) => {
+                                replay.showing = true;
+                                connection = Some(shown);
+                                continue;
+                            }
+                            Ok(None) => {}
+                        }
+                    } else if replay.player.is_some() || replay.started || replay.searching {
+                        // The replay ended: free the capture's buffers. A search still running answers into the
+                        // next replay, which is fine for the same session.
+                        replay = Replay {
+                            showing: replay.showing,
+                            searching: replay.searching,
+                            ..Replay::default()
+                        };
+                    }
+                    if replay.showing {
+                        // Back to live values: widgets reset, and the live session info is sent again.
+                        replay.showing = false;
+                        let fresh = Connection::new(&snapshot, current.car_count, Source::SimAgain);
+                        if channels
+                            .to_render
+                            .send(Message::Connected(Arc::clone(&fresh)))
+                            .is_err()
+                        {
+                            return;
+                        }
+                        session_update = None;
+                        connection = Some(Arc::clone(&fresh));
+                        current = fresh;
+                    }
                     current.latest.write(snapshot.tick(), snapshot.bytes());
-                    current.samples.push(InputSample {
-                        tick: snapshot.tick(),
-                        session_time: snapshot.f64(vars.session_time, 0).unwrap_or(0.0),
-                        throttle: snapshot.f32(vars.throttle, 0).unwrap_or(0.0),
-                        brake: snapshot.f32(vars.brake, 0).unwrap_or(0.0),
-                        clutch: snapshot.f32(vars.clutch, 0).unwrap_or(1.0),
-                        steering: snapshot.f32(vars.steering, 0).unwrap_or(0.0),
-                        abs_active: snapshot.bool(vars.abs_active, 0).unwrap_or(false),
-                        missed_before: missed,
-                    });
+                    current.samples.push(sample(&snapshot, &vars, missed));
                     let update = reader.session_info_update();
                     if update != session_update
                         && let Ok(Some(copied)) = reader.copy_session_info(&mut session_text)
                     {
                         session_update = Some(copied);
-                        // A buffer the session thread is done with, so only the first updates allocate.
-                        let mut text = recycled.try_recv().unwrap_or_default();
-                        text.clear();
-                        text.extend_from_slice(&session_text);
-                        let job = (Arc::downgrade(current), text);
-                        if to_session.send(job).is_err() {
+                        if !channels.parse(&current, &session_text, true) {
                             return;
                         }
                     }
                 }
                 Ok(Step::Disconnected) => {
                     connection = None;
-                    if to_render.send(Message::Disconnected).is_err() {
+                    replay = Replay::default();
+                    if channels.to_render.send(Message::Disconnected).is_err() {
                         return;
                     }
                 }
@@ -375,6 +653,11 @@ mod threads {
 
         pub fn is_connected(&self) -> bool {
             self.connection.is_some()
+        }
+
+        /// Where the current connection's values come from.
+        pub fn source(&self) -> Option<Source> {
+            self.connection.as_ref().map(|c| c.source)
         }
 
         /// Per-car array length of the current connection.

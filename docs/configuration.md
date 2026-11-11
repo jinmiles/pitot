@@ -22,6 +22,19 @@ Clicks outside the handles still reach the windows below. A right click on a han
 choosing *Move widgets* again ends moving. The overlay's own write to the file does not trigger a reload. A
 widget's monitor and size are set in the file.
 
+## Replays
+
+While the sim plays a replay, during the session or from a saved `.rpy` file, widgets show what they showed at
+the replayed moment, if a capture of the session is available (see
+[Sim replays](overlay-pipeline.md#sim-replays)). Captures (`*.ptc`, from
+[`pitot-bench record`](recorder.md)) are looked up in:
+
+- `captures` next to `pitot-overlay.exe`, where `pitot-bench record` writes them when it runs from that folder,
+- `%APPDATA%\Pitot\captures`.
+
+The log says whether a capture was found (`replay: playing the capture of this session`) and when the widgets
+switch to it and back. Without a capture, widgets hide during replays.
+
 ## One instance
 
 Only one overlay runs per Windows session. Launching it again while it runs exits at once and leaves the running
