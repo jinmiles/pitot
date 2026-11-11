@@ -3,6 +3,7 @@
 //!
 //! All Win32 `unsafe` for windowing lives here; callers use the safe types below.
 
+use std::cell::{Cell, RefCell};
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::time::Duration;
@@ -12,7 +13,8 @@ use windows::Win32::Foundation::{
     LRESULT, POINT, RECT, WAIT_OBJECT_0, WAIT_TIMEOUT, WPARAM,
 };
 use windows::Win32::Graphics::Gdi::{
-    EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFO, MONITORINFOEXW,
+    CreateSolidBrush, EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR,
+    MONITOR_DEFAULTTONEAREST, MONITORINFO, MONITORINFOEXW, MonitorFromWindow,
 };
 use windows::Win32::Storage::FileSystem::{
     FILE_NOTIFY_CHANGE_FILE_NAME, FILE_NOTIFY_CHANGE_LAST_WRITE, FindCloseChangeNotification,
@@ -28,17 +30,21 @@ use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForMonitor, MDT_EFFECTIVE_DPI,
     SetProcessDpiAwarenessContext,
 };
+use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
 use windows::Win32::UI::Shell::{
     NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW, Shell_NotifyIconW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow,
-    DispatchMessageW, GetCursorPos, HTTRANSPARENT, IDI_APPLICATION, LWA_ALPHA, LoadIconW,
+    DispatchMessageW, GWLP_USERDATA, GetCursorPos, GetWindowLongPtrW, GetWindowRect, HTTRANSPARENT,
+    HWND_TOPMOST, IDC_SIZEALL, IDI_APPLICATION, LWA_ALPHA, LoadCursorW, LoadIconW, MA_NOACTIVATE,
     MF_CHECKED, MF_SEPARATOR, MF_STRING, MSG, MWMO_INPUTAVAILABLE, MsgWaitForMultipleObjectsEx,
     PM_REMOVE, PeekMessageW, PostQuitMessage, QS_ALLINPUT, RegisterClassExW, SW_SHOWNOACTIVATE,
-    SetForegroundWindow, SetLayeredWindowAttributes, ShowWindow, TPM_NONOTIFY, TPM_RETURNCMD,
-    TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, WINDOW_EX_STYLE, WM_APP, WM_CLOSE,
-    WM_CONTEXTMENU, WM_LBUTTONUP, WM_NCHITTEST, WM_QUIT, WM_RBUTTONUP, WNDCLASSEXW, WS_EX_LAYERED,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetForegroundWindow,
+    SetLayeredWindowAttributes, SetWindowLongPtrW, SetWindowPos, ShowWindow, TPM_NONOTIFY,
+    TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, WINDOW_EX_STYLE, WM_APP,
+    WM_CAPTURECHANGED, WM_CLOSE, WM_CONTEXTMENU, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE,
+    WM_MOUSEMOVE, WM_NCHITTEST, WM_QUIT, WM_RBUTTONUP, WNDCLASSEXW, WS_EX_LAYERED,
     WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
     WS_EX_TRANSPARENT, WS_POPUP,
 };
@@ -170,11 +176,14 @@ const TRAY_MESSAGE: u32 = WM_APP + 1;
 const CMD_RELOAD: u8 = 1;
 const CMD_QUIT: u8 = 2;
 const CMD_HIDE: u8 = 3;
+const CMD_MOVE: u8 = 4;
 
 /// Tray menu choice waiting to be handled by the app loop: one of the `CMD_` values, or 0.
 static PENDING: AtomicU8 = AtomicU8::new(0);
 /// Whether the menu shows *Hide widgets* checked; set by the app through [`Tray::set_hidden`].
 static HIDDEN: AtomicBool = AtomicBool::new(false);
+/// Whether the menu shows *Move widgets* checked; set by the app through [`Tray::set_moving`].
+static MOVING: AtomicBool = AtomicBool::new(false);
 
 /// A command chosen from the tray menu.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -182,6 +191,8 @@ pub enum TrayCommand {
     Reload,
     /// Hide the widgets if they are shown, show them if they are hidden.
     ToggleHidden,
+    /// Start or end moving widgets with the mouse.
+    ToggleMove,
 }
 
 /// Takes the pending tray command, if any. Quit ends the message loop instead.
@@ -189,6 +200,7 @@ pub fn take_tray_command() -> Option<TrayCommand> {
     match PENDING.swap(0, Ordering::Relaxed) {
         CMD_RELOAD => Some(TrayCommand::Reload),
         CMD_HIDE => Some(TrayCommand::ToggleHidden),
+        CMD_MOVE => Some(TrayCommand::ToggleMove),
         _ => None,
     }
 }
@@ -230,12 +242,25 @@ fn show_tray_menu(hwnd: HWND) {
         let Ok(menu) = CreatePopupMenu() else {
             return;
         };
-        let hide = if HIDDEN.load(Ordering::Relaxed) {
-            MF_STRING | MF_CHECKED
-        } else {
-            MF_STRING
+        let checked = |on: &AtomicBool| {
+            if on.load(Ordering::Relaxed) {
+                MF_STRING | MF_CHECKED
+            } else {
+                MF_STRING
+            }
         };
-        let _ = AppendMenuW(menu, hide, usize::from(CMD_HIDE), w!("Hide widgets"));
+        let _ = AppendMenuW(
+            menu,
+            checked(&MOVING),
+            usize::from(CMD_MOVE),
+            w!("Move widgets"),
+        );
+        let _ = AppendMenuW(
+            menu,
+            checked(&HIDDEN),
+            usize::from(CMD_HIDE),
+            w!("Hide widgets"),
+        );
         let _ = AppendMenuW(
             menu,
             MF_STRING,
@@ -254,7 +279,9 @@ fn show_tray_menu(hwnd: HWND) {
         let _ = DestroyMenu(menu);
         match u8::try_from(chosen) {
             Ok(CMD_QUIT) => PostQuitMessage(0),
-            Ok(command @ (CMD_RELOAD | CMD_HIDE)) => PENDING.store(command, Ordering::Relaxed),
+            Ok(command @ (CMD_RELOAD | CMD_HIDE | CMD_MOVE)) => {
+                PENDING.store(command, Ordering::Relaxed)
+            }
             _ => {}
         }
     }
@@ -354,8 +381,273 @@ impl Drop for OverlayWindow {
     }
 }
 
-/// The notification-area icon with its menu (Hide widgets, Reload configuration, Quit), owned by a hidden
-/// window.
+/// A widget dragged to a new place, in screen pixels of its handle's top-left corner. `done` is set when the
+/// mouse button is released.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WidgetMove {
+    pub id: usize,
+    pub x: i32,
+    pub y: i32,
+    pub done: bool,
+}
+
+/// The drag in progress: the handle, where in it the pointer grabbed it, and the monitor it must stay on.
+#[derive(Debug, Clone, Copy)]
+struct Drag {
+    hwnd: HWND,
+    id: usize,
+    grab: POINT,
+    bounds: RECT,
+}
+
+thread_local! {
+    // Handles are windows of the render thread, so their messages and these values stay on it.
+    static DRAG: Cell<Option<Drag>> = const { Cell::new(None) };
+    static MOVES: RefCell<Vec<WidgetMove>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Appends the widget moves since the last call to `out`.
+pub fn take_moves(out: &mut Vec<WidgetMove>) {
+    MOVES.with(|moves| out.append(&mut moves.borrow_mut()));
+}
+
+/// Opacity of a move handle over its widget, out of 255: a tint that leaves the widget readable.
+const HANDLE_ALPHA: u8 = 72;
+/// Tint of a move handle, `0x00BBGGRR`.
+const HANDLE_COLOR: u32 = 0x00F6_823B;
+
+/// Client coordinates of a mouse message.
+fn client_point(lparam: LPARAM) -> POINT {
+    POINT {
+        x: i32::from(lparam.0 as u16 as i16),
+        y: i32::from((lparam.0 >> 16) as u16 as i16),
+    }
+}
+
+/// Where a handle of `size` goes when the pointer is at `pointer` (screen) and grabbed it at `grab` (handle),
+/// kept inside `bounds`.
+fn dragged_to(pointer: POINT, grab: POINT, size: (i32, i32), bounds: RECT) -> POINT {
+    // A handle larger than its monitor keeps its top-left corner on the monitor.
+    POINT {
+        x: (pointer.x - grab.x).clamp(bounds.left, (bounds.right - size.0).max(bounds.left)),
+        y: (pointer.y - grab.y).clamp(bounds.top, (bounds.bottom - size.1).max(bounds.top)),
+    }
+}
+
+fn window_rect(hwnd: HWND) -> RECT {
+    let mut rect = RECT::default();
+    // SAFETY: `hwnd` is a live window of this thread and `rect` is writable.
+    let _ = unsafe { GetWindowRect(hwnd, &mut rect) };
+    rect
+}
+
+unsafe extern "system" fn handle_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    match msg {
+        // Clicking a handle must not take the focus from the sim.
+        WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
+        WM_LBUTTONDOWN => {
+            let mut info = MONITORINFO {
+                cbSize: size_of::<MONITORINFO>() as u32,
+                ..Default::default()
+            };
+            // SAFETY: `hwnd` is live; `info` has cbSize set as GetMonitorInfoW requires.
+            let bounds = unsafe {
+                let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+                let _ = GetMonitorInfoW(monitor, &mut info);
+                // The widget's layers belong to its monitor's window, so it stays on that monitor.
+                info.rcMonitor
+            };
+            let id = {
+                // SAFETY: reads the id this handle was created with.
+                let value = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) };
+                usize::try_from(value).unwrap_or(0)
+            };
+            DRAG.with(|drag| {
+                drag.set(Some(Drag {
+                    hwnd,
+                    id,
+                    grab: client_point(lparam),
+                    bounds,
+                }));
+            });
+            // SAFETY: captures the mouse for this thread's window while the button is held.
+            unsafe { SetCapture(hwnd) };
+            LRESULT(0)
+        }
+        WM_MOUSEMOVE => {
+            if let Some(drag) = DRAG.with(Cell::get).filter(|d| d.hwnd == hwnd) {
+                let rect = window_rect(hwnd);
+                let point = client_point(lparam);
+                let pointer = POINT {
+                    x: rect.left + point.x,
+                    y: rect.top + point.y,
+                };
+                let size = (rect.right - rect.left, rect.bottom - rect.top);
+                let to = dragged_to(pointer, drag.grab, size, drag.bounds);
+                if (to.x, to.y) != (rect.left, rect.top) {
+                    // SAFETY: moves this thread's window without changing its size, order, or activation.
+                    let _ = unsafe {
+                        SetWindowPos(
+                            hwnd,
+                            None,
+                            to.x,
+                            to.y,
+                            0,
+                            0,
+                            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+                        )
+                    };
+                    push_move(drag.id, to, false);
+                }
+            }
+            LRESULT(0)
+        }
+        WM_LBUTTONUP | WM_CAPTURECHANGED => {
+            if let Some(drag) = DRAG.with(|d| d.take()).filter(|d| d.hwnd == hwnd) {
+                let rect = window_rect(hwnd);
+                push_move(
+                    drag.id,
+                    POINT {
+                        x: rect.left,
+                        y: rect.top,
+                    },
+                    true,
+                );
+                if msg == WM_LBUTTONUP {
+                    // SAFETY: releases the capture taken on button down.
+                    let _ = unsafe { ReleaseCapture() };
+                }
+            }
+            LRESULT(0)
+        }
+        // A right click on a widget opens the tray menu, so moving can end there.
+        WM_RBUTTONUP => {
+            show_tray_menu(hwnd);
+            LRESULT(0)
+        }
+        WM_CLOSE => {
+            // SAFETY: posts WM_QUIT to this thread's own message queue.
+            unsafe { PostQuitMessage(0) };
+            LRESULT(0)
+        }
+        // SAFETY: forwards unchanged arguments for default handling.
+        _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
+    }
+}
+
+fn push_move(id: usize, to: POINT, done: bool) {
+    MOVES.with(|moves| {
+        moves.borrow_mut().push(WidgetMove {
+            id,
+            x: to.x,
+            y: to.y,
+            done,
+        });
+    });
+}
+
+fn handle_class() -> Result<PCWSTR, PlatformError> {
+    static REGISTERED: OnceLock<Result<(), PlatformError>> = OnceLock::new();
+    let name = w!("PitotMoveHandle");
+    REGISTERED
+        .get_or_init(|| {
+            // SAFETY: a stock cursor and a solid brush; the class keeps the brush for the life of the process.
+            let (cursor, brush) = unsafe {
+                (
+                    LoadCursorW(None, IDC_SIZEALL).map_err(|e| error("LoadCursorW", &e))?,
+                    CreateSolidBrush(COLORREF(HANDLE_COLOR)),
+                )
+            };
+            let class = WNDCLASSEXW {
+                cbSize: size_of::<WNDCLASSEXW>() as u32,
+                lpfnWndProc: Some(handle_proc),
+                hInstance: instance()?,
+                hCursor: cursor,
+                hbrBackground: brush,
+                lpszClassName: name,
+                ..Default::default()
+            };
+            // SAFETY: the class structure is fully initialized and its strings are static.
+            if unsafe { RegisterClassExW(&class) } == 0 {
+                return Err(last_error("RegisterClassExW"));
+            }
+            Ok(())
+        })
+        .clone()?;
+    Ok(name)
+}
+
+/// While widgets are being moved: a tinted window over one widget that takes the mouse there, so the widget
+/// can be dragged. Clicks elsewhere still reach the windows below. Never takes the focus.
+#[derive(Debug)]
+pub struct MoveHandle {
+    hwnd: HWND,
+}
+
+impl MoveHandle {
+    /// Creates a handle over `rect`, reporting moves with `id`, above the overlay windows.
+    pub fn create(id: usize, rect: ScreenRect) -> Result<Self, PlatformError> {
+        let style = WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW;
+        // SAFETY: the class is registered and all strings are static; no creation parameter is passed.
+        let hwnd = unsafe {
+            CreateWindowExW(
+                style,
+                handle_class()?,
+                w!("Pitot widget"),
+                WS_POPUP,
+                rect.x,
+                rect.y,
+                rect.width,
+                rect.height,
+                None,
+                None,
+                Some(instance()?),
+                None,
+            )
+        }
+        .map_err(|e| error("CreateWindowExW", &e))?;
+        let handle = Self { hwnd };
+        // SAFETY: `hwnd` was just created by this thread with WS_EX_LAYERED.
+        unsafe { SetLayeredWindowAttributes(hwnd, COLORREF(0), HANDLE_ALPHA, LWA_ALPHA) }
+            .map_err(|e| error("SetLayeredWindowAttributes", &e))?;
+        // SAFETY: stores the id in the window's user data slot, read back on button down.
+        unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, id as isize) };
+        // SAFETY: shows this thread's window without activating it, at the top of the topmost windows.
+        unsafe {
+            let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+            let _ = SetWindowPos(
+                hwnd,
+                Some(HWND_TOPMOST),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            );
+        }
+        Ok(handle)
+    }
+}
+
+impl Drop for MoveHandle {
+    fn drop(&mut self) {
+        DRAG.with(|drag| {
+            if drag.get().is_some_and(|d| d.hwnd == self.hwnd) {
+                drag.set(None);
+            }
+        });
+        // SAFETY: the window belongs to this thread and is destroyed once.
+        let _ = unsafe { DestroyWindow(self.hwnd) };
+    }
+}
+
+/// The notification-area icon with its menu (Move widgets, Hide widgets, Reload configuration, Quit), owned
+/// by a hidden window.
 #[derive(Debug)]
 pub struct Tray {
     window: OverlayWindow,
@@ -383,6 +675,11 @@ impl Tray {
     /// Shows *Hide widgets* checked or not the next time the menu opens.
     pub fn set_hidden(&self, hidden: bool) {
         HIDDEN.store(hidden, Ordering::Relaxed);
+    }
+
+    /// Shows *Move widgets* checked or not the next time the menu opens.
+    pub fn set_moving(&self, moving: bool) {
+        MOVING.store(moving, Ordering::Relaxed);
     }
 }
 
@@ -574,7 +871,69 @@ pub fn pump_messages() -> bool {
 
 #[cfg(test)]
 mod tests {
+    use windows::Win32::UI::WindowsAndMessaging::SendMessageW;
+
     use super::*;
+
+    #[test]
+    fn dragged_handles_stay_on_their_monitor() {
+        let bounds = RECT {
+            left: -1080,
+            top: 0,
+            right: 0,
+            bottom: 1920,
+        };
+        let at = |x, y| POINT { x, y };
+        let to = |pointer| {
+            let p = dragged_to(pointer, at(10, 5), (300, 100), bounds);
+            (p.x, p.y)
+        };
+        assert_eq!(to(at(-500, 400)), (-510, 395));
+        assert_eq!(to(at(-2000, -50)), (-1080, 0), "clamped to the top-left");
+        assert_eq!(
+            to(at(50, 5000)),
+            (-300, 1820),
+            "clamped to the bottom-right"
+        );
+        let small = RECT {
+            left: 0,
+            top: 0,
+            right: 200,
+            bottom: 50,
+        };
+        let p = dragged_to(at(150, 40), at(0, 0), (300, 100), small);
+        assert_eq!((p.x, p.y), (0, 0), "larger than the monitor");
+    }
+
+    #[test]
+    fn a_handle_reports_its_drag() {
+        let handle = MoveHandle::create(
+            7,
+            ScreenRect {
+                x: 100,
+                y: 100,
+                width: 40,
+                height: 30,
+            },
+        )
+        .expect("handle");
+        let lparam = |x: i32, y: i32| LPARAM(((y as isize) << 16) | (x as isize & 0xFFFF));
+        let send = |msg, x, y| {
+            // SAFETY: sends a mouse message to a window of this thread; its procedure runs synchronously.
+            unsafe { SendMessageW(handle.hwnd, msg, None, Some(lparam(x, y))) };
+        };
+        send(WM_LBUTTONDOWN, 10, 10);
+        send(WM_MOUSEMOVE, 60, 30);
+        send(WM_LBUTTONUP, 0, 0);
+        let mut moves = Vec::new();
+        take_moves(&mut moves);
+        let moved = |x, y, done| WidgetMove { id: 7, x, y, done };
+        assert_eq!(moves, [moved(150, 120, false), moved(150, 120, true)]);
+        let rect = window_rect(handle.hwnd);
+        assert_eq!((rect.left, rect.top), (150, 120), "the handle follows");
+        take_moves(&mut moves);
+        assert_eq!(moves.len(), 2, "taken once");
+    }
 
     #[test]
     fn tray_choices_reach_the_app_once() {

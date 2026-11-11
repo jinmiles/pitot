@@ -483,6 +483,7 @@ impl Renderer {
                 x,
                 width,
                 height,
+                head: 0,
                 visible: true,
             };
             if scrolling {
@@ -502,7 +503,26 @@ impl Renderer {
         Ok(())
     }
 
+    /// Moves a layer to (`x`, `y`) in its window without redrawing it.
+    pub fn move_layer(&mut self, layer: &mut Layer, x: i32, y: i32) -> Result<(), RenderError> {
+        layer.x = x;
+        for visual in &layer.visuals {
+            // SAFETY: the visual is alive and owned by `layer`.
+            unsafe {
+                visual.SetOffsetX2(x as f32).map_err(fail("SetOffsetX"))?;
+                visual.SetOffsetY2(y as f32).map_err(fail("SetOffsetY"))?;
+            }
+        }
+        if layer.visuals.len() == 2 {
+            // A scrolling layer's two visuals sit at offsets from `x` that depend on the head.
+            self.place_scroll(layer, layer.head)?;
+        }
+        self.dirty = true;
+        Ok(())
+    }
+
     fn place_scroll(&self, layer: &mut Layer, head: u32) -> Result<(), RenderError> {
+        layer.head = head;
         let (x, w, h) = (layer.x as f32, layer.width as f32, layer.height as f32);
         let head = head as f32;
         // Clips are in the visual's own (surface) coordinates, before its offset.
@@ -643,6 +663,8 @@ pub struct Layer {
     x: i32,
     width: u32,
     height: u32,
+    /// First column shown, for a scrolling layer.
+    head: u32,
     visible: bool,
 }
 
