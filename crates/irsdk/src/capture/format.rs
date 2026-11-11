@@ -1,9 +1,10 @@
-//! Constants and primitives of the capture format; see `docs/capture-format.md`.
+//! Constants and primitives of the capture format, shared by the reader here and writers elsewhere; see
+//! `docs/capture-format.md`.
 
 pub const MAGIC: &[u8; 8] = b"PITOTCAP";
 pub const VERSION: u32 = 1;
 pub const HEADER_SIZE: usize = 64;
-pub const VAR_HEADER_SIZE: usize = pitot_irsdk::layout::VarHeader::SIZE;
+pub const VAR_HEADER_SIZE: usize = crate::layout::VarHeader::SIZE;
 pub const CHUNK_MAGIC: &[u8; 4] = b"CHNK";
 pub const CHUNK_HEADER_SIZE: usize = 40;
 pub const INDEX_MAGIC: &[u8; 4] = b"INDX";

@@ -5,8 +5,8 @@ use std::io::{self, Write};
 
 use serde::Serialize;
 
-use super::format::*;
 use crate::replay::SourceLayout;
+use pitot_irsdk::capture::format::*;
 
 /// Where a capture's data came from, for its metadata.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

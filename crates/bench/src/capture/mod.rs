@@ -1,9 +1,8 @@
 //! The project's own capture format (`.ptc`): what the sim published, in compressed ten-second chunks with an
-//! index, checksums, and metadata. Writer, reader (a replay source), and conversion from `.irdt` and `.ibt`. The
-//! format is specified in `docs/capture-format.md`.
+//! index, checksums, and metadata. Writer, replay source (on `pitot_irsdk::capture`), and conversion from
+//! `.irdt` and `.ibt`. The format is specified in `docs/capture-format.md`.
 
 pub mod convert;
-mod format;
 mod reader;
 mod writer;
 
