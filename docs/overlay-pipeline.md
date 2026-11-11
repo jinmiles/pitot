@@ -8,7 +8,7 @@ without per-tick allocations.
 | Thread | Wakes on | Work |
 |---|---|---|
 | `pitot-data` | the data-valid event (60 Hz while driving), at most once per second otherwise | `LiveReader::step`; publishes the tick and an input sample; copies session info when `sessionInfoUpdate` changes |
-| `pitot-session` | session info text from the data thread | `session::parse`, then hands the result to the render thread |
+| `pitot-session` | session info text from the data thread | `SessionParser::parse`, then hands the result to the render thread and the text buffer back to the data thread |
 | render (caller) | its own schedule | `View::poll` and `View::drain_samples` once per frame |
 
 ## Handoff
@@ -22,6 +22,9 @@ without per-tick allocations.
 - **Connection changes and session info**: sent over a channel. The buffers are created per connection, sized
   from that connection's variables and `CarIdx*` length, so these are the only allocations. Session info that
   arrives for an old connection is ignored.
+- **Session info text**: the data thread copies each new text into a buffer the session thread has returned
+  after parsing, and the parser keeps its own text buffer, so updates do not allocate buffers the size of the
+  text. Only the first updates and the parse itself (its events and the result) allocate.
 
 Every shared value is an atomic, so the pipeline has no `unsafe` and no data races.
 
