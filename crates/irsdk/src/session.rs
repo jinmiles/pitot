@@ -2,8 +2,8 @@
 //!
 //! The sim's text is not strict YAML: it is Windows-1252 unless `WeekendInfo` declares `Encoding: UTF8`, and
 //! free-text fields such as driver and team names are written unquoted. [`parse`] therefore decodes the text,
-//! keeps only the `WeekendInfo`, `SessionInfo`, `DriverInfo`, and `SplitTimeInfo` sections, quotes free-text
-//! values, and then reads the result with a YAML parser. Missing or unexpected fields become `None` rather
+//! keeps only the `WeekendInfo`, `SessionInfo`, `DriverInfo`, `SplitTimeInfo`, and `QualifyResultsInfo`
+//! sections, quotes free-text values, and then reads the result with a YAML parser. Missing or unexpected fields become `None` rather
 //! than failing the whole extraction.
 //!
 //! The fields are taken from the parser's events as they come, without building a document tree. A tree of
@@ -21,7 +21,13 @@ use saphyr::Scalar;
 use saphyr_parser::{Event, Parser};
 
 /// Top-level sections kept for parsing; everything else (setup, cameras, radio) is dropped first.
-const SECTIONS: [&str; 4] = ["WeekendInfo", "SessionInfo", "DriverInfo", "SplitTimeInfo"];
+const SECTIONS: [&str; 5] = [
+    "WeekendInfo",
+    "SessionInfo",
+    "DriverInfo",
+    "SplitTimeInfo",
+    "QualifyResultsInfo",
+];
 
 /// Free-text keys the sim writes unquoted, so a name like `*Star` or `A: B` would break a strict parser.
 const FREE_TEXT_KEYS: [&str; 5] = [
@@ -60,6 +66,8 @@ pub struct SessionInfo {
     pub weekend: WeekendInfo,
     pub driver_info: DriverInfo,
     pub sessions: Vec<Session>,
+    /// `QualifyResultsInfo.Results`: the qualifying order a race starts from, when the session has one.
+    pub qualify_results: Vec<ResultPosition>,
     pub sectors: Vec<Sector>,
 }
 
@@ -86,6 +94,8 @@ pub struct DriverInfo {
     pub fuel_max_liters: Option<f64>,
     pub max_fuel_pct: Option<f64>,
     pub est_lap_time: Option<f64>,
+    /// `DriverTires`: the tire compounds of the player's car, by the index `CarIdxTireCompound` reports.
+    pub tires: Vec<Tire>,
     /// Indexed by `CarIdx`; the length is the `max_cars` passed to [`parse`].
     pub drivers: Vec<Option<Driver>>,
     /// Entries whose `CarIdx` was missing or not below `max_cars`.
@@ -101,6 +111,7 @@ pub struct Driver {
     pub user_id: Option<i64>,
     pub team_name: Option<String>,
     pub car_number: Option<String>,
+    pub car_screen_name: Option<String>,
     pub car_screen_name_short: Option<String>,
     pub car_class_id: Option<i64>,
     pub car_class_short_name: Option<String>,
@@ -146,6 +157,13 @@ pub struct ResultPosition {
     pub laps_complete: Option<i64>,
     pub incidents: Option<i64>,
     pub reason_out: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Tire {
+    pub index: Option<i64>,
+    /// `TireCompoundType`, for example `Hard` or `Wet`.
+    pub compound: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -317,6 +335,11 @@ enum Node {
     Session,
     Results,
     Result,
+    Tires,
+    Tire,
+    Qualify,
+    QualifyResults,
+    QualifyResult,
     SplitTimeInfo,
     Sectors,
     Sector,
@@ -335,7 +358,12 @@ impl Node {
             (Some(Root), Some("DriverInfo"), true) => DriverInfo,
             (Some(Root), Some("SessionInfo"), true) => SessionInfo,
             (Some(Root), Some("SplitTimeInfo"), true) => SplitTimeInfo,
+            (Some(Root), Some("QualifyResultsInfo"), true) => Qualify,
+            (Some(Qualify), Some("Results"), false) => QualifyResults,
+            (Some(QualifyResults), None, true) => QualifyResult,
             (Some(DriverInfo), Some("Drivers"), false) => Drivers,
+            (Some(DriverInfo), Some("DriverTires"), false) => Tires,
+            (Some(Tires), None, true) => Tire,
             (Some(Drivers), None, true) => Driver,
             (Some(SessionInfo), Some("Sessions"), false) => Sessions,
             (Some(Sessions), None, true) => Session,
@@ -371,6 +399,7 @@ struct Walk<'i> {
     driver: Driver,
     session: Session,
     result: ResultPosition,
+    tire: Tire,
     sector: Sector,
 }
 
@@ -390,6 +419,7 @@ impl<'i> Walk<'i> {
             driver: Driver::default(),
             session: Session::default(),
             result: ResultPosition::default(),
+            tire: Tire::default(),
             sector: Sector::default(),
         }
     }
@@ -448,7 +478,8 @@ impl<'i> Walk<'i> {
                 self.driver = Driver::default();
             }
             Node::Session => self.session = Session::default(),
-            Node::Result => self.result = ResultPosition::default(),
+            Node::Result | Node::QualifyResult => self.result = ResultPosition::default(),
+            Node::Tire => self.tire = Tire::default(),
             Node::Sector => self.sector = Sector::default(),
             _ => {}
         }
@@ -481,6 +512,8 @@ impl<'i> Walk<'i> {
             }
             Node::Session => self.info.sessions.push(mem::take(&mut self.session)),
             Node::Result => self.session.results.push(mem::take(&mut self.result)),
+            Node::QualifyResult => self.info.qualify_results.push(mem::take(&mut self.result)),
+            Node::Tire => self.info.driver_info.tires.push(mem::take(&mut self.tire)),
             Node::Sector => self.info.sectors.push(mem::take(&mut self.sector)),
             _ => {}
         }
@@ -534,6 +567,7 @@ impl<'i> Walk<'i> {
                     "UserID" => d.user_id = int(&v),
                     "TeamName" => d.team_name = text(v),
                     "CarNumber" => d.car_number = text(v),
+                    "CarScreenName" => d.car_screen_name = text(v),
                     "CarScreenNameShort" => d.car_screen_name_short = text(v),
                     "CarClassID" => d.car_class_id = int(&v),
                     "CarClassShortName" => d.car_class_short_name = text(v),
@@ -567,7 +601,7 @@ impl<'i> Walk<'i> {
                     _ => {}
                 }
             }
-            Node::Result => {
+            Node::Result | Node::QualifyResult => {
                 let r = &mut self.result;
                 match key {
                     "Position" => r.position = int(&v),
@@ -585,6 +619,11 @@ impl<'i> Walk<'i> {
                     _ => {}
                 }
             }
+            Node::Tire => match key {
+                "TireIndex" => self.tire.index = int(&v),
+                "TireCompoundType" => self.tire.compound = text(v),
+                _ => {}
+            },
             Node::Sector => match key {
                 "SectorNum" => self.sector.num = int(&v),
                 "SectorStartPct" => self.sector.start_pct = float(&v),
@@ -711,6 +750,11 @@ DriverInfo:
  PaceCarIdx: 0
  DriverCarFuelMaxLtr: 50.000
  DriverCarMaxFuelPct: 1.000
+ DriverTires:
+ - TireIndex: 0
+   TireCompoundType: \"Hard\"
+ - TireIndex: 1
+   TireCompoundType: \"Wet\"
  Drivers:
  - CarIdx: 0
    UserName: Pace Car
@@ -723,6 +767,7 @@ DriverInfo:
    UserID: 101
    TeamName: Team \\ Back
    CarNumber: \"07\"
+   CarScreenName: Porsche 911 GT3 R (992)
    CarClassID: 11
    CarClassShortName: GT3
    CarClassColor: 0xffda59
@@ -733,6 +778,13 @@ DriverInfo:
  - CarIdx: 90
    UserName: Out Of Range
  - UserName: No Index
+QualifyResultsInfo:
+ Results:
+ - Position: 0
+   ClassPosition: 0
+   CarIdx: 1
+   FastestLap: 3
+   FastestTime: 30.5000
 SplitTimeInfo:
  Sectors:
  - SectorNum: 0
@@ -746,6 +798,31 @@ CarSetup:
 
     fn sample() -> SessionInfo {
         parse(SAMPLE.as_bytes(), 72).expect("parses")
+    }
+
+    #[test]
+    fn extracts_tires_car_names_and_the_grid() {
+        let info = sample();
+        let tires: Vec<(Option<i64>, Option<&str>)> = info
+            .driver_info
+            .tires
+            .iter()
+            .map(|t| (t.index, t.compound.as_deref()))
+            .collect();
+        assert_eq!(tires, [(Some(0), Some("Hard")), (Some(1), Some("Wet"))]);
+        let driver = info.driver_info.drivers[1].as_ref().expect("driver 1");
+        assert_eq!(
+            driver.car_screen_name.as_deref(),
+            Some("Porsche 911 GT3 R (992)")
+        );
+        assert_eq!(info.qualify_results.len(), 1);
+        let pole = &info.qualify_results[0];
+        assert_eq!((pole.class_position, pole.car_idx), (Some(0), Some(1)));
+        assert_eq!(pole.fastest_time, Some(30.5));
+        assert!(
+            info.sessions.iter().all(|s| s.results.len() <= 1),
+            "kept apart"
+        );
     }
 
     #[test]
