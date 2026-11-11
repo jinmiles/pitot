@@ -54,6 +54,11 @@ The render thread sleeps in `MsgWaitForMultipleObjectsEx` on a high-resolution w
 or a window message arrives. Each widget has its own interval, says whether it needs a full or partial redraw or
 none, and is hidden outside its display states (most widgets show only while driving).
 
+Only shown widgets set the timer. A hidden widget keeps its last due time, so it draws at once when it appears.
+With no widget shown, the thread wakes once per second while the sim is not running, and four times per second
+while it is connected (in the garage, for example), so widgets appear within a quarter second of getting in the
+car.
+
 ## Development measurement
 
 Lab PC (i7-9700, RTX 3090), release build, replaying the public AI race capture at 60 Hz with the status widget

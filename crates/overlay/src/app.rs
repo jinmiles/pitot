@@ -25,6 +25,20 @@ use crate::widgets::{
 /// Saving a file often takes several writes; reload once they settle.
 const RELOAD_DELAY: Duration = Duration::from_millis(250);
 
+/// How often the render loop looks at the pipeline while no widget is shown: once per second with the sim not
+/// running, and often enough while it is connected that widgets appear promptly when the driver gets in the car.
+const IDLE_WAKE: Duration = Duration::from_secs(1);
+const HIDDEN_WAKE: Duration = Duration::from_millis(250);
+
+/// When the render loop wakes next: the earliest due time of the shown widgets, or an idle wake when none is
+/// shown. Hidden widgets keep their past due time, so they draw at once when they appear, but they must not set
+/// the timer, or the loop would wake at every clock tick.
+fn next_wake(shown_due: impl Iterator<Item = Instant>, connected: bool, now: Instant) -> Instant {
+    shown_due
+        .min()
+        .unwrap_or_else(|| now + if connected { HIDDEN_WAKE } else { IDLE_WAKE })
+}
+
 struct Slot {
     widget: Box<dyn Widget>,
     /// Index into `Layout::windows`.
@@ -237,12 +251,16 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             platform::wait(&timer, None, Duration::from_secs(1));
             continue;
         }
-        let mut next = layout
-            .slots
-            .iter()
-            .map(|s| s.next_due)
-            .min()
-            .unwrap_or(now + Duration::from_secs(1));
+        let display = view.display();
+        let mut next = next_wake(
+            layout
+                .slots
+                .iter()
+                .filter(|s| s.widget.visible(display))
+                .map(|s| s.next_due),
+            view.is_connected(),
+            now,
+        );
         if let Some(at) = reload_at {
             next = next.min(at);
         }
@@ -313,4 +331,27 @@ fn frame(
     }
     renderer.commit()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hidden_widgets_do_not_set_the_timer() {
+        let now = Instant::now();
+        let past = now - Duration::from_secs(5);
+        let soon = now + Duration::from_millis(16);
+        assert_eq!(
+            next_wake([soon, now + IDLE_WAKE].into_iter(), true, now),
+            soon
+        );
+        assert_eq!(
+            next_wake([past].into_iter(), true, now),
+            past,
+            "a due widget draws at once"
+        );
+        assert_eq!(next_wake(std::iter::empty(), false, now), now + IDLE_WAKE);
+        assert_eq!(next_wake(std::iter::empty(), true, now), now + HIDDEN_WAKE);
+    }
 }
