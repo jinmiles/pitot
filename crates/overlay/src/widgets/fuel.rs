@@ -1,4 +1,5 @@
-//! Fuel calculator: current fuel, use per lap, laps left, and fuel needed to finish.
+//! Fuel calculator: current fuel and laps left in the race, then by the average of recent clean laps and by the
+//! last clean lap: fuel per lap, laps the fuel lasts, fuel to add, and fuel left at the end.
 //!
 //! Use per lap is the average of the last few clean laps: full laps driven under green-flag running, without
 //! visiting pit road and without fuel being added. Laps to go come from the session's remaining laps, or from the time
@@ -90,6 +91,11 @@ impl FuelTracker {
     pub(crate) fn per_lap(&self) -> Option<f32> {
         (self.count > 0).then(|| self.usage[..self.count].iter().sum::<f32>() / self.count as f32)
     }
+
+    /// Fuel used on the most recent clean lap.
+    pub(crate) fn last_lap(&self) -> Option<f32> {
+        (self.count > 0).then(|| self.usage[(self.next + LAPS_AVERAGED - 1) % LAPS_AVERAGED])
+    }
 }
 
 /// Laps still to drive: the session's remaining laps, or for a timed session the time left over the lap time,
@@ -109,23 +115,79 @@ pub(crate) fn laps_to_go(
     }
 }
 
+/// One basis for the estimates: the average of recent clean laps, or the last clean lap.
+#[derive(Debug, Clone, PartialEq)]
+struct Estimate {
+    per_lap: FixedText,
+    laps_left: FixedText,
+    refuel: FixedText,
+    at_end: FixedText,
+    /// The fuel left at the end is negative: a stop is needed.
+    short: bool,
+}
+
+impl Estimate {
+    fn new() -> Self {
+        Self {
+            per_lap: FixedText::new(12),
+            laps_left: FixedText::new(12),
+            refuel: FixedText::new(12),
+            at_end: FixedText::new(12),
+            short: false,
+        }
+    }
+
+    /// Fills the values for `per_lap` fuel per lap, or dashes without it. `to_go` is the laps left in the race.
+    fn fill(&mut self, fuel: f32, per_lap: Option<f32>, to_go: Option<f32>) {
+        for text in [
+            &mut self.per_lap,
+            &mut self.laps_left,
+            &mut self.refuel,
+            &mut self.at_end,
+        ] {
+            text.set(NO_VALUE);
+        }
+        self.short = false;
+        let Some(per_lap) = per_lap.filter(|&p| p > 0.0) else {
+            return;
+        };
+        write_value(&mut self.per_lap, per_lap);
+        write_value(&mut self.laps_left, fuel / per_lap);
+        if let Some(to_go) = to_go {
+            let at_end = fuel - to_go * per_lap;
+            self.short = at_end < 0.0;
+            write_value(&mut self.refuel, (-at_end).max(0.0));
+            write_value(&mut self.at_end, at_end);
+        }
+    }
+}
+
+/// Shown for a value not known yet.
+const NO_VALUE: &str = "--.--";
+
+fn write_value(out: &mut FixedText, value: f32) {
+    out.clear();
+    let _ = write!(out, "{value:.2}");
+}
+
 #[derive(Debug, Clone, PartialEq)]
 struct Lines {
     fuel: FixedText,
-    per_lap: FixedText,
-    laps: FixedText,
-    need: FixedText,
-    short: bool,
+    laps_to_go: FixedText,
+    average: Estimate,
+    last: Estimate,
+    /// Lights the pit sign: at the average, the fuel does not last to the end.
+    pit: bool,
 }
 
 impl Lines {
     fn new() -> Self {
         Self {
-            fuel: FixedText::new(16),
-            per_lap: FixedText::new(16),
-            laps: FixedText::new(16),
-            need: FixedText::new(24),
-            short: false,
+            fuel: FixedText::new(12),
+            laps_to_go: FixedText::new(12),
+            average: Estimate::new(),
+            last: Estimate::new(),
+            pit: false,
         }
     }
 }
@@ -144,8 +206,8 @@ pub struct FuelWidget {
 impl FuelWidget {
     pub fn new(config: &WidgetConfig) -> Self {
         Self {
-            width: config.width.unwrap_or(300),
-            height: config.height.unwrap_or(120).max(48),
+            width: config.width.unwrap_or(420),
+            height: config.height.unwrap_or(150).max(90),
             opacity: config.opacity,
             tracker: FuelTracker::default(),
             lines: Lines::new(),
@@ -153,6 +215,13 @@ impl FuelWidget {
         }
     }
 }
+
+const WHITE: u32 = 0xF0_F2F5;
+const DIM: u32 = 0xA0_A6AE;
+const AVERAGE: u32 = 0x82_B1FF;
+const LAST: u32 = 0xF2_C14E;
+const SHORT: u32 = 0xFF_6B5E;
+const BACKGROUND: u32 = 0x10_1418;
 
 impl Widget for FuelWidget {
     fn size(&self) -> (u32, u32) {
@@ -166,42 +235,34 @@ impl Widget for FuelWidget {
     fn update(&mut self, view: &mut View, _now: Instant, redraw: &mut [Redraw; MAX_LAYERS]) {
         let (snap, vars) = (view.snapshot(), view.vars());
         let next = &mut self.next;
-        next.fuel.clear();
-        next.per_lap.clear();
-        next.laps.clear();
-        next.need.clear();
-        next.short = false;
+        next.fuel.set(NO_VALUE);
+        next.laps_to_go.set(NO_VALUE);
+        next.pit = false;
         if let Some(fuel) = snap.f32(vars.fuel_level, 0) {
             let laps_completed = snap.i32(vars.lap_completed, 0).unwrap_or(0);
             let on_pit = snap.bool(vars.on_pit_road, 0).unwrap_or(false);
             let flags = snap.bitfield(vars.session_flags, 0).unwrap_or(0);
             let green = !on_pit && is_green(snap.i32(vars.session_state, 0), flags);
             self.tracker.observe(laps_completed, fuel, green);
-            let _ = write!(next.fuel, "{fuel:.1} L");
-            if let Some(per_lap) = self.tracker.per_lap() {
-                let _ = write!(next.per_lap, "{per_lap:.2} L/lap");
-                let _ = write!(next.laps, "{:.1} laps", fuel / per_lap);
-                let lap_time = snap
-                    .f32(vars.lap_last_time, 0)
-                    .filter(|&t| t > 0.0)
-                    .or_else(|| view.session()?.driver_info.est_lap_time.map(|t| t as f32));
-                let remaining = laps_to_go(
-                    snap.i32(vars.session_laps_remain, 0),
-                    snap.f64(vars.session_time_remain, 0),
-                    lap_time,
-                );
-                if let Some(laps) = remaining {
-                    let need = laps * per_lap - fuel;
-                    next.short = need > 0.0;
-                    if need > 0.0 {
-                        let _ = write!(next.need, "add {need:.1} L");
-                    } else {
-                        let _ = write!(next.need, "{:.1} L spare", -need);
-                    }
-                }
-            } else {
-                next.per_lap.set("measuring");
+            write_value(&mut next.fuel, fuel);
+            let lap_time = snap
+                .f32(vars.lap_last_time, 0)
+                .filter(|&t| t > 0.0)
+                .or_else(|| view.session()?.driver_info.est_lap_time.map(|t| t as f32));
+            let to_go = laps_to_go(
+                snap.i32(vars.session_laps_remain, 0),
+                snap.f64(vars.session_time_remain, 0),
+                lap_time,
+            );
+            if let Some(laps) = to_go {
+                write_value(&mut next.laps_to_go, laps);
             }
+            next.average.fill(fuel, self.tracker.per_lap(), to_go);
+            next.last.fill(fuel, self.tracker.last_lap(), to_go);
+            next.pit = next.average.short;
+        } else {
+            next.average.fill(0.0, None, None);
+            next.last.fill(0.0, None, None);
         }
         if self.next != self.lines {
             std::mem::swap(&mut self.lines, &mut self.next);
@@ -213,51 +274,86 @@ impl Widget for FuelWidget {
         let (w, h) = (self.width as f32, self.height as f32);
         canvas.fill(
             Rect::new(0.0, 0.0, w, h),
-            Color::rgb(0x10_1418, self.opacity),
+            Color::rgb(BACKGROUND, self.opacity),
         );
-        let white = Color::rgb(0xF0_F2F5, 1.0);
-        let dim = Color::rgb(0xA0_A6AE, 1.0);
-        let half = h / 2.0;
+        let dim = Color::rgb(DIM, 1.0);
+        let white = Color::rgb(WHITE, 1.0);
+        // Six lines: labels and values of the current state, then the average's and the last lap's.
+        let line = h / 6.0;
+        let column = (w - 24.0) / 4.0;
+        let label = (line * 0.5).clamp(10.0, 13.0);
+        let value = (line * 0.8).clamp(14.0, 24.0);
+        let cell = |col: f32, row: f32| Rect::new(12.0 + col * column, row * line, column, line);
+        let l = &self.lines;
+        canvas.text("Fuel Level", cell(0.0, 0.0), label, Align::Left, dim);
+        canvas.text("Laps in Race", cell(1.0, 0.0), label, Align::Left, dim);
+        canvas.text(l.fuel.as_str(), cell(0.0, 1.0), value, Align::Left, white);
         canvas.text(
-            "FUEL",
-            Rect::new(12.0, 4.0, 60.0, 18.0),
-            12.0,
-            Align::Left,
-            dim,
-        );
-        canvas.text(
-            self.lines.fuel.as_str(),
-            Rect::new(12.0, 18.0, w / 2.0, half - 14.0),
-            26.0,
+            l.laps_to_go.as_str(),
+            cell(1.0, 1.0),
+            value,
             Align::Left,
             white,
         );
-        canvas.text(
-            self.lines.per_lap.as_str(),
-            Rect::new(w / 2.0, 6.0, w / 2.0 - 12.0, half / 2.0),
-            14.0,
-            Align::Right,
-            dim,
+        // The pit sign, lit when the fuel does not last to the end.
+        let sign = Rect::new(
+            12.0 + 3.0 * column + column * 0.2,
+            line * 0.4,
+            column * 0.6,
+            line * 1.2,
         );
-        canvas.text(
-            self.lines.laps.as_str(),
-            Rect::new(w / 2.0, 6.0 + half / 2.0, w / 2.0 - 12.0, half / 2.0),
-            14.0,
-            Align::Right,
-            white,
-        );
-        let need = if self.lines.short {
-            Color::rgb(0xF2_A33A, 1.0)
+        let (frame, ink) = if l.pit {
+            (Color::rgb(SHORT, 1.0), Color::rgb(SHORT, 1.0))
         } else {
-            Color::rgb(0x3D_D68C, 1.0)
+            (Color::rgb(DIM, 0.35), Color::rgb(DIM, 0.35))
         };
+        let (x0, y0, x1, y1) = (sign.x, sign.y, sign.x + sign.w, sign.y + sign.h);
+        canvas.line((x0, y0), (x1, y0), 1.5, frame);
+        canvas.line((x0, y1), (x1, y1), 1.5, frame);
+        canvas.line((x0, y0), (x0, y1), 1.5, frame);
+        canvas.line((x1, y0), (x1, y1), 1.5, frame);
+        canvas.text("PIT", sign, label + 2.0, Align::Center, ink);
+
+        for (col, name) in ["Average", "Laps Remain", "Refuel", "Fuel at End"]
+            .iter()
+            .enumerate()
+        {
+            canvas.text(
+                name,
+                cell(col as f32, 2.0),
+                label,
+                Align::Left,
+                if col == 0 {
+                    Color::rgb(AVERAGE, 1.0)
+                } else {
+                    dim
+                },
+            );
+        }
         canvas.text(
-            self.lines.need.as_str(),
-            Rect::new(12.0, half + 4.0, w - 24.0, half - 8.0),
-            18.0,
+            "Last",
+            cell(0.0, 4.0),
+            label,
             Align::Left,
-            need,
+            Color::rgb(LAST, 1.0),
         );
+        for (row, estimate, color) in [(3.0, &l.average, AVERAGE), (5.0, &l.last, LAST)] {
+            let at_end = if estimate.short { SHORT } else { color };
+            for (col, text, ink) in [
+                (0.0, &estimate.per_lap, color),
+                (1.0, &estimate.laps_left, color),
+                (2.0, &estimate.refuel, color),
+                (3.0, &estimate.at_end, at_end),
+            ] {
+                canvas.text(
+                    text.as_str(),
+                    cell(col, row),
+                    value,
+                    Align::Left,
+                    Color::rgb(ink, 1.0),
+                );
+            }
+        }
     }
 
     fn reset(&mut self) {
@@ -286,6 +382,26 @@ mod tests {
         assert_eq!(t.per_lap(), Some(3.0), "refuel lap ignored");
         t.observe(4, 53.0, true); // lap 4: 4.0 L
         assert_eq!(t.per_lap(), Some(3.5));
+        assert_eq!(t.last_lap(), Some(4.0));
+    }
+
+    #[test]
+    fn estimates_by_average_and_last_lap() {
+        let mut e = Estimate::new();
+        e.fill(52.58, None, Some(12.0));
+        assert_eq!(e.per_lap.as_str(), NO_VALUE, "measuring");
+        e.fill(52.58, Some(4.44), Some(12.0));
+        assert_eq!(e.per_lap.as_str(), "4.44");
+        assert_eq!(e.laps_left.as_str(), "11.84");
+        assert_eq!(e.refuel.as_str(), "0.70");
+        assert_eq!(e.at_end.as_str(), "-0.70");
+        assert!(e.short);
+        e.fill(60.0, Some(4.44), Some(12.0));
+        assert_eq!(e.refuel.as_str(), "0.00");
+        assert_eq!(e.at_end.as_str(), "6.72");
+        assert!(!e.short);
+        e.fill(60.0, Some(4.44), None);
+        assert_eq!(e.refuel.as_str(), NO_VALUE, "no race length");
     }
 
     #[test]
