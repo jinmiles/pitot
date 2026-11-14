@@ -34,6 +34,19 @@ pub fn recordings_dir() -> Option<PathBuf> {
     config_dir().map(|dir| dir.join("captures"))
 }
 
+/// Folders searched for the sim's telemetry files (`.ibt`) of the session while it plays a replay: the configured
+/// folder, or the sim's own `Documents\iRacing\telemetry`.
+pub fn telemetry_dirs(telemetry: &Telemetry, documents: Option<PathBuf>) -> Vec<PathBuf> {
+    if telemetry.folder.trim().is_empty() {
+        documents
+            .map(|dir| dir.join("iRacing").join("telemetry"))
+            .into_iter()
+            .collect()
+    } else {
+        vec![PathBuf::from(telemetry.folder.trim())]
+    }
+}
+
 /// Folders searched for a capture of the session while the sim plays a replay: [`recordings_dir`], and
 /// `captures` next to the overlay executable, where `pitot-bench record` run from that folder writes them.
 pub fn capture_dirs() -> Vec<PathBuf> {
@@ -62,6 +75,12 @@ font = "Segoe UI"
 [recording]
 enabled = true
 max_gb = 5.0
+
+# While the sim plays a replay, the tire widget shows surface temperatures from the sim's own telemetry files
+# (.ibt), which the sim writes while its telemetry recording is on. Leave folder empty for
+# Documents\iRacing\telemetry.
+[telemetry]
+folder = ""
 
 [widgets.status]
 enabled = true
@@ -124,14 +143,15 @@ height = 170
 rate_hz = 5.0
 opacity = 0.82
 
-# Wear and carcass temperatures are from the last pit stall visit: the sim updates them only there.
+# Wear and carcass temperatures are from the last pit stall visit: the sim updates them only there. In replays,
+# surface temperatures from the sim's telemetry files.
 [widgets.tires]
 enabled = true
 x = 1680
 y = 370
 width = 220
 height = 170
-rate_hz = 1.0
+rate_hz = 5.0
 opacity = 0.82
 "#;
 
@@ -139,6 +159,7 @@ opacity = 0.82
 pub struct Config {
     pub general: General,
     pub recording: Recording,
+    pub telemetry: Telemetry,
     pub widgets: Widgets,
 }
 
@@ -174,6 +195,14 @@ impl Default for Recording {
     }
 }
 
+/// The sim's own telemetry files, for replays.
+#[derive(Debug, Clone, PartialEq, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Telemetry {
+    /// Folder of the `.ibt` files; empty for the sim's default.
+    pub folder: String,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Widgets {
     pub status: WidgetConfig,
@@ -206,7 +235,7 @@ impl Default for Widgets {
             fuel: widget(1460, 900, Some((420, 150)), Some(1.0)),
             sectors: widget(800, 24, Some((400, 200)), Some(5.0)),
             wind: widget(1460, 370, Some((200, 170)), Some(5.0)),
-            tires: widget(1680, 370, Some((220, 170)), Some(1.0)),
+            tires: widget(1680, 370, Some((220, 170)), Some(5.0)),
         }
     }
 }
@@ -233,6 +262,7 @@ pub struct WidgetConfig {
 struct FileConfig {
     general: General,
     recording: Recording,
+    telemetry: Telemetry,
     widgets: FileWidgets,
 }
 
@@ -330,6 +360,7 @@ impl Config {
         let config = Self {
             general: file.general,
             recording: file.recording,
+            telemetry: file.telemetry,
             widgets: Widgets {
                 status: w.status.apply(defaults.status),
                 inputs: w.inputs.apply(defaults.inputs),

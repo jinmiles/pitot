@@ -76,6 +76,7 @@ vars! {
     tire_compound => "PlayerTireCompound",
     tire_set_limit => "PlayerCarDryTireSetLimit",
     tire_sets_used => "TireSetsUsed",
+    cam_car_idx => "CamCarIdx",
     lf_wear_l => "LFwearL",
     lf_wear_m => "LFwearM",
     lf_wear_r => "LFwearR",

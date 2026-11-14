@@ -50,6 +50,22 @@ Captures are looked up in `%APPDATA%\Pitot\captures` and in `captures` next to `
 The log says whether a capture was found (`replay: playing the capture of this session`) and when the widgets
 switch to it and back. Without a capture, widgets hide during replays.
 
+## Telemetry files
+
+While the sim plays a replay, the [tire widget](tires.md) shows the surface temperatures of the replayed moment
+from the sim's own telemetry files (`.ibt`). The sim writes them while its telemetry recording is on (in its
+options, or with Alt+L in the car), into `Documents\iRacing\telemetry`.
+
+```toml
+[telemetry]
+folder = ""
+```
+
+- `folder`: where the `.ibt` files are. Empty for the sim's own folder in the current Documents folder.
+
+The log says whether files of the session were found (`replay: tire temperatures from the sim's telemetry
+files`). The files hold other drivers' names in their session info; the overlay only reads them.
+
 ## One instance
 
 Only one overlay runs per Windows session. Launching it again while it runs exits at once and leaves the running

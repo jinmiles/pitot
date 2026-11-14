@@ -56,10 +56,10 @@ impl Widget for StatusWidget {
                 let drivers = view
                     .session()
                     .map_or(0, |s| s.driver_info.drivers.iter().flatten().count());
-                let label = if state == Display::Driving {
-                    "driving"
-                } else {
-                    "idle"
+                let label = match state {
+                    Display::Driving => "driving",
+                    Display::Replay => "replay",
+                    _ => "idle",
                 };
                 let _ = write!(
                     self.next,
@@ -83,7 +83,7 @@ impl Widget for StatusWidget {
         );
         let accent = match self.display {
             Display::Driving => Color::rgb(0x3D_D68C, 1.0),
-            Display::Idle => Color::rgb(0xF2_C14E, 1.0),
+            Display::Idle | Display::Replay => Color::rgb(0xF2_C14E, 1.0),
             Display::Disconnected => Color::rgb(0x8A_9099, 1.0),
         };
         canvas.fill(Rect::new(0.0, 0.0, 4.0, h), accent);
