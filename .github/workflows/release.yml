@@ -1,0 +1,102 @@
+name: Release
+
+# A version tag on main publishes a release. Pull requests that touch the packaging build and package without
+# publishing, so a broken release shows up before the next tag.
+on:
+  push:
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - .github/scripts/package.py
+      - Cargo.lock
+      - README.md
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  build:
+    name: build and package
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Check the tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::$GITHUB_REF_NAME is not on main"
+            exit 1
+          fi
+
+      # Installs the toolchain, components, and target pinned in rust-toolchain.toml.
+      - name: Install toolchain
+        run: |
+          rustup toolchain install
+          rustc --version
+
+      - name: Test
+        run: cargo test --workspace --locked
+
+      - name: Build
+        run: cargo build --release --locked -p pitot-overlay -p pitot-bench
+
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            python .github/scripts/package.py dist --tag "$GITHUB_REF_NAME"
+          else
+            python .github/scripts/package.py dist
+          fi
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release
+          path: dist/
+          retention-days: 7
+
+  publish:
+    name: publish
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: release
+          path: dist
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          flags=()
+          # Versions before 1.0 are development builds.
+          if [[ "$version" == 0.* ]]; then
+            flags+=(--prerelease)
+          fi
+          cat > notes.md <<'EOF'
+          Windows 10/11 x64. Unzip and run the `.exe`; nothing is installed. The binaries are not signed yet, so
+          Windows SmartScreen may warn on the first start ("More info", then "Run anyway"). They need the
+          Microsoft Visual C++ Redistributable (x64), which the sim installs. `THIRD-PARTY-LICENSES.txt` in each zip
+          lists the code compiled into it, and `SHA256SUMS.txt` has the checksums of the zips.
+          EOF
+          gh release create "$GITHUB_REF_NAME" dist/*.zip dist/SHA256SUMS.txt \
+            --verify-tag --title "Pitot $version" --notes-file notes.md --generate-notes "${flags[@]}"
