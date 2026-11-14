@@ -418,3 +418,136 @@ fn wind_widget_does_not_allocate_per_update() {
     );
     drop(pipeline);
 }
+
+const SECTORS_SESSION: &[u8] = b"---
+WeekendInfo:
+ TrackID: 1
+SessionInfo:
+ Sessions:
+ - SessionNum: 0
+   SessionType: Race
+   ResultsPositions:
+   - Position: 1
+     ClassPosition: 0
+     CarIdx: 0
+   - Position: 2
+     ClassPosition: 1
+     CarIdx: 1
+   - Position: 3
+     ClassPosition: 2
+     CarIdx: 2
+DriverInfo:
+ DriverCarIdx: 1
+ Drivers:
+ - CarIdx: 0
+   CarNumber: 1
+   CarClassID: 5
+ - CarIdx: 1
+   CarNumber: 2
+   CarClassID: 5
+ - CarIdx: 2
+   CarNumber: 3
+   CarClassID: 5
+SplitTimeInfo:
+ Sectors:
+ - SectorNum: 0
+   SectorStartPct: 0.000000
+ - SectorNum: 1
+   SectorStartPct: 0.300000
+ - SectorNum: 2
+   SectorStartPct: 0.700000
+...
+";
+const SECTORS_ROW: usize = 16 + 72 * 4 * 2;
+
+#[test]
+fn sectors_widget_does_not_allocate_per_update() {
+    use pitot_overlay::config::WidgetConfig;
+    use pitot_overlay::widgets::{MAX_LAYERS, Redraw, SectorsWidget, Widget};
+
+    let _turn = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let pid = std::process::id();
+    let names = SdkNames::new(
+        &format!("Local\\PitotOverlayAllocSectorsMap-{pid}"),
+        &format!("Local\\PitotOverlayAllocSectorsEvent-{pid}"),
+    );
+    let config = PublisherConfig {
+        vars: vec![
+            VarHeader::new(VarType::Double, 0, 1, "SessionTime").expect("valid"),
+            VarHeader::new(VarType::Int, 8, 1, "PlayerCarIdx").expect("valid"),
+            VarHeader::new(VarType::Float, 16, 72, "CarIdxLapDistPct").expect("valid"),
+            VarHeader::new(VarType::Int, 16 + 288, 72, "CarIdxTrackSurface").expect("valid"),
+        ],
+        buf_len: SECTORS_ROW,
+        num_buf: 3,
+        tick_rate: 60,
+        session_info_capacity: 4096,
+    };
+    let mut publisher = Publisher::create(&names, &config).expect("creates");
+    publisher.set_connected(true).expect("connects");
+    publisher.set_session_info(SECTORS_SESSION).expect("fits");
+    let reader_config = ReaderConfig {
+        retry_interval: Duration::from_millis(5),
+        idle_timeout: Duration::from_millis(50),
+    };
+    let (pipeline, mut view) =
+        Pipeline::start(names, reader_config, Vec::new(), None).expect("starts");
+    let widget_config = WidgetConfig {
+        enabled: true,
+        monitor: None,
+        x: 0,
+        y: 0,
+        width: Some(400),
+        height: Some(200),
+        rate_hz: None,
+        opacity: 0.8,
+    };
+    let mut widget = SectorsWidget::new(&widget_config);
+    let mut redraw = [Redraw::Nothing; MAX_LAYERS];
+
+    let mut row = [0u8; SECTORS_ROW];
+    row[8..12].copy_from_slice(&1i32.to_le_bytes());
+    for car in 0..72 {
+        let surface = if car < 3 { 3i32 } else { -1 };
+        let at = 16 + 288 + car * 4;
+        row[at..at + 4].copy_from_slice(&surface.to_le_bytes());
+    }
+    // Three cars a little apart on 10 s laps, updated every quarter of a second of session time: sectors are
+    // crossed and compared all the time.
+    let mut cycle = |n: u32, view: &mut View, widget: &mut SectorsWidget| {
+        let t = f64::from(n) * 0.25;
+        row[0..8].copy_from_slice(&t.to_le_bytes());
+        for (car, lap, offset) in [(0usize, 9.8f64, 1.0f64), (1, 10.0, 0.5), (2, 10.3, 0.0)] {
+            let pct = (((t + offset) % lap) / lap) as f32;
+            let at = 16 + car * 4;
+            row[at..at + 4].copy_from_slice(&pct.to_le_bytes());
+        }
+        publisher.publish(&row).expect("publishes");
+        thread::sleep(Duration::from_millis(4));
+        view.poll();
+        view.drain_samples(|_| {});
+        widget.update(view, Instant::now(), &mut redraw);
+    };
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut n = 0;
+    // Warm-up: the session info, per-car clocks, and the first laps.
+    while view.session().is_none() || n < 200 {
+        assert!(Instant::now() < deadline, "session info parsed");
+        cycle(n, &mut view, &mut widget);
+        n += 1;
+    }
+
+    ALLOCATIONS.store(0, Ordering::Relaxed);
+    COUNTING.store(true, Ordering::Relaxed);
+    for _ in 0..400 {
+        cycle(n, &mut view, &mut widget);
+        n += 1;
+    }
+    COUNTING.store(false, Ordering::Relaxed);
+    assert_eq!(
+        ALLOCATIONS.load(Ordering::Relaxed),
+        0,
+        "allocations across the pipeline and the sectors widget"
+    );
+    drop(pipeline);
+}

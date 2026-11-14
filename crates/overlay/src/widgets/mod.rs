@@ -6,9 +6,11 @@
 mod fuel;
 mod inputs;
 mod relative;
+mod sectors;
 mod standings;
 mod status;
 mod text;
+mod timing;
 mod wind;
 
 use std::time::{Duration, Instant};
@@ -16,6 +18,7 @@ use std::time::{Duration, Instant};
 pub use fuel::FuelWidget;
 pub use inputs::InputTraceWidget;
 pub use relative::RelativeWidget;
+pub use sectors::SectorsWidget;
 pub use standings::StandingsWidget;
 pub use status::StatusWidget;
 pub use wind::WindWidget;
