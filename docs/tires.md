@@ -34,4 +34,8 @@ once, so updates do not allocate (`cargo test -p pitot-overlay --features alloc-
 
 ## Cost
 
-See the pull request that added the widget for its A/B numbers on the lab PC.
+Lab PC (Parsec virtual display, the four reference widgets, release build), the home PC capture of an online
+practice session at 1x, `pitot-bench collect` for 60 s after 12 s, the same build with the tire widget off and on,
+two runs each, alternating: overlay CPU 28.91 and 31.73 ms/s off, 28.78 and 30.08 ms/s on; private bytes at most
+21.2 and 17.1 MB off, 20.5 and 17.5 MB on. The difference is below the run-to-run spread (other builds were running on
+the PC); the release binary grew by 23.5 KB (1,117,184 to 1,140,736 bytes).
