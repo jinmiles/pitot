@@ -69,6 +69,9 @@ vars! {
     incidents => "PlayerCarMyIncidentCount",
     time_of_day => "SessionTimeOfDay",
     car_session_flags => "CarIdxSessionFlags",
+    wind_vel => "WindVel",
+    wind_dir => "WindDir",
+    yaw_north => "YawNorth",
     // The tire widget: wear and carcass temperatures (updated in the pit stall), distance on each tire.
     tire_compound => "PlayerTireCompound",
     tire_set_limit => "PlayerCarDryTireSetLimit",
