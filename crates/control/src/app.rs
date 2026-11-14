@@ -21,7 +21,7 @@ pub fn run() {
         return;
     }
     let (sender, mut events) = futures::channel::mpsc::unbounded();
-    // Without the link the window still edits the configuration; the overlay's switches show it as stopped.
+    // Without the link the window still edits the configuration and sends commands, but hears nothing back.
     let link = ControlLink::start(move |event| {
         let _ = sender.unbounded_send(event);
     })
