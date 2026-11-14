@@ -125,8 +125,8 @@ measured. A sample is a `GapSample { time, to_player, ahead, behind }`: `to_play
 ahead of the player within half a lap, negative behind, 0 for the player, NaN when the pass was not measured;
 `ahead` and `behind` are `Some((car, seconds))` with NaN seconds when not measured. `latest(car)`, `samples(car)`
 (oldest first), and `ago(car, seconds)` (for how a gap changed) read it. 240 samples, two minutes, of 16 bytes
-per car: 276 KB for 72 cars, made at the first observation of a connection. A replay going back in time or a new
-session starts it over.
+per car: 276 KB for 72 cars, allocated at the first observation and again only when the car count changes. A
+replay going back in time or a new session starts it over.
 
 **Lap history** (`widgets/laps.rs`). A car's lap ends when `CarIdxLapCompleted` goes up. Its time is the sim's
 `CarIdxLastLapTime`, which changes 2 to 63 ticks after the line in the public AI race capture, so the lap joins the
@@ -136,7 +136,7 @@ cars' are not published), `CAUTION` (not under green), and `PARTIAL` (not observ
 seen, or the car left the world or went unobserved for 5 s). `is_clean()` is timed and none of `PIT`, `OFF_TRACK`,
 `INCIDENT`, `PARTIAL`; a caution lap can be clean. Flags see only what the observations see: an excursion off
 track between two observations is missed. `laps(car)` (oldest first), `last(car)`, and `count(car)` read it. 100
-laps of 24 bytes per car: 173 KB for 72 cars. The pace car is left out.
+laps of 24 bytes per car: 173 KB for 72 cars, allocated like the gap history. The pace car is left out.
 
 Both are tested with synthetic data in their modules, and the allocation check observes both every update.
 
@@ -144,8 +144,9 @@ Both are tested with synthetic data in their modules, and the allocation check o
 
 1. **The module**: `crates/overlay/src/widgets/<name>.rs` with a `pub struct` widget type, `impl Widget`, and
    `impl Register`. Variables not in `Vars` go in a `var_group!` there; fields of its own in an options struct
-   there. Its unit tests go there too: they make the widget with its own constructor and its variables from
-   `view.resolve()`.
+   there. Its unit tests go there too: they make the widget with its own constructor, its configuration from
+   `Config::default().widget("<name>")`, and its variables from `view.resolve()`. The type and its variable group
+   are `pub` (the list re-exports the type, and a private group in a public constructor fails the lint).
 
    ```rust
    use crate::config::{NoOptions, WidgetConfig};
