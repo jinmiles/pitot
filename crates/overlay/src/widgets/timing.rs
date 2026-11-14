@@ -1,8 +1,11 @@
-//! Sector timing from lap distance, shared by the widgets that show sector times.
+//! Timing from lap distance, shared by the widgets that show sector times and race gaps.
 //!
 //! The sim publishes no sector times, only where sectors start (`SplitTimeInfo`) and each car's lap distance. A
 //! [`SectorClock`] per car turns lap distance observed a few times per second into sector times by interpolating,
 //! by distance, when the car crossed a sector start between two observations.
+//!
+//! A [`RaceClock`] does the same for checkpoints all around the lap, so the time gap between two cars can be read
+//! at any moment: the time since the car ahead passed the spot where the car behind is now.
 
 use pitot_irsdk::session::SessionInfo;
 
@@ -143,6 +146,301 @@ impl SectorClock {
     }
 }
 
+/// Checkpoints per lap for race gaps: one every half percent of the lap.
+const CHECKPOINTS: usize = 200;
+/// Within this lap distance of the line, `CarIdxLapDistPct` can wrap a moment before or after
+/// `CarIdxLapCompleted` counts the lap.
+const NEAR_LINE: f32 = 0.1;
+
+/// A car's place in the race for ordering, highest first.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum Standing {
+    /// Laps completed plus lap distance, as last seen.
+    Running(f64),
+    /// Took the checkered flag with this many laps at this session time.
+    Finished { laps: i32, at: f64 },
+}
+
+impl Standing {
+    /// Progress, then for finishers the earlier finish first: compare these descending.
+    pub(crate) fn key(self) -> (f64, f64) {
+        match self {
+            Self::Running(progress) => (progress, f64::NEG_INFINITY),
+            Self::Finished { laps, at } => (f64::from(laps), -at),
+        }
+    }
+}
+
+/// A gap between two cars.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum Gap {
+    /// Seconds since the car ahead was where the car behind is.
+    Time(f64),
+    /// The car ahead is this many whole laps ahead.
+    Laps(u32),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Progress {
+    /// Laps completed plus lap distance, kept continuous across the line; NaN until seen.
+    value: f64,
+    /// Session time of the last observation, or of the finish.
+    time: f64,
+    /// The last observation was valid, so the next one continues from it.
+    tracking: bool,
+    finished: bool,
+}
+
+impl Default for Progress {
+    fn default() -> Self {
+        Self {
+            value: f64::NAN,
+            time: 0.0,
+            tracking: false,
+            finished: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Finish {
+    /// No checkered flag yet.
+    Pending,
+    /// The overall leader took the checkered flag at this session time.
+    At(f64),
+    /// The checkered flag came out before the leader's finish could be timed.
+    Unknown,
+}
+
+/// Every car's progress through a race and the times it passed checkpoints around the lap, observed a few times
+/// per second. Gives the live order and time gaps that do not wait for the line.
+///
+/// Storage is sized once per connection by [`RaceClock::resize`]; observing does not allocate.
+#[derive(Debug)]
+pub(crate) struct RaceClock {
+    cars: Vec<Progress>,
+    /// Session time each car last passed each checkpoint, `CHECKPOINTS` per car.
+    times: Vec<f64>,
+    /// Which pass each time belongs to: `laps * CHECKPOINTS + checkpoint`, or `i64::MIN` for none.
+    marks: Vec<i64>,
+    last: f64,
+    finish: Finish,
+}
+
+impl Default for RaceClock {
+    fn default() -> Self {
+        Self {
+            cars: Vec::new(),
+            times: Vec::new(),
+            marks: Vec::new(),
+            last: f64::NEG_INFINITY,
+            finish: Finish::Pending,
+        }
+    }
+}
+
+impl RaceClock {
+    /// Sizes the storage for `cars` cars and forgets everything.
+    pub(crate) fn resize(&mut self, cars: usize) {
+        self.cars.clear();
+        self.cars.resize(cars, Progress::default());
+        self.times.clear();
+        self.times.resize(cars * CHECKPOINTS, 0.0);
+        self.marks.clear();
+        self.marks.resize(cars * CHECKPOINTS, i64::MIN);
+        self.last = f64::NEG_INFINITY;
+        self.finish = Finish::Pending;
+    }
+
+    /// Forgets everything, keeping the storage.
+    pub(crate) fn reset(&mut self) {
+        self.cars.iter_mut().for_each(|c| *c = Progress::default());
+        self.marks.iter_mut().for_each(|m| *m = i64::MIN);
+        self.last = f64::NEG_INFINITY;
+        self.finish = Finish::Pending;
+    }
+
+    /// Feeds every car at session time `now`. `sample(car)` gives `CarIdxLapCompleted` and `CarIdxLapDistPct`
+    /// for a car in the world, and `None` for a car that is not (its place is kept) or not racing (the pace
+    /// car). `checkered` is true once the session state is checkered or cool-down.
+    pub(crate) fn observe(
+        &mut self,
+        now: f64,
+        checkered: bool,
+        sample: impl Fn(usize) -> Option<(i32, f32)>,
+    ) {
+        if now < self.last {
+            // Time went back (a replay was rewound): the history no longer applies.
+            self.reset();
+        }
+        self.last = now;
+        let finish = self.finish;
+        for car in 0..self.cars.len() {
+            let c = self.cars[car];
+            if c.finished {
+                continue;
+            }
+            // At the line the sim can report a lap distance a hair below zero; -1 means not in the world.
+            let Some((laps, pct)) = sample(car).filter(|&(_, p)| (-0.01..=1.01).contains(&p))
+            else {
+                self.cars[car].tracking = false;
+                continue;
+            };
+            let pct = pct.clamp(0.0, 1.0);
+            let raw = f64::from(laps) + f64::from(pct);
+            let continued = c.tracking && now > c.time && now - c.time <= MAX_OBSERVATION_GAP;
+            let mut value = raw;
+            if continued && !(NEAR_LINE..=1.0 - NEAR_LINE).contains(&pct) {
+                // The lap count and the lap distance can disagree by a lap for a moment at the line.
+                for candidate in [raw - 1.0, raw + 1.0] {
+                    if (candidate - c.value).abs() < (value - c.value).abs() {
+                        value = candidate;
+                    }
+                }
+            }
+            let mut next = Progress {
+                value,
+                time: now,
+                tracking: true,
+                finished: false,
+            };
+            if continued && value > c.value && value - c.value < 0.5 {
+                self.pass(car, c.value, value, c.time, now);
+                // After the leader's finish, the next time a car reaches the line is its finish.
+                if let Finish::At(at) = finish {
+                    let line = value.floor();
+                    if line > c.value
+                        && let Some(crossed) = self.crossing(car, line)
+                        && crossed >= at
+                    {
+                        next = Progress {
+                            value: line,
+                            time: crossed,
+                            tracking: false,
+                            finished: true,
+                        };
+                    }
+                }
+            }
+            self.cars[car] = next;
+        }
+        if checkered && self.finish == Finish::Pending {
+            self.time_finish();
+        } else if !checkered && self.finish != Finish::Pending {
+            // Back before the checkered flag: the finishes no longer apply.
+            self.reset();
+        }
+    }
+
+    /// The checkered flag is out: the leader finished when it last reached the line, and so did every car that
+    /// reached it since.
+    fn time_finish(&mut self) {
+        let leader = (0..self.cars.len())
+            .filter(|&c| self.cars[c].value.is_finite())
+            .max_by(|&a, &b| self.cars[a].value.total_cmp(&self.cars[b].value));
+        let at = leader.and_then(|c| self.crossing(c, self.cars[c].value.floor()));
+        let Some(at) = at else {
+            self.finish = Finish::Unknown;
+            return;
+        };
+        self.finish = Finish::At(at);
+        for car in 0..self.cars.len() {
+            let line = self.cars[car].value.floor();
+            if let Some(crossed) = self.crossing(car, line).filter(|&t| t >= at) {
+                self.cars[car] = Progress {
+                    value: line,
+                    time: crossed,
+                    tracking: false,
+                    finished: true,
+                };
+            }
+        }
+    }
+
+    /// Whether the order is known: false when the checkered flag came out before the clock could time the
+    /// leader's finish (the overlay connected too late), so finishers cannot be told from cars still running.
+    pub(crate) fn is_live(&self) -> bool {
+        self.finish != Finish::Unknown
+    }
+
+    /// Records when a car passed each checkpoint between two observations, interpolated by distance.
+    fn pass(&mut self, car: usize, from: f64, to: f64, t0: f64, t1: f64) {
+        let k = CHECKPOINTS as f64;
+        let first = (from * k).floor() as i64 + 1;
+        let last = (to * k).floor() as i64;
+        for mark in first..=last {
+            let at = mark as f64 / k;
+            let time = t0 + (t1 - t0) * (at - from) / (to - from);
+            let slot = car * CHECKPOINTS + mark.rem_euclid(CHECKPOINTS as i64) as usize;
+            if let (Some(t), Some(m)) = (self.times.get_mut(slot), self.marks.get_mut(slot)) {
+                *t = time;
+                *m = mark;
+            }
+        }
+    }
+
+    /// When `car` last passed the checkpoint at `progress` (a multiple of a checkpoint), if that pass was seen.
+    fn crossing(&self, car: usize, progress: f64) -> Option<f64> {
+        let mark = (progress * CHECKPOINTS as f64).round() as i64;
+        let slot = car * CHECKPOINTS + mark.rem_euclid(CHECKPOINTS as i64) as usize;
+        (self.marks.get(slot) == Some(&mark))
+            .then(|| self.times.get(slot).copied())
+            .flatten()
+    }
+
+    /// Session time at which `car` was at `progress` (laps plus lap distance), interpolated between checkpoints.
+    pub(crate) fn time_at(&self, car: usize, progress: f64) -> Option<f64> {
+        let c = self.cars.get(car)?;
+        if !c.value.is_finite() || !progress.is_finite() || progress > c.value {
+            return None;
+        }
+        let k = CHECKPOINTS as f64;
+        let mark = (progress * k).floor();
+        let (p0, p1) = (mark / k, (mark + 1.0) / k);
+        let t0 = self.crossing(car, p0)?;
+        let (t1, p1) = if c.value >= p1 {
+            (self.crossing(car, p1)?, p1)
+        } else {
+            (c.time, c.value)
+        };
+        if p1 <= p0 || t1 < t0 {
+            return Some(t0);
+        }
+        Some(t0 + (t1 - t0) * ((progress - p0) / (p1 - p0)).clamp(0.0, 1.0))
+    }
+
+    pub(crate) fn standing(&self, car: usize) -> Option<Standing> {
+        let c = self.cars.get(car)?;
+        if !c.value.is_finite() {
+            None
+        } else if c.finished {
+            Some(Standing::Finished {
+                laps: c.value as i32,
+                at: c.time,
+            })
+        } else {
+            Some(Standing::Running(c.value))
+        }
+    }
+
+    /// Gap from `ahead` back to `behind` at session time `now`: the time since `ahead` was where `behind` is
+    /// (where it finished, for a finisher), or whole laps when `ahead` is a lap or more ahead. `None` when a car
+    /// is unseen, `ahead` is not ahead, or its pass of that spot was not seen.
+    pub(crate) fn gap(&self, ahead: usize, behind: usize, now: f64) -> Option<Gap> {
+        let (a, b) = (self.cars.get(ahead)?, self.cars.get(behind)?);
+        if !a.value.is_finite() || !b.value.is_finite() {
+            return None;
+        }
+        let laps = a.value - b.value;
+        if laps >= 1.0 {
+            return Some(Gap::Laps(laps as u32));
+        }
+        let at = if b.finished { b.time } else { now };
+        let passed = self.time_at(ahead, b.value)?;
+        Some(Gap::Time((at - passed).max(0.0)))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -200,6 +498,190 @@ mod tests {
         assert!((clock.best[0] - 42.0).abs() < 0.01, "{:?}", clock.best);
         assert!((clock.last[0] - 45.0).abs() < 0.01, "{:?}", clock.last);
         assert!((clock.best[1] - 50.0).abs() < 0.01, "{:?}", clock.best);
+    }
+
+    /// Lap count and lap distance of a car at `progress` laps.
+    fn sample(progress: f64) -> Option<(i32, f32)> {
+        let laps = progress.floor();
+        Some((laps as i32, (progress - laps) as f32))
+    }
+
+    /// Where a car is at time `t` when it reaches progress `p` at `p * 100 + 5 sin(2 pi p) + offset` seconds:
+    /// 100 s laps with the speed changing around the lap.
+    fn progress_at(t: f64, offset: f64) -> f64 {
+        let time_of = |p: f64| p * 100.0 + 5.0 * (std::f64::consts::TAU * p).sin() + offset;
+        let (mut lo, mut hi) = (-2.0, 20.0);
+        for _ in 0..80 {
+            let mid = (lo + hi) / 2.0;
+            if time_of(mid) < t {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        lo
+    }
+
+    #[test]
+    fn race_gaps_are_the_time_since_the_car_ahead_was_there() {
+        // Car 0 leads car 1 by 2 s on the same varying-speed lap; car 2 is 1.5 laps behind car 0.
+        let mut clock = RaceClock::default();
+        clock.resize(3);
+        let offsets = [0.0, 2.0, 150.0];
+        let mut worst: f64 = 0.0;
+        let mut t = 200.0;
+        while t < 600.0 {
+            clock.observe(t, false, |car| sample(progress_at(t, offsets[car])));
+            if t > 210.0 {
+                let Some(Gap::Time(gap)) = clock.gap(0, 1, t) else {
+                    panic!("a time gap at {t}: {:?}", clock.gap(0, 1, t));
+                };
+                worst = worst.max((gap - 2.0).abs());
+                assert_eq!(clock.gap(0, 2, t), Some(Gap::Laps(1)));
+                assert_eq!(clock.gap(1, 0, t), None, "car 0 is not behind car 1");
+            }
+            t += 0.5;
+        }
+        // Linear interpolation between half-second observations on a lap whose speed changes by 30%.
+        assert!(worst < 0.02, "worst gap error {worst}");
+        let (Some(a), Some(b)) = (clock.standing(0), clock.standing(1)) else {
+            panic!("both seen");
+        };
+        assert!(a.key() > b.key());
+    }
+
+    #[test]
+    fn progress_stays_continuous_when_the_line_counters_disagree() {
+        let mut clock = RaceClock::default();
+        clock.resize(2);
+        // Car 0 crosses the line: its lap distance wraps one observation before its lap count goes up. Car 1,
+        // behind it, has its lap count go up one observation before its lap distance wraps.
+        let steps = [
+            ((4, 0.98), (4, 0.97)),
+            ((4, 0.003), (5, 0.985)),
+            ((5, 0.008), (5, 0.995)),
+            ((5, 0.013), (5, 0.004)),
+        ];
+        for (n, (a, b)) in steps.into_iter().enumerate() {
+            let t = 10.0 + n as f64 * 0.5;
+            clock.observe(t, false, |car| Some(if car == 0 { a } else { b }));
+            let (Some(Standing::Running(pa)), Some(Standing::Running(pb))) =
+                (clock.standing(0), clock.standing(1))
+            else {
+                panic!("both running");
+            };
+            assert!(pa > pb, "step {n}: {pa} {pb}");
+            assert!(pa - pb < 0.05, "step {n}: {pa} {pb}");
+        }
+        // Without a previous observation there is nothing to correct against.
+        let mut fresh = RaceClock::default();
+        fresh.resize(1);
+        fresh.observe(0.0, false, |_| Some((4, 0.003)));
+        assert!(running(fresh.standing(0)).is_some_and(|p| (p - 4.003).abs() < 1e-6));
+    }
+
+    fn running(standing: Option<Standing>) -> Option<f64> {
+        match standing {
+            Some(Standing::Running(p)) => Some(p),
+            _ => None,
+        }
+    }
+
+    fn finished(standing: Option<Standing>) -> Option<(i32, f64)> {
+        match standing {
+            Some(Standing::Finished { laps, at }) => Some((laps, at)),
+            _ => None,
+        }
+    }
+
+    fn time_gap(gap: Option<Gap>) -> f64 {
+        match gap {
+            Some(Gap::Time(t)) => t,
+            other => panic!("a time gap: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cars_out_of_the_world_keep_their_place() {
+        let mut clock = RaceClock::default();
+        clock.resize(2);
+        let mut t = 0.0;
+        while t < 30.0 {
+            clock.observe(t, false, |car| {
+                sample(if car == 0 {
+                    3.2 + t / 100.0
+                } else {
+                    3.1 + t / 100.0
+                })
+            });
+            t += 0.5;
+        }
+        // Car 0 disconnects at 3.495: it stays there while car 1 drives past it.
+        while t < 60.0 {
+            clock.observe(t, false, |car| {
+                (car == 1).then(|| sample(3.1 + t / 100.0)).flatten()
+            });
+            t += 0.5;
+        }
+        assert!(running(clock.standing(0)).is_some_and(|p| (p - 3.495).abs() < 1e-6));
+        let (Some(a), Some(b)) = (clock.standing(0), clock.standing(1)) else {
+            panic!("both seen");
+        };
+        assert!(b.key() > a.key(), "car 1 passed the stopped car");
+        // Car 1 passed car 0's spot at 39.5 s: the stopped car's gap keeps growing.
+        let gap = time_gap(clock.gap(1, 0, t));
+        assert!((gap - (t - 39.5)).abs() < 0.01, "{gap}");
+        // A time going back (a rewound replay) forgets everything.
+        clock.observe(5.0, false, |_| None);
+        assert_eq!(clock.standing(1), None);
+    }
+
+    #[test]
+    fn finishers_keep_their_finishing_order() {
+        let mut clock = RaceClock::default();
+        clock.resize(3);
+        // 100 s laps. Car 0 leads car 1 by 1 s; car 2 is a lap down, 30 s behind car 0 on track. The leader
+        // reaches the end of lap 10 at 1000.2 s and takes the checkered flag.
+        let start = [0.2, 1.2, 130.2];
+        let mut t = 900.0;
+        while t < 1200.0 {
+            clock.observe(t, t >= 1000.2, |car| sample((t - start[car]) / 100.0));
+            t += 0.5;
+        }
+        // Everyone kept driving after their finish; the finishes are where they first reached the line.
+        let near = |got: Option<(i32, f64)>, laps: i32, at: f64| {
+            got.is_some_and(|(l, a)| l == laps && (a - at).abs() < 1e-4)
+        };
+        assert!(
+            near(finished(clock.standing(0)), 10, 1000.2),
+            "{:?}",
+            clock.standing(0)
+        );
+        assert!(
+            near(finished(clock.standing(1)), 10, 1001.2),
+            "{:?}",
+            clock.standing(1)
+        );
+        assert!(
+            near(finished(clock.standing(2)), 9, 1030.2),
+            "{:?}",
+            clock.standing(2)
+        );
+        let key = |car| clock.standing(car).map(Standing::key);
+        assert!(key(0) > key(1) && key(1) > key(2));
+        assert!((time_gap(clock.gap(0, 1, t)) - 1.0).abs() < 1e-4);
+        assert_eq!(clock.gap(1, 2, t), Some(Gap::Laps(1)));
+        assert!(clock.is_live());
+    }
+
+    #[test]
+    fn a_finish_already_out_when_first_seen_is_unknown() {
+        let mut clock = RaceClock::default();
+        clock.resize(1);
+        clock.observe(1000.5, true, |_| sample(10.005));
+        assert!(!clock.is_live());
+        clock.observe(1001.0, true, |_| sample(10.01));
+        assert!(running(clock.standing(0)).is_some_and(|p| (p - 10.01).abs() < 1e-6));
     }
 
     #[test]

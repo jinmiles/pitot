@@ -1,9 +1,11 @@
 //! Standings: the session's order grouped by class, fastest class first.
 //!
 //! Positions and lap times come from the session's results (`ResultsPositions`), so they include laps driven
-//! before the player joined; telemetry adds what the results do not have yet (a lap just completed, live race
-//! gaps from `CarIdxF2Time`) and what they never have (tires, sector times). Each class shows a header and its
-//! leaders; the player's class also shows the cars around the player.
+//! before the player joined; telemetry adds what the results do not have yet (a lap just completed) and what they
+//! never have (tires, sector times). In a race, from the green flag, the order and the gaps are live: the results
+//! only change at the line, so the order follows each car's laps and lap distance, and the gaps are timed by a
+//! [`RaceClock`]. Each class shows a header and its leaders; the player's class also shows the cars around the
+//! player.
 
 use std::fmt::Write as _;
 use std::time::{Duration, Instant};
@@ -16,7 +18,7 @@ use crate::pipeline::View;
 use crate::render::{Align, Canvas, Color, Rect};
 
 use super::text::FixedText;
-use super::timing::{SectorClock, SectorStarts};
+use super::timing::{Gap, RaceClock, SectorClock, SectorStarts};
 use super::{MAX_LAYERS, Redraw, Widget};
 
 const ROW_HEIGHT: f32 = 24.0;
@@ -138,6 +140,19 @@ fn write_gap(out: &mut FixedText, seconds: f32) {
     } else {
         let s = seconds as u32;
         let _ = write!(out, "{}:{:02}", s / 60, s % 60);
+    }
+}
+
+/// A gap as seconds, or `+1L` for whole laps. F2Time is not maintained in every session state, so gaps that read
+/// as zero are left empty.
+fn write_race_gap(out: &mut FixedText, gap: Gap) {
+    out.clear();
+    match gap {
+        Gap::Laps(laps) => {
+            let _ = write!(out, "+{laps}L");
+        }
+        Gap::Time(seconds) if seconds >= 0.05 => write_gap(out, seconds as f32),
+        Gap::Time(_) => {}
     }
 }
 
@@ -277,6 +292,8 @@ struct Entry {
     f2: f32,
     rating: f32,
     rating_change: f32,
+    /// Live race order, compared descending: progress, then the earlier finish.
+    key: (f64, f64),
 }
 
 /// Values of one class, collected while sorting.
@@ -327,6 +344,7 @@ pub struct StandingsWidget {
     result_of: Vec<Option<usize>>,
     clocks: Vec<SectorClock>,
     sectors: SectorStarts,
+    race: RaceClock,
     /// Class position at the start of the race, per car; 0 when unknown.
     start_positions: Vec<i32>,
     start_session: Option<i64>,
@@ -354,6 +372,7 @@ impl StandingsWidget {
             result_of: Vec::with_capacity(72),
             clocks: Vec::with_capacity(72),
             sectors: SectorStarts::default(),
+            race: RaceClock::default(),
             start_positions: Vec::with_capacity(72),
             start_session: None,
             ratings: Vec::with_capacity(72),
@@ -387,6 +406,7 @@ impl StandingsWidget {
             self.start_positions.resize(cars, 0);
             self.result_of.clear();
             self.result_of.resize(cars, None);
+            self.race.resize(cars);
             self.start_session = None;
         }
         let player = snap
@@ -403,6 +423,39 @@ impl StandingsWidget {
             .and_then(|s| s.session_type.as_deref())
             .is_some_and(|t| t.eq_ignore_ascii_case("race"));
         let now = snap.f64(vars.session_time, 0).unwrap_or(0.0);
+        let state = snap.i32(vars.session_state, 0);
+        if is_race && self.start_session != session_num {
+            self.race.reset();
+        }
+
+        // Race progress of every car, from before the green flag so the first gaps are ready at the start.
+        if is_race {
+            let checkered = matches!(
+                state,
+                Some(session_state::CHECKERED | session_state::COOL_DOWN)
+            );
+            let drivers = &info.driver_info.drivers;
+            self.race.observe(now, checkered, |car| {
+                let racing = drivers
+                    .get(car)
+                    .and_then(Option::as_ref)
+                    .is_some_and(|d| !d.is_pace_car && !d.is_spectator);
+                let in_world = snap.i32(vars.car_track_surface, car) != Some(NOT_IN_WORLD);
+                if !racing || !in_world {
+                    return None;
+                }
+                Some((
+                    snap.i32(vars.car_lap_completed, car)?,
+                    snap.f32(vars.car_lap_dist_pct, car)?,
+                ))
+            });
+        }
+        let live = is_race
+            && match state {
+                Some(session_state::RACING) => true,
+                Some(session_state::CHECKERED | session_state::COOL_DOWN) => self.race.is_live(),
+                _ => false,
+            };
 
         // Sector timing for every car.
         self.sectors.load(info);
@@ -477,11 +530,22 @@ impl StandingsWidget {
             let last = positive(snap.f32(vars.car_last_lap_time, car))
                 .or_else(|| positive(result.and_then(|r| r.last_time).map(|t| t as f32)))
                 .unwrap_or(0.0);
-            let laps = result
-                .and_then(|r| r.laps_complete)
-                .map(|l| l as i32)
-                .or_else(|| snap.i32(vars.car_lap_completed, car))
-                .unwrap_or(0);
+            let result_laps = result.and_then(|r| r.laps_complete).map(|l| l as i32);
+            let live_laps = snap.i32(vars.car_lap_completed, car);
+            // In a race the telemetry's count is newer; elsewhere the results include laps from before joining.
+            let laps = match (result_laps, live_laps) {
+                (Some(a), Some(b)) if is_race => a.max(b),
+                (a, b) => a.or(b).unwrap_or(0),
+            };
+            let key = if live {
+                self.race
+                    .standing(car)
+                    .map(|s| s.key())
+                    .or_else(|| result_laps.map(|l| (f64::from(l), f64::NEG_INFINITY)))
+                    .unwrap_or((f64::NEG_INFINITY, f64::NEG_INFINITY))
+            } else {
+                (f64::NEG_INFINITY, f64::NEG_INFINITY)
+            };
             let in_world = snap.i32(vars.car_track_surface, car) != Some(NOT_IN_WORLD);
             if let Some(class) = classes.get_mut(class_rank) {
                 class.entries += 1;
@@ -500,10 +564,35 @@ impl StandingsWidget {
                 f2: snap.f32(vars.car_f2_time, car).unwrap_or(0.0),
                 rating: driver.irating.unwrap_or(0) as f32,
                 rating_change: 0.0,
+                key,
             });
         }
-        self.entries
-            .sort_unstable_by_key(|e| (e.class_rank, e.position, e.car));
+        // Live, furthest along first and finishers by their finish; otherwise (all keys equal) and for ties, the
+        // results' order.
+        self.entries.sort_unstable_by(|a, b| {
+            a.class_rank
+                .cmp(&b.class_rank)
+                .then(b.key.0.total_cmp(&a.key.0))
+                .then(b.key.1.total_cmp(&a.key.1))
+                .then(a.position.cmp(&b.position))
+                .then(a.car.cmp(&b.car))
+        });
+        if live {
+            let mut class = usize::MAX;
+            let mut place = 0;
+            for e in &mut self.entries {
+                if e.class_rank != class {
+                    class = e.class_rank;
+                    place = 0;
+                }
+                if e.key.0 > f64::NEG_INFINITY {
+                    place += 1;
+                    e.position = place;
+                } else {
+                    e.position = i32::MAX;
+                }
+            }
+        }
 
         // Start positions of a race: the qualifying grid, else the order first seen under green.
         if is_race {
@@ -518,7 +607,7 @@ impl StandingsWidget {
                     }
                 }
             }
-            if snap.i32(vars.session_state, 0) == Some(session_state::RACING) {
+            if state == Some(session_state::RACING) {
                 for e in &self.entries {
                     if let Some(slot) = self.start_positions.get_mut(e.car)
                         && *slot == 0
@@ -604,6 +693,8 @@ impl StandingsWidget {
                     info,
                     view,
                     is_race,
+                    race: live.then_some(&self.race),
+                    now,
                     leader,
                     ahead,
                     class_best: class.best,
@@ -724,6 +815,9 @@ struct RowContext<'a> {
     info: &'a SessionInfo,
     view: &'a View,
     is_race: bool,
+    /// Live race timing, from the green flag.
+    race: Option<&'a RaceClock>,
+    now: f64,
     leader: Entry,
     ahead: Option<Entry>,
     class_best: f32,
@@ -807,13 +901,17 @@ fn write_car(row: &mut CarRow, entry: &Entry, cx: &RowContext<'_>) {
         .and_then(|tire| tire.compound.as_deref())
         .map_or(0, tire_color);
 
-    // Gap to the class leader and interval to the car ahead: live race gaps in a race, best laps otherwise.
+    // Gap to the class leader and interval to the car ahead: in a race the live time gaps (or `CarIdxF2Time`, which
+    // changes only at the line, until a gap is timed), best laps otherwise.
     row.gap.clear();
     row.interval.clear();
     if !row.leader {
+        let timed = |ahead: &Entry| cx.race.and_then(|r| r.gap(ahead.car, car, cx.now));
         let (gap, interval) = if cx.is_race {
-            let gap = entry.f2 - cx.leader.f2;
-            let interval = cx.ahead.map_or(0.0, |a| entry.f2 - a.f2);
+            let gap = timed(&cx.leader).unwrap_or(Gap::Time(f64::from(entry.f2 - cx.leader.f2)));
+            let interval = cx.ahead.map_or(Gap::Time(0.0), |a| {
+                timed(&a).unwrap_or(Gap::Time(f64::from(entry.f2 - a.f2)))
+            });
             (gap, interval)
         } else if entry.fastest > 0.0 {
             let gap = entry.fastest - cx.leader.fastest;
@@ -821,17 +919,12 @@ fn write_car(row: &mut CarRow, entry: &Entry, cx: &RowContext<'_>) {
                 .ahead
                 .filter(|a| a.fastest > 0.0)
                 .map_or(0.0, |a| entry.fastest - a.fastest);
-            (gap, interval)
+            (Gap::Time(f64::from(gap)), Gap::Time(f64::from(interval)))
         } else {
-            (0.0, 0.0)
+            (Gap::Time(0.0), Gap::Time(0.0))
         };
-        // F2Time is not maintained in every session state; gaps that read as zero are hidden.
-        if gap >= 0.05 {
-            write_gap(&mut row.gap, gap);
-        }
-        if interval >= 0.05 {
-            write_gap(&mut row.interval, interval);
-        }
+        write_race_gap(&mut row.gap, gap);
+        write_race_gap(&mut row.interval, interval);
     }
 
     write_lap_time(&mut row.last_lap, entry.last);
@@ -1274,6 +1367,7 @@ impl Widget for StandingsWidget {
         self.clocks
             .iter_mut()
             .for_each(|c| *c = SectorClock::default());
+        self.race.reset();
         self.start_session = None;
     }
 }
@@ -1558,5 +1652,215 @@ SplitTimeInfo:
         assert_eq!(second.mark, LapMark::Personal);
         assert_eq!(second.maker.as_str(), "P");
         assert_eq!(second.change, 0, "no position change outside a race");
+    }
+
+    const RACE_CARS: usize = 5;
+    const RACE_ROW: usize = 20 + RACE_CARS * 4 * 4;
+
+    const RACE_SESSION: &str = "---
+WeekendInfo:
+ TrackID: 7
+SessionInfo:
+ Sessions:
+ - SessionNum: 0
+   SessionLaps: 20
+   SessionTime: unlimited
+   SessionType: Race
+   ResultsPositions:
+   - Position: 1
+     ClassPosition: 0
+     CarIdx: 1
+     LapsComplete: 3
+   - Position: 2
+     ClassPosition: 1
+     CarIdx: 2
+     LapsComplete: 3
+   - Position: 3
+     ClassPosition: 2
+     CarIdx: 3
+     LapsComplete: 3
+   - Position: 4
+     ClassPosition: 3
+     CarIdx: 4
+     LapsComplete: 2
+QualifyResultsInfo:
+ Results:
+ - Position: 0
+   ClassPosition: 0
+   CarIdx: 1
+ - Position: 1
+   ClassPosition: 1
+   CarIdx: 2
+ - Position: 2
+   ClassPosition: 2
+   CarIdx: 3
+ - Position: 3
+   ClassPosition: 3
+   CarIdx: 4
+DriverInfo:
+ DriverCarIdx: 3
+ Drivers:
+ - CarIdx: 0
+   CarNumber: 0
+   CarIsPaceCar: 1
+   CarClassID: 11
+ - CarIdx: 1
+   CarNumber: 1
+   CarClassID: 10
+ - CarIdx: 2
+   CarNumber: 2
+   CarClassID: 10
+ - CarIdx: 3
+   CarNumber: 3
+   CarClassID: 10
+ - CarIdx: 4
+   CarNumber: 4
+   CarClassID: 10
+...
+";
+
+    /// A race on 100 s laps at session time `t`: car 2 leads car 1 by 2 s on track although the results still
+    /// have car 1 ahead, car 3 (the player) is 10 s behind car 2, car 4 is 1.05 laps behind car 2. The pace car
+    /// is out ahead of everyone.
+    fn race_row(t: f64, state: i32) -> Vec<u8> {
+        let mut row = vec![0u8; RACE_ROW];
+        row[0..8].copy_from_slice(&t.to_le_bytes());
+        row[12..16].copy_from_slice(&3i32.to_le_bytes());
+        row[16..20].copy_from_slice(&state.to_le_bytes());
+        let put = |row: &mut Vec<u8>, k: usize, car: usize, bytes: [u8; 4]| {
+            let at = 20 + k * RACE_CARS * 4 + car * 4;
+            row[at..at + 4].copy_from_slice(&bytes);
+        };
+        let ahead_of_car_2 = [-0.5, 0.02, 0.0, 0.1, 1.05];
+        for (car, behind) in ahead_of_car_2.into_iter().enumerate() {
+            let progress = 3.40 - behind + (t - 1000.0) / 100.0;
+            let laps = progress.floor();
+            put(&mut row, 0, car, ((progress - laps) as f32).to_le_bytes());
+            put(&mut row, 1, car, (laps as i32).to_le_bytes());
+            put(&mut row, 2, car, 3i32.to_le_bytes());
+        }
+        row
+    }
+
+    fn race_publisher(names: &SdkNames) -> Publisher {
+        let array = |t, k: usize, name| {
+            VarHeader::new(t, (20 + k * RACE_CARS * 4) as i32, RACE_CARS as i32, name)
+                .expect("valid")
+        };
+        let config = PublisherConfig {
+            vars: vec![
+                VarHeader::new(VarType::Double, 0, 1, "SessionTime").expect("valid"),
+                VarHeader::new(VarType::Int, 8, 1, "SessionNum").expect("valid"),
+                VarHeader::new(VarType::Int, 12, 1, "PlayerCarIdx").expect("valid"),
+                VarHeader::new(VarType::Int, 16, 1, "SessionState").expect("valid"),
+                array(VarType::Float, 0, "CarIdxLapDistPct"),
+                array(VarType::Int, 1, "CarIdxLapCompleted"),
+                array(VarType::Int, 2, "CarIdxTrackSurface"),
+                array(VarType::Float, 3, "CarIdxF2Time"),
+            ],
+            buf_len: RACE_ROW,
+            num_buf: 3,
+            tick_rate: 60,
+            session_info_capacity: 8192,
+        };
+        let mut publisher = Publisher::create(names, &config).expect("creates");
+        publisher.set_connected(true).expect("connects");
+        publisher
+            .set_session_info(RACE_SESSION.as_bytes())
+            .expect("fits");
+        publisher
+    }
+
+    fn cars(widget: &StandingsWidget) -> Vec<&CarRow> {
+        widget
+            .next
+            .iter()
+            .filter_map(|r| match r {
+                Row::Car(car) => Some(car),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn race_order_and_gaps_are_live_from_the_green_flag() {
+        let pid = std::process::id();
+        let names = SdkNames::new(
+            &format!("Local\\PitotStandingsRaceMap-{pid}"),
+            &format!("Local\\PitotStandingsRaceEvent-{pid}"),
+        );
+        let mut publisher = race_publisher(&names);
+        let config = ReaderConfig {
+            retry_interval: Duration::from_millis(5),
+            idle_timeout: Duration::from_millis(50),
+        };
+        let (_pipeline, mut view) =
+            Pipeline::start(names, config, Vec::new(), None).expect("starts");
+        // Publishes until the view shows this moment.
+        let mut step = |view: &mut View, t: f64, state: i32| {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                assert!(Instant::now() < deadline, "the view reaches {t}");
+                publisher.publish(&race_row(t, state)).expect("publishes");
+                thread::sleep(Duration::from_millis(2));
+                view.poll();
+                let shown = view.snapshot().f64(view.vars().session_time, 0);
+                if view.session().is_some() && shown == Some(t) {
+                    break;
+                }
+            }
+        };
+        let config = WidgetConfig {
+            enabled: true,
+            monitor: None,
+            x: 0,
+            y: 0,
+            width: Some(760),
+            height: Some(240),
+            rate_hz: None,
+            opacity: 0.8,
+            shape: None,
+        };
+        let mut widget = StandingsWidget::new(&config);
+
+        // Under the pace laps the results' order stands.
+        step(&mut view, 999.5, session_state::PARADE_LAPS);
+        widget.fill(&view);
+        let numbers: Vec<&str> = cars(&widget).iter().map(|c| c.number.as_str()).collect();
+        assert_eq!(numbers, ["1", "2", "3", "4"]);
+
+        // From the green flag the order is the track's, and gaps are timed once the car ahead has passed.
+        let mut t = 1000.0;
+        while t <= 1110.0 {
+            step(&mut view, t, session_state::RACING);
+            widget.fill(&view);
+            t += 0.5;
+        }
+        let rows = cars(&widget);
+        let numbers: Vec<&str> = rows.iter().map(|c| c.number.as_str()).collect();
+        assert_eq!(numbers, ["2", "1", "3", "4"], "the pace car is left out");
+        let positions: Vec<&str> = rows.iter().map(|c| c.position.as_str()).collect();
+        assert_eq!(positions, ["1", "2", "3", "4"]);
+        assert!(rows[0].leader);
+        assert_eq!(
+            (rows[0].change, rows[1].change),
+            (1, -1),
+            "against the grid"
+        );
+        assert_eq!(
+            (rows[1].gap.as_str(), rows[1].interval.as_str()),
+            ("2.0", "2.0")
+        );
+        assert_eq!(
+            (rows[2].gap.as_str(), rows[2].interval.as_str()),
+            ("10.0", "8.0")
+        );
+        assert!(rows[2].player);
+        assert_eq!(
+            rows[3].gap.as_str(),
+            "+1L",
+            "more than a lap behind the leader"
+        );
+        assert_eq!(rows[3].interval.as_str(), "1:35");
     }
 }
