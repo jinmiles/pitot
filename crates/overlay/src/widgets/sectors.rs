@@ -829,6 +829,7 @@ SplitTimeInfo:
             height: Some(200),
             rate_hz: None,
             opacity: 0.8,
+            shape: None,
         };
         let mut widget = SectorsWidget::new(&config);
         let mut redraw = [Redraw::Nothing; MAX_LAYERS];

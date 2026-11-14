@@ -1,6 +1,9 @@
-//! Track map: the track's outline with every car as a dot at its lap distance.
+//! Track map: every car as a dot at its lap distance, around a circle (the default) or along the track's outline.
 //!
-//! The outline comes from the player's own driving: one clean lap integrated from the car's velocity and heading
+//! The circle needs nothing but lap distances: start/finish at 12 o'clock, clockwise in driving order, cars on pit
+//! road on a smaller ring inside, and a tick at each sector start. It shows from the first moment of a session.
+//!
+//! The outline (`shape = "outline"`) comes from the player's own driving: one clean lap integrated from the car's velocity and heading
 //! (see `outline`), saved per track in the tracks folder so later sessions have it at once. It is drawn once into
 //! the bottom layer. The dots go on the layer above, which is drawn again only when a dot moved.
 //!
@@ -20,7 +23,7 @@ use std::time::{Duration, Instant};
 use pitot_irsdk::flags::session_flags;
 use tracing::{info, warn};
 
-use crate::config::{self, WidgetConfig};
+use crate::config::{self, MapShape, WidgetConfig};
 use crate::pipeline::View;
 use crate::render::{Align, Canvas, Color, Rect};
 
@@ -32,6 +35,8 @@ use outline::{Builder, Motion, Progress};
 /// `PlayerTrackSurface` on the racing surface, and `CarIdxTrackSurface` for a car out of the world.
 const ON_TRACK: i32 = 3;
 const NOT_IN_WORLD: i32 = -1;
+/// Sector starts drawn at most.
+const MAX_TICKS: usize = 16;
 /// Space around the outline, in pixels.
 const MARGIN: f32 = 14.0;
 /// Turns tried when fitting the outline, in degrees.
@@ -135,6 +140,12 @@ fn rejoin_pct(pct: f32, loss: f32, lap: f32) -> f32 {
     (pct - loss / lap).rem_euclid(1.0)
 }
 
+/// The point at lap distance `pct` on a circle: start/finish at 12 o'clock, clockwise.
+fn circle_point(center: [f32; 2], radius: f32, pct: f32) -> [f32; 2] {
+    let (sin, cos) = (pct * std::f32::consts::TAU).sin_cos();
+    [center[0] + radius * sin, center[1] - radius * cos]
+}
+
 /// To half pixels, so dots that did not visibly move do not cause a redraw.
 fn snap_half(v: f32) -> f32 {
     (v * 2.0).round() / 2.0
@@ -146,15 +157,20 @@ pub struct TrackMapWidget {
     width: u32,
     height: u32,
     opacity: f32,
+    shape: MapShape,
+    /// Sector start lap distances for the circle's ticks, from the session's `SplitTimeInfo`.
+    ticks: [f32; MAX_TICKS],
+    tick_count: usize,
     /// Where outlines are kept; none without a configuration directory.
     folder: Option<PathBuf>,
     /// The session's track, once its session info arrived.
     track: Option<i64>,
     /// The outline in meters east and north of the line, or empty while the track is being mapped.
     outline: Vec<[f32; 2]>,
-    /// The outline in widget pixels.
+    /// The outline in widget pixels, or the circle's points.
     screen: Vec<[f32; 2]>,
-    builder: Builder,
+    /// Integrates the mapping lap; only for the outline.
+    builder: Option<Builder>,
     /// Share of the mapping lap done, in percent, or `None` while waiting for the line.
     progress: Option<u8>,
     dots: Vec<Dot>,
@@ -190,21 +206,67 @@ impl TrackMapWidget {
         folder: Option<PathBuf>,
         pit: Option<SharedPitTracker>,
     ) -> Self {
-        Self {
+        let shape = config.shape.unwrap_or_default();
+        let mut map = Self {
             width: config.width.unwrap_or(440),
             height: config.height.unwrap_or(330),
             opacity: config.opacity,
+            shape,
+            ticks: [0.0; MAX_TICKS],
+            tick_count: 0,
             folder,
             track: None,
             outline: Vec::with_capacity(outline::POINTS),
             screen: Vec::with_capacity(outline::POINTS),
-            builder: Builder::new(),
+            builder: (shape == MapShape::Outline).then(Builder::new),
             progress: None,
             dots: Vec::with_capacity(72),
             next: Vec::with_capacity(72),
             pit,
             fuel: FuelTracker::default(),
+        };
+        if shape == MapShape::Circle {
+            let (center, radius) = map.circle();
+            map.screen.extend(
+                (0..outline::POINTS)
+                    .map(|i| circle_point(center, radius, i as f32 / outline::POINTS as f32)),
+            );
         }
+        map
+    }
+
+    /// The circle's center and radius in widget pixels.
+    fn circle(&self) -> ([f32; 2], f32) {
+        let (w, h) = (self.width as f32, self.height as f32);
+        ([w / 2.0, h / 2.0], (w.min(h) / 2.0 - MARGIN).max(1.0))
+    }
+
+    /// The radius of the circle's inner ring, for cars on pit road.
+    fn pit_radius(&self) -> f32 {
+        let (_, radius) = self.circle();
+        (radius - 3.0 * self.dot_radius() - self.road_width() / 2.0).max(radius * 0.5)
+    }
+
+    /// Takes the sector starts from the session; true when they changed.
+    fn follow_sectors(&mut self, view: &View) -> bool {
+        let Some(info) = view.session() else {
+            return false;
+        };
+        let mut ticks = [0.0; MAX_TICKS];
+        let mut count = 0;
+        for start in info.sectors.iter().filter_map(|s| s.start_pct) {
+            // The first sector starts at the line, which has its own mark.
+            if count < MAX_TICKS && start > 1.0e-4 && start < 1.0 {
+                ticks[count] = start as f32;
+                count += 1;
+            }
+        }
+        if count == self.tick_count && ticks == self.ticks {
+            return false;
+        }
+        self.ticks = ticks;
+        self.tick_count = count;
+        true
     }
 
     /// Follows the stops and the player's fuel use, for the pit exit.
@@ -325,8 +387,11 @@ impl TrackMapWidget {
     /// Takes the finished lap as the outline and saves it, on its own thread so the render thread never waits
     /// for the disk.
     fn adopt(&mut self) {
-        self.builder.outline_into(&mut self.outline);
-        self.builder.restart();
+        let Some(builder) = self.builder.as_mut() else {
+            return;
+        };
+        builder.outline_into(&mut self.outline);
+        builder.restart();
         self.fit();
         let Some((track, path)) = self.track.and_then(|t| Some((t, self.file(t)?))) else {
             return;
@@ -358,7 +423,10 @@ impl TrackMapWidget {
                 && !snap.bool(vars.on_pit_road, 0).unwrap_or(false)
                 && surface.is_none_or(|s| s == ON_TRACK),
         };
-        let progress = match self.builder.observe(motion) {
+        let Some(builder) = self.builder.as_mut() else {
+            return;
+        };
+        let progress = match builder.observe(motion) {
             Progress::Done => {
                 self.adopt();
                 self.progress = None;
@@ -398,14 +466,20 @@ impl TrackMapWidget {
             if info.is_some_and(|d| d.is_pace_car || d.is_spectator) {
                 continue;
             }
+            let on_pit = snap.bool(vars.car_on_pit_road, car) == Some(true);
             let kind = if Some(car) == player {
                 Kind::Player
-            } else if snap.bool(vars.car_on_pit_road, car) == Some(true) {
+            } else if on_pit {
                 Kind::Pit
             } else {
                 Kind::Car
             };
-            let [x, y] = point_at(&self.screen, pct);
+            let [x, y] = if on_pit && self.shape == MapShape::Circle {
+                let (center, _) = self.circle();
+                circle_point(center, self.pit_radius(), pct)
+            } else {
+                point_at(&self.screen, pct)
+            };
             self.next.push(Dot {
                 x: snap_half(x),
                 y: snap_half(y),
@@ -435,6 +509,24 @@ impl TrackMapWidget {
 
     fn road_width(&self) -> f32 {
         (self.width.min(self.height) as f32 / 40.0).clamp(4.0, 9.0)
+    }
+
+    fn draw_circle(&self, canvas: &mut Canvas<'_>) {
+        let (center, radius) = self.circle();
+        let road = self.road_width();
+        let c = (center[0], center[1]);
+        canvas.circle(c, radius, road + 3.0, Color::rgb(ROAD_EDGE, 0.9));
+        canvas.circle(c, radius, road, Color::rgb(ROAD, 1.0));
+        canvas.circle(c, self.pit_radius(), 1.5, Color::rgb(DIM, 0.35));
+        let across = |canvas: &mut Canvas<'_>, pct: f32, half: f32, width: f32, color: Color| {
+            let a = circle_point(center, radius - half, pct);
+            let b = circle_point(center, radius + half, pct);
+            canvas.line((a[0], a[1]), (b[0], b[1]), width, color);
+        };
+        for &start in &self.ticks[..self.tick_count] {
+            across(canvas, start, road / 2.0 + 3.0, 1.5, Color::rgb(DIM, 0.9));
+        }
+        across(canvas, 0.0, road * 1.3, 2.5, Color::rgb(WHITE, 1.0));
     }
 
     fn draw_outline(&self, canvas: &mut Canvas<'_>) {
@@ -525,20 +617,26 @@ impl Widget for TrackMapWidget {
 
     fn update(&mut self, view: &mut View, _now: Instant, redraw: &mut [Redraw; MAX_LAYERS]) {
         self.follow_pit(view);
-        if let Some(info) = view.session()
+        if self.shape == MapShape::Circle {
+            if self.follow_sectors(view) {
+                redraw[0] = Redraw::All;
+            }
+        } else if let Some(info) = view.session()
             && info.weekend.track_id != self.track
         {
             let length = info.weekend.track_length_km.map(|km| km * 1000.0);
             self.track = info.weekend.track_id;
-            self.builder.restart();
-            self.builder.set_expected_length(length);
+            if let Some(builder) = self.builder.as_mut() {
+                builder.restart();
+                builder.set_expected_length(length);
+            }
             self.progress = None;
             self.load();
             self.dots.clear();
             redraw[0] = Redraw::All;
             redraw[1] = Redraw::All;
         }
-        if self.outline.is_empty() {
+        if self.shape == MapShape::Outline && self.outline.is_empty() {
             if self.track.is_some() {
                 self.map(view, redraw);
             }
@@ -560,7 +658,10 @@ impl Widget for TrackMapWidget {
                 Rect::new(0.0, 0.0, self.width as f32, self.height as f32),
                 Color::rgb(BACKGROUND, self.opacity),
             );
-            self.draw_outline(canvas);
+            match self.shape {
+                MapShape::Circle => self.draw_circle(canvas),
+                MapShape::Outline => self.draw_outline(canvas),
+            }
         } else {
             self.draw_dots(canvas);
         }
@@ -568,7 +669,9 @@ impl Widget for TrackMapWidget {
 
     fn reset(&mut self) {
         // The outline belongs to the track and stays; a lap being mapped starts over.
-        self.builder.restart();
+        if let Some(builder) = self.builder.as_mut() {
+            builder.restart();
+        }
         self.progress = None;
         self.dots.clear();
         self.next.clear();
@@ -681,6 +784,58 @@ mod tests {
             (rejoin_pct(0.1, 125.0, 100.0) - 0.85).abs() < 1e-5,
             "more than a lap"
         );
+    }
+
+    #[test]
+    fn the_circle_runs_clockwise_from_twelve() {
+        let c = [100.0, 100.0];
+        let close =
+            |a: [f32; 2], b: [f32; 2]| (a[0] - b[0]).abs() < 1e-3 && (a[1] - b[1]).abs() < 1e-3;
+        assert!(
+            close(circle_point(c, 50.0, 0.0), [100.0, 50.0]),
+            "the line at the top"
+        );
+        assert!(
+            close(circle_point(c, 50.0, 0.25), [150.0, 100.0]),
+            "a quarter to the right"
+        );
+        assert!(close(circle_point(c, 50.0, 0.5), [100.0, 150.0]));
+        assert!(close(circle_point(c, 50.0, 0.75), [50.0, 100.0]));
+    }
+
+    #[test]
+    fn circle_mode_needs_no_outline() {
+        let config = WidgetConfig {
+            enabled: true,
+            monitor: None,
+            x: 0,
+            y: 0,
+            width: Some(440),
+            height: Some(330),
+            rate_hz: None,
+            opacity: 0.8,
+            shape: None,
+        };
+        let map = TrackMapWidget::with_folder(&config, None);
+        assert_eq!(map.shape, MapShape::Circle, "the default");
+        assert!(map.builder.is_none(), "no integration");
+        assert_eq!(map.screen.len(), outline::POINTS);
+        // Every point is on the circle, inside the widget.
+        let (center, radius) = map.circle();
+        assert!(
+            map.screen
+                .iter()
+                .all(|p| ((p[0] - center[0]).hypot(p[1] - center[1]) - radius).abs() < 0.01)
+        );
+        assert!(map.pit_radius() < radius && map.pit_radius() > radius / 2.0);
+        let outline = TrackMapWidget::with_folder(
+            &WidgetConfig {
+                shape: Some(MapShape::Outline),
+                ..config
+            },
+            None,
+        );
+        assert!(outline.builder.is_some() && outline.screen.is_empty());
     }
 
     #[test]

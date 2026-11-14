@@ -1517,6 +1517,7 @@ SplitTimeInfo:
             height: Some(240),
             rate_hz: None,
             opacity: 0.8,
+            shape: None,
         };
         let mut widget = StandingsWidget::new(&config);
         widget.fill(&view);

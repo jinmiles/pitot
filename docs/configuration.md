@@ -69,8 +69,9 @@ files`). The files hold other drivers' names in their session info; the overlay 
 
 ## Track outlines
 
-The [track map](trackmap.md) keeps the outline of each track it mapped in `%APPDATA%\Pitot\tracks`, one
-`<TrackID>.trk` file per track (8 KB). Deleting a file maps that track again on the next clean lap.
+With `shape = "outline"`, the [track map](trackmap.md) keeps the outline of each track it mapped in
+`%APPDATA%\Pitot\tracks`, one `<TrackID>.trk` file per track (8 KB). Deleting a file maps that track again on the
+next clean lap. The default `shape = "circle"` needs no outline and does not touch the folder.
 
 ## One instance
 
@@ -130,6 +131,7 @@ The pit widget keeps what it measures, the refueling speed by car and the pit la
 | `rate_hz` | 0.1 to 120 |
 | `opacity` | 0 to 1 |
 | `width`, `height` | 16 to 8192 |
+| `shape` | `trackmap` only: `"circle"` (default) or `"outline"` |
 
 Monitors are counted left to right, then top to bottom, by their top-left corner. That order does not change
 when Windows renumbers displays.

@@ -174,10 +174,12 @@ height = 170
 rate_hz = 5.0
 opacity = 0.82
 
-# The track map draws a track once you have driven one clean lap of it, and keeps the outline in
+# The track map. shape = "circle" places the cars around a circle by lap distance, from the first moment of a
+# session. shape = "outline" draws the track's outline once you have driven one clean lap of it, and keeps it in
 # %APPDATA%\Pitot\tracks for later sessions.
 [widgets.trackmap]
 enabled = true
+shape = "circle"
 x = 1460
 y = 24
 width = 440
@@ -259,6 +261,7 @@ impl Default for Widgets {
             height: size.map(|s| s.1),
             rate_hz,
             opacity: 0.82,
+            shape: None,
         };
         Self {
             status: widget(24, 24, None, None),
@@ -270,7 +273,10 @@ impl Default for Widgets {
             sectors: widget(800, 24, Some((400, 200)), Some(5.0)),
             wind: widget(1460, 370, Some((200, 170)), Some(5.0)),
             tires: widget(1680, 370, Some((220, 170)), Some(5.0)),
-            trackmap: widget(1460, 24, Some((440, 330)), Some(10.0)),
+            trackmap: WidgetConfig {
+                shape: Some(MapShape::Circle),
+                ..widget(1460, 24, Some((440, 330)), Some(10.0))
+            },
         }
     }
 }
@@ -289,6 +295,19 @@ pub struct WidgetConfig {
     pub rate_hz: Option<f32>,
     /// Background opacity, 0 to 1.
     pub opacity: f32,
+    /// The track map's shape; other widgets have none.
+    pub shape: Option<MapShape>,
+}
+
+/// How the track map draws the track.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MapShape {
+    /// Cars around a circle by lap distance; needs no lap.
+    #[default]
+    Circle,
+    /// The track's outline, recorded from a clean lap of the player's.
+    Outline,
 }
 
 /// The file's shape: every field optional, applied over the defaults.
@@ -327,6 +346,7 @@ struct WidgetPatch {
     height: Option<u32>,
     rate_hz: Option<f32>,
     opacity: Option<f32>,
+    shape: Option<MapShape>,
 }
 
 impl WidgetPatch {
@@ -339,6 +359,7 @@ impl WidgetPatch {
         config.height = self.height.or(config.height);
         config.rate_hz = self.rate_hz.or(config.rate_hz);
         config.opacity = self.opacity.unwrap_or(config.opacity);
+        config.shape = self.shape.or(config.shape);
         config
     }
 }
@@ -458,6 +479,9 @@ impl Config {
         }
         for (widget, c) in self.widgets() {
             let invalid = |field| Err(ConfigError::Invalid { widget, field });
+            if c.shape.is_some() && widget != "trackmap" {
+                return invalid("shape");
+            }
             if c.rate_hz.is_some_and(|r| !(0.1..=120.0).contains(&r)) {
                 return invalid("rate_hz");
             }
