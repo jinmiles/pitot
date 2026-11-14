@@ -5,6 +5,8 @@
 
 mod fuel;
 mod inputs;
+mod pit;
+mod pitstops;
 mod relative;
 mod sectors;
 mod standings;
@@ -12,17 +14,20 @@ mod status;
 mod text;
 mod timing;
 mod tires;
+mod trackmap;
 mod wind;
 
 use std::time::{Duration, Instant};
 
 pub use fuel::FuelWidget;
 pub use inputs::InputTraceWidget;
+pub use pit::PitWidget;
 pub use relative::RelativeWidget;
 pub use sectors::SectorsWidget;
 pub use standings::StandingsWidget;
 pub use status::StatusWidget;
 pub use tires::TiresWidget;
+pub use trackmap::TrackMapWidget;
 pub use wind::WindWidget;
 
 use crate::pipeline::{Display, View};

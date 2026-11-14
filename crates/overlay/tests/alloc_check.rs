@@ -735,3 +735,320 @@ fn sectors_widget_does_not_allocate_per_update() {
     );
     drop(pipeline);
 }
+
+const MAP_CARS: usize = 8;
+const MAP_ROW: usize = 36 + MAP_CARS * 9;
+/// A round track of radius 300 m: one lap at 50 m/s is about 2,262 ticks.
+const MAP_RADIUS: f64 = 300.0;
+const MAP_SPEED: f64 = 50.0;
+const MAP_SESSION: &[u8] = b"WeekendInfo:
+ TrackID: 77
+ TrackLength: 1.88 km
+DriverInfo:
+ DriverCarIdx: 0
+ Drivers:
+ - CarIdx: 0
+   CarClassColor: 0xffda59
+ - CarIdx: 1
+   CarClassColor: 0xffda59
+ - CarIdx: 2
+   CarClassColor: 0x33ceff
+";
+
+/// The track map maps a lap and then moves the cars' dots without allocating per update.
+#[test]
+fn track_map_does_not_allocate_per_update() {
+    use pitot_overlay::config::WidgetConfig;
+    use pitot_overlay::widgets::{MAX_LAYERS, Redraw, TrackMapWidget, Widget};
+
+    let _turn = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let pid = std::process::id();
+    let names = SdkNames::new(
+        &format!("Local\\PitotOverlayAllocMapMap-{pid}"),
+        &format!("Local\\PitotOverlayAllocMapEvent-{pid}"),
+    );
+    let at = |k: usize| (36 + k * MAP_CARS * 4) as i32;
+    let config = PublisherConfig {
+        vars: vec![
+            VarHeader::new(VarType::Double, 0, 1, "SessionTime").expect("valid"),
+            VarHeader::new(VarType::Bool, 8, 1, "IsOnTrack").expect("valid"),
+            VarHeader::new(VarType::Bool, 9, 1, "OnPitRoad").expect("valid"),
+            VarHeader::new(VarType::Int, 12, 1, "PlayerTrackSurface").expect("valid"),
+            VarHeader::new(VarType::Int, 16, 1, "PlayerCarIdx").expect("valid"),
+            VarHeader::new(VarType::Float, 20, 1, "VelocityX").expect("valid"),
+            VarHeader::new(VarType::Float, 24, 1, "VelocityY").expect("valid"),
+            VarHeader::new(VarType::Float, 28, 1, "YawNorth").expect("valid"),
+            VarHeader::new(VarType::Float, 32, 1, "LapDistPct").expect("valid"),
+            VarHeader::new(VarType::Float, at(0), MAP_CARS as i32, "CarIdxLapDistPct")
+                .expect("valid"),
+            VarHeader::new(VarType::Int, at(1), MAP_CARS as i32, "CarIdxTrackSurface")
+                .expect("valid"),
+            VarHeader::new(VarType::Bool, at(2), MAP_CARS as i32, "CarIdxOnPitRoad")
+                .expect("valid"),
+        ],
+        buf_len: MAP_ROW,
+        num_buf: 3,
+        tick_rate: 60,
+        session_info_capacity: 4096,
+    };
+    let mut publisher = Publisher::create(&names, &config).expect("creates");
+    publisher.set_connected(true).expect("connects");
+    publisher.set_session_info(MAP_SESSION).expect("fits");
+    let reader_config = ReaderConfig {
+        retry_interval: Duration::from_millis(5),
+        idle_timeout: Duration::from_millis(50),
+    };
+    let (pipeline, mut view) =
+        Pipeline::start(names, reader_config, Vec::new(), None).expect("starts");
+    let folder = std::env::temp_dir().join(format!("pitot-alloc-trackmap-{pid}"));
+    let _ = std::fs::remove_dir_all(&folder);
+    let widget_config = WidgetConfig {
+        enabled: true,
+        monitor: None,
+        x: 0,
+        y: 0,
+        width: Some(440),
+        height: Some(330),
+        rate_hz: None,
+        opacity: 0.8,
+    };
+    let mut widget = TrackMapWidget::with_folder(&widget_config, Some(folder.clone()));
+
+    // The player drives the circle counterclockwise from half a lap; the other cars follow at fixed distances.
+    let lap_ticks = 2.0 * std::f64::consts::PI * MAP_RADIUS / MAP_SPEED * 60.0;
+    let mut row = vec![0u8; MAP_ROW];
+    let mut cycle =
+        |n: u32, widget: &mut TrackMapWidget, view: &mut View| -> [Redraw; MAX_LAYERS] {
+            let pct = (0.5 + f64::from(n) / lap_ticks).fract();
+            let heading = (std::f64::consts::FRAC_PI_2 - pct * std::f64::consts::TAU)
+                .rem_euclid(std::f64::consts::TAU);
+            row[0..8].copy_from_slice(&(f64::from(n) / 60.0).to_le_bytes());
+            row[8] = 1;
+            row[12..16].copy_from_slice(&3i32.to_le_bytes());
+            row[20..24].copy_from_slice(&(MAP_SPEED as f32).to_le_bytes());
+            row[28..32].copy_from_slice(&(heading as f32).to_le_bytes());
+            row[32..36].copy_from_slice(&(pct as f32).to_le_bytes());
+            for car in 0..MAP_CARS {
+                let at = |k: usize| 36 + k * MAP_CARS * 4 + car * 4;
+                let car_pct = (pct + car as f64 * 0.03).fract() as f32;
+                row[at(0)..at(0) + 4].copy_from_slice(&car_pct.to_le_bytes());
+                row[at(1)..at(1) + 4].copy_from_slice(&3i32.to_le_bytes());
+                row[36 + 2 * MAP_CARS * 4 + car] = u8::from(car == 2);
+            }
+            publisher.publish(&row).expect("publishes");
+            thread::sleep(Duration::from_millis(2));
+            view.poll();
+            view.drain_samples(|_| {});
+            let mut redraw = [Redraw::Nothing; MAX_LAYERS];
+            // The widget runs at 10 Hz: every sixth tick.
+            if n.is_multiple_of(6) {
+                widget.update(view, Instant::now(), &mut redraw);
+            }
+            redraw
+        };
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut n = 0;
+    while view.session().is_none() || n < 120 {
+        assert!(Instant::now() < deadline, "session info parsed");
+        cycle(n, &mut widget, &mut view);
+        n += 1;
+    }
+
+    // Mapping: the line comes at tick 1,131, and the lap closes about 2,262 ticks later.
+    ALLOCATIONS.store(0, Ordering::Relaxed);
+    COUNTING.store(true, Ordering::Relaxed);
+    while n < 3_000 {
+        cycle(n, &mut widget, &mut view);
+        n += 1;
+    }
+    COUNTING.store(false, Ordering::Relaxed);
+    assert_eq!(
+        ALLOCATIONS.load(Ordering::Relaxed),
+        0,
+        "allocations while mapping"
+    );
+
+    // The lap closes; the outline is saved on its own thread.
+    let file = folder.join("77.trk");
+    while n < 3_600 || !file.exists() {
+        assert!(n < 6_000, "the lap was mapped and saved");
+        cycle(n, &mut widget, &mut view);
+        n += 1;
+    }
+    thread::sleep(Duration::from_millis(100));
+
+    ALLOCATIONS.store(0, Ordering::Relaxed);
+    COUNTING.store(true, Ordering::Relaxed);
+    let mut dots_drawn = 0;
+    for _ in 0..600 {
+        if cycle(n, &mut widget, &mut view)[1] != Redraw::Nothing {
+            dots_drawn += 1;
+        }
+        n += 1;
+    }
+    COUNTING.store(false, Ordering::Relaxed);
+    assert!(dots_drawn >= 90, "the dots move: {dots_drawn} redraws");
+    assert_eq!(
+        ALLOCATIONS.load(Ordering::Relaxed),
+        0,
+        "allocations while moving the dots"
+    );
+    drop(pipeline);
+    let _ = std::fs::remove_dir_all(folder);
+}
+
+const PIT_CARS: usize = 8;
+const PIT_ON_PIT_ROAD: usize = 24 + PIT_CARS * 4 * 6;
+const PIT_ROW: usize = PIT_ON_PIT_ROAD + PIT_CARS;
+const PIT_SESSION: &[u8] = b"WeekendInfo:
+ TrackID: 7
+DriverInfo:
+ DriverCarIdx: 0
+ DriverCarFuelMaxLtr: 40.000
+ DriverCarMaxFuelPct: 1.000
+ Drivers:
+ - CarIdx: 0
+   UserName: Driver A
+   CarNumber: 1
+   CarScreenName: Test Car
+   CarClassID: 1
+ - CarIdx: 1
+   UserName: Driver B
+   CarNumber: 2
+   CarScreenName: Test Car
+   CarClassID: 1
+ - CarIdx: 2
+   UserName: Driver C
+   CarNumber: 3
+   CarScreenName: Other Car
+   CarClassID: 1
+";
+
+/// One 10 Hz tick of three cars. Car `stopper` comes onto pit road at tick `start`, stands in its stall from 1 s to
+/// 6 s later, and leaves pit road 9 s after coming in.
+fn pit_row(n: u32, stopper: usize, start: u32) -> [u8; PIT_ROW] {
+    let mut row = [0u8; PIT_ROW];
+    let put = |row: &mut [u8; PIT_ROW], k: usize, car: usize, bytes: [u8; 4]| {
+        let at = 24 + k * PIT_CARS * 4 + car * 4;
+        row[at..at + 4].copy_from_slice(&bytes);
+    };
+    row[0..8].copy_from_slice(&(f64::from(n) * 0.1).to_le_bytes());
+    row[20..24].copy_from_slice(&30.0f32.to_le_bytes());
+    for car in 0..3 {
+        let mut pct = (0.3 * car as f32 + n as f32 * 0.0012) % 1.0;
+        let mut surface = 3i32;
+        let mut on_pit = false;
+        if car == stopper && n >= start && n - start < 90 {
+            let k = n - start;
+            on_pit = true;
+            surface = if (10..60).contains(&k) { 1 } else { 2 };
+            pct = 0.95 + k.min(10) as f32 * 0.001 + k.saturating_sub(60) as f32 * 0.001;
+        }
+        put(&mut row, 0, car, pct.to_le_bytes());
+        put(&mut row, 1, car, surface.to_le_bytes());
+        put(&mut row, 2, car, (n as i32 / 800).to_le_bytes());
+        put(&mut row, 3, car, 80.0f32.to_le_bytes());
+        put(&mut row, 4, car, 1i32.to_le_bytes());
+        put(&mut row, 5, car, (car as i32 + 1).to_le_bytes());
+        row[PIT_ON_PIT_ROAD + car] = u8::from(on_pit);
+    }
+    row
+}
+
+#[test]
+fn pit_widget_does_not_allocate_per_update() {
+    use pitot_overlay::config::WidgetConfig;
+    use pitot_overlay::widgets::{MAX_LAYERS, PitWidget, Redraw, Widget};
+
+    let _turn = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let pid = std::process::id();
+    let names = SdkNames::new(
+        &format!("Local\\PitotOverlayAllocPitMap-{pid}"),
+        &format!("Local\\PitotOverlayAllocPitEvent-{pid}"),
+    );
+    let array = |t, k: usize, name| {
+        VarHeader::new(t, (24 + k * PIT_CARS * 4) as i32, PIT_CARS as i32, name).expect("valid")
+    };
+    let config = PublisherConfig {
+        vars: vec![
+            VarHeader::new(VarType::Double, 0, 1, "SessionTime").expect("valid"),
+            VarHeader::new(VarType::Int, 8, 1, "SessionNum").expect("valid"),
+            VarHeader::new(VarType::Int, 12, 1, "PlayerCarIdx").expect("valid"),
+            VarHeader::new(VarType::Bool, 16, 1, "PlayerCarInPitStall").expect("valid"),
+            VarHeader::new(VarType::Float, 20, 1, "FuelLevel").expect("valid"),
+            array(VarType::Float, 0, "CarIdxLapDistPct"),
+            array(VarType::Int, 1, "CarIdxTrackSurface"),
+            array(VarType::Int, 2, "CarIdxLapCompleted"),
+            array(VarType::Float, 3, "CarIdxBestLapTime"),
+            array(VarType::Int, 4, "CarIdxClass"),
+            array(VarType::Int, 5, "CarIdxClassPosition"),
+            VarHeader::new(
+                VarType::Bool,
+                PIT_ON_PIT_ROAD as i32,
+                PIT_CARS as i32,
+                "CarIdxOnPitRoad",
+            )
+            .expect("valid"),
+        ],
+        buf_len: PIT_ROW,
+        num_buf: 3,
+        tick_rate: 60,
+        session_info_capacity: 4096,
+    };
+    let mut publisher = Publisher::create(&names, &config).expect("creates");
+    publisher.set_connected(true).expect("connects");
+    publisher.set_session_info(PIT_SESSION).expect("fits");
+    let reader_config = ReaderConfig {
+        retry_interval: Duration::from_millis(5),
+        idle_timeout: Duration::from_millis(50),
+    };
+    let (pipeline, mut view) =
+        Pipeline::start(names, reader_config, Vec::new(), None).expect("starts");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while view.session().is_none() {
+        assert!(Instant::now() < deadline, "session info parsed");
+        publisher
+            .publish(&pit_row(0, 0, u32::MAX))
+            .expect("publishes");
+        thread::sleep(Duration::from_millis(4));
+        view.poll();
+    }
+    let widget_config = WidgetConfig {
+        enabled: true,
+        monitor: None,
+        x: 0,
+        y: 0,
+        width: Some(400),
+        height: Some(280),
+        rate_hz: None,
+        opacity: 0.8,
+    };
+    let mut widget = PitWidget::with_store(&widget_config, None);
+    let mut cycle = |n: u32, stopper: usize, start: u32| {
+        publisher
+            .publish(&pit_row(n, stopper, start))
+            .expect("publishes");
+        thread::sleep(Duration::from_millis(4));
+        view.poll();
+        let mut redraw = [Redraw::Nothing; MAX_LAYERS];
+        widget.update(&mut view, Instant::now(), &mut redraw);
+    };
+    // Warm-up: car 1 makes a stop.
+    for n in 1..300 {
+        cycle(n, 1, 100);
+    }
+    ALLOCATIONS.store(0, Ordering::Relaxed);
+    COUNTING.store(true, Ordering::Relaxed);
+    // Car 2, another car model, makes a stop while counting.
+    for n in 300..700 {
+        cycle(n, 2, 400);
+    }
+    COUNTING.store(false, Ordering::Relaxed);
+    assert_eq!(
+        ALLOCATIONS.load(Ordering::Relaxed),
+        0,
+        "allocations across the data thread and the pit widget's updates"
+    );
+    drop(widget);
+    drop(pipeline);
+}

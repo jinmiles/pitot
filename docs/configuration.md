@@ -48,7 +48,8 @@ Captures are looked up in `%APPDATA%\Pitot\captures` and in `captures` next to `
 [`pitot-bench record`](recorder.md) writes them when it runs from that folder.
 
 The log says whether a capture was found (`replay: playing the capture of this session`) and when the widgets
-switch to it and back. Without a capture, widgets hide during replays.
+switch to it and back. Without a capture, widgets hide during replays, except the tire widget when the sim's
+telemetry files of the session are there (below).
 
 ## Telemetry files
 
@@ -65,6 +66,11 @@ folder = ""
 
 The log says whether files of the session were found (`replay: tire temperatures from the sim's telemetry
 files`). The files hold other drivers' names in their session info; the overlay only reads them.
+
+## Track outlines
+
+The [track map](trackmap.md) keeps the outline of each track it mapped in `%APPDATA%\Pitot\tracks`, one
+`<TrackID>.trk` file per track (8 KB). Deleting a file maps that track again on the next clean lap.
 
 ## One instance
 
@@ -112,8 +118,12 @@ opacity = 0.82  # background opacity, 0 to 1
 ```
 
 Widgets: `status`, `inputs`, `relative`, `standings`, `fuel`, `sectors` ([sectors.md](sectors.md)), `wind`
-([wind.md](wind.md)), `tires` ([tires.md](tires.md)). Any field left out keeps that widget's default, so a
-table can set just `x` and `y`. Unknown widgets or fields are errors, so typos do not go unnoticed.
+([wind.md](wind.md)), `tires` ([tires.md](tires.md)), `trackmap` ([trackmap.md](trackmap.md)), `pit`
+([pit.md](pit.md)). Any field left out keeps that widget's default, so a table can set just `x` and `y`. Unknown
+widgets or fields are errors, so typos do not go unnoticed.
+
+The pit widget keeps what it measures, the refueling speed by car and the pit lane loss by track, in
+`%APPDATA%\Pitot\pit.toml`. Delete a line there to measure that value again.
 
 | Field | Range |
 |---|---|
