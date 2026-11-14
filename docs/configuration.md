@@ -50,6 +50,11 @@ Captures are looked up in `%APPDATA%\Pitot\captures` and in `captures` next to `
 The log says whether a capture was found (`replay: playing the capture of this session`) and when the widgets
 switch to it and back. Without a capture, widgets hide during replays.
 
+## Track outlines
+
+The [track map](trackmap.md) keeps the outline of each track it mapped in `%APPDATA%\Pitot\tracks`, one
+`<TrackID>.trk` file per track (8 KB). Deleting a file maps that track again on the next clean lap.
+
 ## One instance
 
 Only one overlay runs per Windows session. Launching it again while it runs exits at once and leaves the running
@@ -95,8 +100,13 @@ rate_hz = 60.0  # update rate; leave out for the widget's own rate
 opacity = 0.82  # background opacity, 0 to 1
 ```
 
-Widgets: `status`, `inputs`, `relative`, `standings`, `fuel`, `wind` ([wind.md](wind.md)). Any field left out keeps that widget's default,
-so a table can set just `x` and `y`. Unknown widgets or fields are errors, so typos do not go unnoticed.
+Widgets: `status`, `inputs`, `relative`, `standings`, `fuel`, `sectors` ([sectors.md](sectors.md)), `wind`
+([wind.md](wind.md)), `tires` ([tires.md](tires.md)), `trackmap` ([trackmap.md](trackmap.md)), `pit`
+([pit.md](pit.md)). Any field left out keeps that widget's default, so a table can set just `x` and `y`. Unknown
+widgets or fields are errors, so typos do not go unnoticed.
+
+The pit widget keeps what it measures, the refueling speed by car and the pit lane loss by track, in
+`%APPDATA%\Pitot\pit.toml`. Delete a line there to measure that value again.
 
 | Field | Range |
 |---|---|
