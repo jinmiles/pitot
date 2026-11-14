@@ -9,8 +9,9 @@ Plans for the [runner](runner.md) live in `benchmarks/`, with the configurations
 | `benchmarks/tier-a/long.toml` | `tier-a-long` | Public AI race, looped | Pitot four widgets | 1, 2 baselines, 60 s warm-up, 60 min measured |
 
 - `benchmarks/pitot/four.toml` is the reference set of the project plan: input trace, relative, standings, and
-  fuel at their default positions and update rates, with the status panel off. `inputs.toml` has the input trace
-  alone. Every field is spelled out, so a change of defaults does not change a benchmark.
+  fuel at their default positions and update rates, with the status panel and the widgets outside the set (such
+  as `sectors`) off. `inputs.toml` has the input trace alone. Every field is spelled out, so a change of defaults
+  does not change a benchmark; a new widget, which is on by default, is added to them switched off.
 - The race replay needs the capture under `data/irdashies/` (see [replay.md](replay.md)) and a release build:
   `cargo build --release -p pitot-overlay -p pitot-bench`.
 - Each plan carries the budget of the project plan in its `[budget]` table, so the report marks every app
