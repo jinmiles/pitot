@@ -51,4 +51,9 @@ the `alloc-check` test). Only the rows that changed are drawn again. Digits come
 
 ## Cost
 
-COST
+Lab PC (Parsec virtual display, the four reference widgets plus this one, release build), the home PC capture of
+an online practice session replayed at 1x, `pitot-bench collect` for 60 s after a 12 s warm-up, two runs each,
+alternating, the same build with the widget off and on: overlay CPU 30.32 and 29.74 ms/s off, 30.45 and
+30.26 ms/s on (about +0.3 ms/s); private bytes at most 19.9 and 17.2 MiB off, 20.2 and 17.8 MiB on (+0.3 to
++0.6 MiB). Other builds ran on the PC at the same time, so the absolute numbers are higher than in quieter runs.
+The executable grows by 20.5 KiB.
