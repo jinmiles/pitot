@@ -5,7 +5,8 @@
 //! by distance, when the car crossed a sector start between two observations.
 //!
 //! A [`RaceClock`] does the same for checkpoints all around the lap, so the time gap between two cars can be read
-//! at any moment: the time since the car ahead passed the spot where the car behind is now.
+//! at any moment: the time since the car ahead passed the spot where the car behind is now. In a race that is the
+//! gap in the race (laps count); on track it is the gap by lap distance alone, whatever the laps.
 
 use pitot_irsdk::session::SessionInfo;
 
@@ -258,6 +259,16 @@ impl RaceClock {
         self.finish = Finish::Pending;
     }
 
+    pub(crate) fn len(&self) -> usize {
+        self.cars.len()
+    }
+
+    /// Session time of the latest observation.
+    #[cfg(test)]
+    pub(crate) fn now(&self) -> f64 {
+        self.last
+    }
+
     /// Forgets everything, keeping the storage.
     pub(crate) fn reset(&mut self) {
         self.cars.iter_mut().for_each(|c| *c = Progress::default());
@@ -278,6 +289,9 @@ impl RaceClock {
         if now < self.last {
             // Time went back (a replay was rewound): the history no longer applies.
             self.reset();
+        } else if now == self.last {
+            // The same moment again (two widgets reading one tick) would break continuity at the line.
+            return;
         }
         self.last = now;
         let finish = self.finish;
@@ -445,10 +459,10 @@ impl RaceClock {
         }
     }
 
-    /// Gap from `ahead` back to `behind` at session time `now`: the time since `ahead` was where `behind` is
-    /// (where it finished, for a finisher), or whole laps when `ahead` is a lap or more ahead. `None` when a car
-    /// is unseen, `ahead` is not ahead, or its pass of that spot was not seen.
-    pub(crate) fn gap(&self, ahead: usize, behind: usize, now: f64) -> Option<Gap> {
+    /// Race gap from `ahead` back to `behind` at the latest observation: the time since `ahead` was where
+    /// `behind` is (where it finished, for a finisher), or whole laps when `ahead` is a lap or more ahead. `None`
+    /// when a car is unseen, `ahead` is not ahead, or its pass of that spot was not seen.
+    pub(crate) fn gap(&self, ahead: usize, behind: usize) -> Option<Gap> {
         let (a, b) = (self.cars.get(ahead)?, self.cars.get(behind)?);
         if !a.value.is_finite() || !b.value.is_finite() {
             return None;
@@ -457,9 +471,27 @@ impl RaceClock {
         if laps >= 1.0 {
             return Some(Gap::Laps(laps as u32));
         }
-        let at = if b.finished { b.time } else { now };
+        let at = if b.finished { b.time } else { self.last };
         let passed = self.time_at(ahead, b.value)?;
         Some(Gap::Time((at - passed).max(0.0)))
+    }
+
+    /// Gap on track from `ahead` back to `behind`, whatever their laps: the time since `ahead` last passed the
+    /// lap distance where `behind` is now. Both must be in the world at the latest observation; `None` when that
+    /// pass was not seen.
+    pub(crate) fn track_gap(&self, ahead: usize, behind: usize) -> Option<f64> {
+        let (a, b) = (self.cars.get(ahead)?, self.cars.get(behind)?);
+        if !a.tracking || !b.tracking || a.time != self.last || b.time != self.last {
+            return None;
+        }
+        // The latest progress of `ahead` at the lap distance of `behind`.
+        let spot = b.value - b.value.floor();
+        let mut at = a.value.floor() + spot;
+        if at > a.value {
+            at -= 1.0;
+        }
+        let passed = self.time_at(ahead, at)?;
+        Some((self.last - passed).max(0.0))
     }
 }
 
@@ -555,12 +587,12 @@ mod tests {
         while t < 600.0 {
             clock.observe(t, false, |car| sample(progress_at(t, offsets[car])));
             if t > 210.0 {
-                let Some(Gap::Time(gap)) = clock.gap(0, 1, t) else {
-                    panic!("a time gap at {t}: {:?}", clock.gap(0, 1, t));
+                let Some(Gap::Time(gap)) = clock.gap(0, 1) else {
+                    panic!("a time gap at {t}: {:?}", clock.gap(0, 1));
                 };
                 worst = worst.max((gap - 2.0).abs());
-                assert_eq!(clock.gap(0, 2, t), Some(Gap::Laps(1)));
-                assert_eq!(clock.gap(1, 0, t), None, "car 0 is not behind car 1");
+                assert_eq!(clock.gap(0, 2), Some(Gap::Laps(1)));
+                assert_eq!(clock.gap(1, 0), None, "car 0 is not behind car 1");
             }
             t += 0.5;
         }
@@ -570,6 +602,44 @@ mod tests {
             panic!("both seen");
         };
         assert!(a.key() > b.key());
+    }
+
+    #[test]
+    fn track_gaps_ignore_laps() {
+        // On the varying-speed lap: car 1 reaches every spot 3 s before the player (car 0) but is a lap down; car 2
+        // reaches every spot 5 s after the player but is a lap up.
+        let mut clock = RaceClock::default();
+        clock.resize(3);
+        let place = |car: usize, t: f64| match car {
+            0 => progress_at(t, 0.0),
+            1 => progress_at(t, -3.0) - 1.0,
+            _ => progress_at(t, 5.0) + 1.0,
+        };
+        let mut worst: f64 = 0.0;
+        let mut t = 200.0;
+        while t < 600.0 {
+            clock.observe(t, false, |car| sample(place(car, t)));
+            if t > 210.0 {
+                let ahead = clock.track_gap(1, 0).unwrap_or(f64::NAN);
+                let behind = clock.track_gap(0, 2).unwrap_or(f64::NAN);
+                worst = worst.max((ahead - 3.0).abs()).max((behind - 5.0).abs());
+            }
+            // The relative's rate.
+            t += 0.1;
+        }
+        assert!(worst < 0.005, "worst track gap error {worst}");
+        // In the race the lapped car is 97 s behind the player, whatever the track says.
+        let race_gap = time_gap(clock.gap(0, 1));
+        assert!((race_gap - 97.0).abs() < 0.01, "{race_gap}");
+        // Until the car ahead has passed the spot since the clock started, there is no gap.
+        let mut fresh = RaceClock::default();
+        fresh.resize(2);
+        for (n, t) in [0.0, 0.1, 0.2].into_iter().enumerate() {
+            fresh.observe(t, false, |car| {
+                sample(0.30 + 0.001 * n as f64 + 0.05 * car as f64)
+            });
+        }
+        assert_eq!(fresh.track_gap(1, 0), None);
     }
 
     #[test]
@@ -662,8 +732,13 @@ mod tests {
         };
         assert!(b.key() > a.key(), "car 1 passed the stopped car");
         // Car 1 passed car 0's spot at 39.5 s: the stopped car's gap keeps growing.
-        let gap = time_gap(clock.gap(1, 0, t));
-        assert!((gap - (t - 39.5)).abs() < 0.01, "{gap}");
+        let gap = time_gap(clock.gap(1, 0));
+        assert!((gap - (clock.now() - 39.5)).abs() < 0.01, "{gap}");
+        assert_eq!(
+            clock.track_gap(1, 0),
+            None,
+            "on track, only cars in the world"
+        );
         // A time going back (a rewound replay) forgets everything.
         clock.observe(5.0, false, |_| None);
         assert_eq!(clock.standing(1), None);
@@ -702,8 +777,8 @@ mod tests {
         );
         let key = |car| clock.standing(car).map(Standing::key);
         assert!(key(0) > key(1) && key(1) > key(2));
-        assert!((time_gap(clock.gap(0, 1, t)) - 1.0).abs() < 1e-4);
-        assert_eq!(clock.gap(1, 2, t), Some(Gap::Laps(1)));
+        assert!((time_gap(clock.gap(0, 1)) - 1.0).abs() < 1e-4);
+        assert_eq!(clock.gap(1, 2), Some(Gap::Laps(1)));
         assert!(clock.is_live());
     }
 
