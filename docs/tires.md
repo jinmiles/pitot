@@ -54,3 +54,9 @@ practice session at 1x, `pitot-bench collect` for 60 s after 12 s, the same buil
 two runs each, alternating: overlay CPU 28.91 and 31.73 ms/s off, 28.78 and 30.08 ms/s on; private bytes at most
 21.2 and 17.1 MB off, 20.5 and 17.5 MB on. The difference is below the run-to-run spread (other builds were running on
 the PC); the release binary grew by 23.5 KB (1,117,184 to 1,140,736 bytes).
+
+With replays from telemetry files and the 5 Hz default (same setup, the main build at 1 Hz against this one at
+5 Hz, driving): overlay CPU 29.04 and 27.69 ms/s before, 29.66 and 27.67 ms/s after; private bytes at most 20.5 and
+17.9 MB before, 21.7 and 17.7 MB after, again within the spread. Samples from telemetry files take 72 bytes each, about
+1.3 MB per hour of driving, kept until the connection ends. The release binary grew by 46 KB (1,171,968 to 1,219,072
+bytes), mostly the `.ibt` reader.
