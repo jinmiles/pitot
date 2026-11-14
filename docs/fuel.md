@@ -4,7 +4,8 @@ Shows the fuel level, the laps left in the race, and the pit window, then two es
 the average of recent clean laps (blue) and one from the last clean lap (yellow). Each gives fuel per lap, laps the
 fuel lasts, fuel to add to finish (Refuel), and fuel left at the end (negative, in red, when it does not last). A
 `PIT` sign lights when, at the average, the fuel does not last to the end. Values are liters with two decimals;
-`--.--` means not known yet. Updates once per second by default.
+`--.--` means not known yet. Updates 30 times per second by default (`rate_hz = 30.0`); it draws only when a value
+changes.
 
 - **Use per lap**: the average of the last five clean laps. A lap counts when it was driven in full under
   green-flag running, without visiting pit road and without fuel being added (any rise of more than 0.05 L).
