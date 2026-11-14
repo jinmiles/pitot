@@ -75,6 +75,12 @@ pub(crate) fn lap_difference(
     diff
 }
 
+/// A gap as its size in seconds to the tenth, without a sign: the row's place shows the side.
+fn write_gap(out: &mut FixedText, gap: f32) {
+    out.clear();
+    let _ = write!(out, "{:.1}", gap.abs());
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Laps {
     Same,
@@ -409,8 +415,7 @@ impl RelativeWidget {
             }
             row.gap.clear();
             if !row.player {
-                // As in the sim's own relative: cars ahead show a negative gap.
-                let _ = write!(row.gap, "{:+.1}", -gap);
+                write_gap(&mut row.gap, gap);
             }
         }
     }
@@ -710,6 +715,17 @@ mod tests {
         assert_eq!((class.as_str(), rating.as_str()), ("A", "1.8"));
         split_license("", &mut class, &mut rating);
         assert_eq!((class.as_str(), rating.as_str()), ("", ""));
+    }
+
+    #[test]
+    fn gaps_show_without_a_sign() {
+        let mut out = FixedText::new(12);
+        write_gap(&mut out, 1.43);
+        assert_eq!(out.as_str(), "1.4", "ahead");
+        write_gap(&mut out, -2.0);
+        assert_eq!(out.as_str(), "2.0", "behind");
+        write_gap(&mut out, -0.04);
+        assert_eq!(out.as_str(), "0.0");
     }
 
     #[test]
