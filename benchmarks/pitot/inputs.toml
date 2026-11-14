@@ -27,3 +27,6 @@ enabled = false
 
 [widgets.sectors]
 enabled = false
+
+[widgets.wind]
+enabled = false

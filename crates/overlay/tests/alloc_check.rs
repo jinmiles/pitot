@@ -12,9 +12,7 @@ use pitot_irsdk::capture::test_capture::{Item, build};
 use pitot_irsdk::layout::{VarHeader, VarType};
 use pitot_irsdk::live::{ReaderConfig, SdkNames};
 use pitot_irsdk::publish::{Publisher, PublisherConfig};
-use pitot_overlay::config::WidgetConfig;
 use pitot_overlay::pipeline::{Pipeline, RecordingConfig, Source, View};
-use pitot_overlay::widgets::{MAX_LAYERS, Redraw, SectorsWidget, Widget};
 
 /// Counts allocations on every thread while switched on: the data thread is internal to the pipeline.
 struct Counting;
@@ -330,6 +328,97 @@ fn recording_does_not_allocate_per_tick() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+const WIND_ROW: usize = 32;
+
+#[test]
+fn wind_widget_does_not_allocate_per_update() {
+    use pitot_overlay::config::WidgetConfig;
+    use pitot_overlay::widgets::{MAX_LAYERS, Redraw, Widget, WindWidget};
+
+    let _turn = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let pid = std::process::id();
+    let names = SdkNames::new(
+        &format!("Local\\PitotOverlayAllocWindMap-{pid}"),
+        &format!("Local\\PitotOverlayAllocWindEvent-{pid}"),
+    );
+    let config = PublisherConfig {
+        vars: vec![
+            VarHeader::new(VarType::Double, 0, 1, "SessionTime").expect("valid"),
+            VarHeader::new(VarType::Bool, 8, 1, "IsOnTrack").expect("valid"),
+            VarHeader::new(VarType::Float, 12, 1, "WindVel").expect("valid"),
+            VarHeader::new(VarType::Float, 16, 1, "WindDir").expect("valid"),
+            VarHeader::new(VarType::Float, 20, 1, "YawNorth").expect("valid"),
+        ],
+        buf_len: WIND_ROW,
+        num_buf: 3,
+        tick_rate: 60,
+        session_info_capacity: 4096,
+    };
+    let mut publisher = Publisher::create(&names, &config).expect("creates");
+    publisher.set_connected(true).expect("connects");
+    publisher
+        .set_session_info(b"WeekendInfo:\n TrackID: 1\n")
+        .expect("fits");
+    let reader_config = ReaderConfig {
+        retry_interval: Duration::from_millis(5),
+        idle_timeout: Duration::from_millis(50),
+    };
+    let (pipeline, mut view) =
+        Pipeline::start(names, reader_config, Vec::new(), None).expect("starts");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !view.is_connected() {
+        assert!(Instant::now() < deadline, "connects");
+        view.poll();
+        thread::sleep(Duration::from_millis(2));
+    }
+    let mut widget = WindWidget::new(&WidgetConfig {
+        enabled: true,
+        monitor: None,
+        x: 0,
+        y: 0,
+        width: None,
+        height: None,
+        rate_hz: None,
+        opacity: 0.82,
+    });
+    let mut row = [0u8; WIND_ROW];
+    // The car turns through every heading and the wind changes, so most updates have something new to show.
+    let mut cycle = |n: u32| -> bool {
+        row[0..8].copy_from_slice(&f64::from(n).to_le_bytes());
+        row[8] = 1;
+        row[12..16].copy_from_slice(&(3.0 + (n % 50) as f32 * 0.1).to_le_bytes());
+        row[16..20].copy_from_slice(&(4.7f32 + (n % 7) as f32 * 0.01).to_le_bytes());
+        row[20..24].copy_from_slice(&((n as f32 * 0.05) % std::f32::consts::TAU).to_le_bytes());
+        publisher.publish(&row).expect("publishes");
+        thread::sleep(Duration::from_millis(4));
+        view.poll();
+        view.drain_samples(|_| {});
+        let mut redraw = [Redraw::Nothing; MAX_LAYERS];
+        widget.update(&mut view, Instant::now(), &mut redraw);
+        redraw[0] != Redraw::Nothing
+    };
+    for n in 0..120 {
+        cycle(n);
+    }
+    ALLOCATIONS.store(0, Ordering::Relaxed);
+    COUNTING.store(true, Ordering::Relaxed);
+    let mut redraws = 0;
+    for n in 120..720 {
+        redraws += usize::from(cycle(n));
+    }
+    COUNTING.store(false, Ordering::Relaxed);
+    assert!(
+        redraws > 300,
+        "the reading kept changing: {redraws} redraws"
+    );
+    assert_eq!(
+        ALLOCATIONS.load(Ordering::Relaxed),
+        0,
+        "allocations across the data thread, view, and wind widget"
+    );
+    drop(pipeline);
+}
+
 const SECTORS_SESSION: &[u8] = b"---
 WeekendInfo:
  TrackID: 1
@@ -373,6 +462,9 @@ const SECTORS_ROW: usize = 16 + 72 * 4 * 2;
 
 #[test]
 fn sectors_widget_does_not_allocate_per_update() {
+    use pitot_overlay::config::WidgetConfig;
+    use pitot_overlay::widgets::{MAX_LAYERS, Redraw, SectorsWidget, Widget};
+
     let _turn = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let pid = std::process::id();
     let names = SdkNames::new(

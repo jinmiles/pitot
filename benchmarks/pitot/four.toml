@@ -47,3 +47,6 @@ opacity = 0.82
 
 [widgets.sectors]
 enabled = false
+
+[widgets.wind]
+enabled = false
