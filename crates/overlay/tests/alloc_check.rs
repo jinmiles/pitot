@@ -815,10 +815,17 @@ fn track_map_does_not_allocate_per_update() {
 }
 
 const PIT_CARS: usize = 8;
-const PIT_ON_PIT_ROAD: usize = 24 + PIT_CARS * 4 * 6;
+/// Single values first (time, session, player, fuel, laps), then seven per-car arrays and the pit road flags.
+const PIT_ARRAYS: usize = 36;
+const PIT_ON_PIT_ROAD: usize = PIT_ARRAYS + PIT_CARS * 4 * 7;
 const PIT_ROW: usize = PIT_ON_PIT_ROAD + PIT_CARS;
 const PIT_SESSION: &[u8] = b"WeekendInfo:
  TrackID: 7
+SessionInfo:
+ Sessions:
+ - SessionNum: 0
+   SessionLaps: 30
+   SessionType: Race
 DriverInfo:
  DriverCarIdx: 0
  DriverCarFuelMaxLtr: 40.000
@@ -841,32 +848,50 @@ DriverInfo:
    CarClassID: 1
 ";
 
-/// One 10 Hz tick of three cars. Car `stopper` comes onto pit road at tick `start`, stands in its stall from 1 s to
-/// 6 s later, and leaves pit road 9 s after coming in.
+/// One 10 Hz tick of a race of three cars, a lap every 10 s. The player (car 0) uses 2 L per lap. Car `stopper`
+/// comes onto pit road at tick `start`, stands in its stall from 1 s to 6 s later, and leaves pit road 9 s after
+/// coming in, 0.02 lap further on.
 fn pit_row(n: u32, stopper: usize, start: u32) -> [u8; PIT_ROW] {
     let mut row = [0u8; PIT_ROW];
     let put = |row: &mut [u8; PIT_ROW], k: usize, car: usize, bytes: [u8; 4]| {
-        let at = 24 + k * PIT_CARS * 4 + car * 4;
+        let at = PIT_ARRAYS + k * PIT_CARS * 4 + car * 4;
         row[at..at + 4].copy_from_slice(&bytes);
     };
+    let player = f64::from(n) * 0.01;
     row[0..8].copy_from_slice(&(f64::from(n) * 0.1).to_le_bytes());
-    row[20..24].copy_from_slice(&30.0f32.to_le_bytes());
+    row[20..24].copy_from_slice(&((40.0 - player * 2.0) as f32).to_le_bytes());
+    row[24..28].copy_from_slice(&(player as i32).to_le_bytes());
+    row[28..32].copy_from_slice(&(player.fract() as f32).to_le_bytes());
+    row[32..36].copy_from_slice(&(30 - player as i32).to_le_bytes());
     for car in 0..3 {
-        let mut pct = (0.3 * car as f32 + n as f32 * 0.0012) % 1.0;
+        let offset = 0.3 * car as f64;
+        let mut distance = offset + player;
         let mut surface = 3i32;
         let mut on_pit = false;
-        if car == stopper && n >= start && n - start < 90 {
-            let k = n - start;
-            on_pit = true;
-            surface = if (10..60).contains(&k) { 1 } else { 2 };
-            pct = 0.95 + k.min(10) as f32 * 0.001 + k.saturating_sub(60) as f32 * 0.001;
+        if car == stopper && n >= start {
+            let k = f64::from(n - start);
+            let entry = offset + f64::from(start) * 0.01;
+            distance = if k < 10.0 {
+                entry + k * 0.0005
+            } else if k < 60.0 {
+                entry + 0.005
+            } else if k < 90.0 {
+                entry + 0.005 + (k - 60.0) * 0.0005
+            } else {
+                entry + 0.02 + (k - 90.0) * 0.01
+            };
+            if k < 90.0 {
+                on_pit = true;
+                surface = if (10.0..60.0).contains(&k) { 1 } else { 2 };
+            }
         }
-        put(&mut row, 0, car, pct.to_le_bytes());
+        put(&mut row, 0, car, (distance.fract() as f32).to_le_bytes());
         put(&mut row, 1, car, surface.to_le_bytes());
-        put(&mut row, 2, car, (n as i32 / 800).to_le_bytes());
-        put(&mut row, 3, car, 80.0f32.to_le_bytes());
+        put(&mut row, 2, car, (distance as i32).to_le_bytes());
+        put(&mut row, 3, car, 10.0f32.to_le_bytes());
         put(&mut row, 4, car, 1i32.to_le_bytes());
         put(&mut row, 5, car, (car as i32 + 1).to_le_bytes());
+        put(&mut row, 6, car, (2.0 * car as f32).to_le_bytes());
         row[PIT_ON_PIT_ROAD + car] = u8::from(on_pit);
     }
     row
@@ -884,7 +909,13 @@ fn pit_widget_does_not_allocate_per_update() {
         &format!("Local\\PitotOverlayAllocPitEvent-{pid}"),
     );
     let array = |t, k: usize, name| {
-        VarHeader::new(t, (24 + k * PIT_CARS * 4) as i32, PIT_CARS as i32, name).expect("valid")
+        VarHeader::new(
+            t,
+            (PIT_ARRAYS + k * PIT_CARS * 4) as i32,
+            PIT_CARS as i32,
+            name,
+        )
+        .expect("valid")
     };
     let config = PublisherConfig {
         vars: vec![
@@ -893,12 +924,16 @@ fn pit_widget_does_not_allocate_per_update() {
             VarHeader::new(VarType::Int, 12, 1, "PlayerCarIdx").expect("valid"),
             VarHeader::new(VarType::Bool, 16, 1, "PlayerCarInPitStall").expect("valid"),
             VarHeader::new(VarType::Float, 20, 1, "FuelLevel").expect("valid"),
+            VarHeader::new(VarType::Int, 24, 1, "LapCompleted").expect("valid"),
+            VarHeader::new(VarType::Float, 28, 1, "LapDistPct").expect("valid"),
+            VarHeader::new(VarType::Int, 32, 1, "SessionLapsRemainEx").expect("valid"),
             array(VarType::Float, 0, "CarIdxLapDistPct"),
             array(VarType::Int, 1, "CarIdxTrackSurface"),
             array(VarType::Int, 2, "CarIdxLapCompleted"),
             array(VarType::Float, 3, "CarIdxBestLapTime"),
             array(VarType::Int, 4, "CarIdxClass"),
             array(VarType::Int, 5, "CarIdxClassPosition"),
+            array(VarType::Float, 6, "CarIdxF2Time"),
             VarHeader::new(
                 VarType::Bool,
                 PIT_ON_PIT_ROAD as i32,
@@ -941,6 +976,7 @@ fn pit_widget_does_not_allocate_per_update() {
         opacity: 0.8,
     };
     let mut widget = PitWidget::with_store(&widget_config, None);
+    let mut redraws = 0usize;
     let mut cycle = |n: u32, stopper: usize, start: u32| {
         publisher
             .publish(&pit_row(n, stopper, start))
@@ -949,16 +985,17 @@ fn pit_widget_does_not_allocate_per_update() {
         view.poll();
         let mut redraw = [Redraw::Nothing; MAX_LAYERS];
         widget.update(&mut view, Instant::now(), &mut redraw);
+        redraws += usize::from(redraw[0] != Redraw::Nothing);
     };
-    // Warm-up: car 1 makes a stop.
-    for n in 1..300 {
-        cycle(n, 1, 100);
+    // Warm-up: three laps for the fuel use, and car 1 makes a stop that measures the pit lane loss.
+    for n in 1..400 {
+        cycle(n, 1, 320);
     }
     ALLOCATIONS.store(0, Ordering::Relaxed);
     COUNTING.store(true, Ordering::Relaxed);
-    // Car 2, another car model, makes a stop while counting.
-    for n in 300..700 {
-        cycle(n, 2, 400);
+    // Car 2, another car model, makes a stop while counting, and the next stops and rejoins are estimated.
+    for n in 400..800 {
+        cycle(n, 2, 500);
     }
     COUNTING.store(false, Ordering::Relaxed);
     assert_eq!(
@@ -966,6 +1003,7 @@ fn pit_widget_does_not_allocate_per_update() {
         0,
         "allocations across the data thread and the pit widget's updates"
     );
+    assert!(redraws > 0, "the widget had something to draw");
     drop(widget);
     drop(pipeline);
 }
