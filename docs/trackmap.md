@@ -106,7 +106,11 @@ per-car buffers are sized once.
 
 ## Cost
 
-CIRCLE_COST
+The circle, against the outline it replaced as the default: lab PC (Parsec virtual display, release builds), the
+public AI race capture at 1x, the four reference widgets with the pit widget and the map (the outline with track
+18 saved, against the circle), a learned lane loss so the pit exit shows, `pitot-bench collect` for 60 s after a
+12 s warm-up, alternating: overlay CPU 32.62 and 27.79 ms/s with the outline, 27.73 and 26.61 ms/s with the circle;
+private bytes at most 21.8 and 19.0 MB against 21.9 and 18.1 MB. No cost shows above the run-to-run spread.
 
 The outline, when it was added: lab PC (Parsec virtual display, release build), the public AI race capture
 replayed at 1x with the track's outline saved, `pitot-bench collect` for 60 s after a 12 s warm-up, the four reference widgets with the map off and on,
