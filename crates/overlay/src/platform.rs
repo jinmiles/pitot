@@ -20,6 +20,7 @@ use windows::Win32::Storage::FileSystem::{
     FILE_NOTIFY_CHANGE_FILE_NAME, FILE_NOTIFY_CHANGE_LAST_WRITE, FindCloseChangeNotification,
     FindFirstChangeNotificationW, FindNextChangeNotification,
 };
+use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::SystemInformation::GetLocalTime;
 use windows::Win32::System::Threading::{
@@ -32,7 +33,8 @@ use windows::Win32::UI::HiDpi::{
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
 use windows::Win32::UI::Shell::{
-    NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW, Shell_NotifyIconW,
+    FOLDERID_Documents, KF_FLAG_DEFAULT, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE,
+    NOTIFYICONDATAW, SHGetKnownFolderPath, Shell_NotifyIconW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow,
@@ -100,6 +102,18 @@ pub fn local_time() -> LocalTime {
         minute: t.wMinute,
         second: t.wSecond,
         millis: t.wMilliseconds,
+    }
+}
+
+/// The user's Documents folder, where it is now (it may be redirected, for example into OneDrive).
+pub fn documents_dir() -> Option<std::path::PathBuf> {
+    // SAFETY: SHGetKnownFolderPath returns a NUL-terminated string allocated with CoTaskMemAlloc, which is read
+    // once and then freed exactly once.
+    unsafe {
+        let path = SHGetKnownFolderPath(&FOLDERID_Documents, KF_FLAG_DEFAULT, None).ok()?;
+        let text = path.to_string();
+        CoTaskMemFree(Some(path.as_ptr().cast()));
+        text.ok().map(std::path::PathBuf::from)
     }
 }
 

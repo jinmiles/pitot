@@ -33,11 +33,13 @@ Every shared value is an atomic, so the pipeline has no `unsafe` and no data rac
 
 `View::display` returns:
 - `Disconnected` without a connection or before its first tick,
-- `Driving` when `IsOnTrack` is set and `IsReplayPlaying` is not,
+- `Replay` when `IsReplayPlaying` is set: the sim plays a replay and no capture of it shows,
+- `Driving` when `IsOnTrack` is set,
 - `Idle` otherwise.
 
-Widgets hide and the render loop can sleep outside `Driving`. While a capture plays during a sim replay, the
-values are the capture's, so the state is the one recorded at the replayed moment.
+Widgets hide and the render loop can sleep outside `Driving`; only the tire widget, which has its own source for
+replays (below), also shows in `Replay`. While a capture plays during a sim replay, the values are the
+capture's, so the state is the one recorded at the replayed moment.
 
 ## Recording
 
@@ -101,6 +103,25 @@ So the overlay shows a [capture](capture-format.md) of the session instead:
    recorded when it was indexed is searched again when the replay passes its end.
 4. When the replay ends, the live values show again on a new connection, and the live session info is sent
    again. The capture's buffers are freed.
+
+### The sim's telemetry files
+
+Live telemetry, and so a capture, has no tire surface temperatures or hot pressures: the sim writes them only to
+its own `.ibt` files, while its telemetry recording is on (one file per stint in the car, in
+`Documents\iRacing\telemetry` unless [configured](configuration.md#telemetry-files)). For replays, the tire
+widget asks the session thread for those files (`View::want_tires`), at most every 10 s and only while the
+samples it has do not cover the replayed moment:
+
+- A file belongs to the session by the `SubSessionID` in its session info. An online session takes every
+  file of its `SubSessionID`; an offline session (`SubSessionID` 0) takes the newest file of its track that
+  covers the moment. Files are listed and identified again only when their time or size changes.
+- Each file is read five samples a second (every twelfth record at 60 Hz): `SessionNum`, `SessionTime`, and per
+  tire the surface temperature, tread, and hot pressure at the left, middle, and right, kept in 72 bytes per
+  sample (about 1.3 MB per hour of driving). A file the sim is still writing (its record count is 0 until it
+  closes the file) is read on from the last record read when it has grown.
+- The samples reach the render thread as immutable shared segments. The widget looks up the replayed moment by
+  binary search: the moment a capture shows while one plays, else `ReplaySessionNum` and `ReplaySessionTime`.
+  A moment more than 0.5 s after the last sample before it (between stints) has none.
 
 Opening the capture reads at most one chunk at a time, and every buffer is sized for the largest chunk and
 session info text while indexing, so playing does not allocate per tick. The decoded chunk is the main cost:

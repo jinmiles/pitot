@@ -235,9 +235,10 @@ fn replays_show_the_capture_at_the_replayed_moment() {
     assert_eq!(restarted.len(), 66, "from the start of the capture");
     assert_eq!(restarted.first().map(|s| s.tick), Some(1000));
 
-    // Outside the capture, the live values show and the widgets hide.
+    // Outside the capture, the live values show, in the replay state: widgets without their own source for
+    // replays hide.
     wait_for(&mut view, &mut sim, Some(START - 30.0), "outside", |v| {
-        v.display() == Display::Idle
+        v.display() == Display::Replay
     });
     assert_eq!(view.source(), Some(Source::SimAgain));
 
