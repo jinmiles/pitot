@@ -1127,6 +1127,13 @@ const RED: u32 = 0xFF_6B5E;
 const PURPLE: u32 = 0xB4_5CFF;
 const BACKGROUND: u32 = 0x10_1418;
 
+/// Rows up to and including the last one in use.
+fn used_rows(rows: &[Row]) -> usize {
+    rows.iter()
+        .rposition(|row| !matches!(row, Row::Empty))
+        .map_or(0, |last| last + 1)
+}
+
 impl StandingsWidget {
     fn draw_header(&self, canvas: &mut Canvas<'_>, y: f32, header: &HeaderRow) {
         let w = self.width as f32;
@@ -1444,9 +1451,10 @@ impl Widget for StandingsWidget {
     }
 
     fn draw(&self, _layer: usize, canvas: &mut Canvas<'_>) {
-        let (w, h) = (self.width as f32, self.height as f32);
+        let w = self.width as f32;
+        // The background ends at the last row in use; below it the widget stays transparent.
         canvas.fill(
-            Rect::new(0.0, 0.0, w, h),
+            Rect::new(0.0, 0.0, w, used_rows(&self.rows) as f32 * ROW_HEIGHT),
             Color::rgb(BACKGROUND, self.opacity),
         );
         let cols = Columns::for_width(w, self.sectors.len());
@@ -1479,6 +1487,16 @@ impl Widget for StandingsWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_background_ends_at_the_last_row_in_use() {
+        let mut rows = vec![Row::Empty; 5];
+        assert_eq!(used_rows(&rows), 0);
+        rows[2] = Row::Header(HeaderRow::new());
+        assert_eq!(used_rows(&rows), 3);
+        rows[0] = Row::Header(HeaderRow::new());
+        assert_eq!(used_rows(&rows), 3);
+    }
 
     #[test]
     fn lap_times_are_minutes_and_seconds() {
