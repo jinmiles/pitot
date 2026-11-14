@@ -5,6 +5,8 @@
 
 mod fuel;
 mod inputs;
+mod pit;
+mod pitstops;
 mod relative;
 mod sectors;
 mod standings;
@@ -19,6 +21,7 @@ use std::time::{Duration, Instant};
 
 pub use fuel::FuelWidget;
 pub use inputs::InputTraceWidget;
+pub use pit::PitWidget;
 pub use relative::RelativeWidget;
 pub use sectors::SectorsWidget;
 pub use standings::StandingsWidget;

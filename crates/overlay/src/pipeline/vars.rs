@@ -32,6 +32,7 @@ vars! {
     replay_session_time => "ReplaySessionTime",
     replay_play_speed => "ReplayPlaySpeed",
     on_pit_road => "OnPitRoad",
+    player_in_pit_stall => "PlayerCarInPitStall",
     player_car_idx => "PlayerCarIdx",
     speed => "Speed",
     gear => "Gear",

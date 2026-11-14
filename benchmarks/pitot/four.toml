@@ -45,6 +45,9 @@ height = 150
 rate_hz = 1.0
 opacity = 0.82
 
+[widgets.pit]
+enabled = false
+
 [widgets.sectors]
 enabled = false
 

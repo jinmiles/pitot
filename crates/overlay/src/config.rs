@@ -29,6 +29,11 @@ pub fn previous_log_file() -> Option<PathBuf> {
     config_dir().map(|dir| dir.join("pitot.previous.log"))
 }
 
+/// What the pit widget learns (refueling speed by car, pit lane loss by track), inside [`config_dir`].
+pub fn pit_file() -> Option<PathBuf> {
+    config_dir().map(|dir| dir.join("pit.toml"))
+}
+
 /// Where the overlay records sessions: `captures` inside [`config_dir`].
 pub fn recordings_dir() -> Option<PathBuf> {
     config_dir().map(|dir| dir.join("captures"))
@@ -108,6 +113,16 @@ y = 900
 width = 420
 height = 150
 rate_hz = 1.0
+opacity = 0.82
+
+# Other cars' pit stops: standing time, the fuel it allows, and the pit lane loss. See docs/pit.md.
+[widgets.pit]
+enabled = true
+x = 800
+y = 240
+width = 400
+height = 280
+rate_hz = 10.0
 opacity = 0.82
 
 # The player's time in each sector against their best, the class's best, and the cars ahead and behind.
@@ -197,6 +212,7 @@ pub struct Widgets {
     pub relative: WidgetConfig,
     pub standings: WidgetConfig,
     pub fuel: WidgetConfig,
+    pub pit: WidgetConfig,
     pub sectors: WidgetConfig,
     pub wind: WidgetConfig,
     pub tires: WidgetConfig,
@@ -221,6 +237,7 @@ impl Default for Widgets {
             relative: widget(1460, 560, Some((460, 300)), Some(10.0)),
             standings: widget(24, 260, Some((760, 560)), Some(2.0)),
             fuel: widget(1460, 900, Some((420, 150)), Some(1.0)),
+            pit: widget(800, 240, Some((400, 280)), Some(10.0)),
             sectors: widget(800, 24, Some((400, 200)), Some(5.0)),
             wind: widget(1460, 370, Some((200, 170)), Some(5.0)),
             tires: widget(1680, 370, Some((220, 170)), Some(1.0)),
@@ -262,6 +279,7 @@ struct FileWidgets {
     relative: WidgetPatch,
     standings: WidgetPatch,
     fuel: WidgetPatch,
+    pit: WidgetPatch,
     sectors: WidgetPatch,
     wind: WidgetPatch,
     tires: WidgetPatch,
@@ -355,6 +373,7 @@ impl Config {
                 relative: w.relative.apply(defaults.relative),
                 standings: w.standings.apply(defaults.standings),
                 fuel: w.fuel.apply(defaults.fuel),
+                pit: w.pit.apply(defaults.pit),
                 sectors: w.sectors.apply(defaults.sectors),
                 wind: w.wind.apply(defaults.wind),
                 tires: w.tires.apply(defaults.tires),
@@ -366,7 +385,7 @@ impl Config {
     }
 
     /// Widget configurations by name, in a fixed order.
-    pub fn widgets(&self) -> [(&'static str, &WidgetConfig); 9] {
+    pub fn widgets(&self) -> [(&'static str, &WidgetConfig); 10] {
         let w = &self.widgets;
         [
             ("status", &w.status),
@@ -374,6 +393,7 @@ impl Config {
             ("relative", &w.relative),
             ("standings", &w.standings),
             ("fuel", &w.fuel),
+            ("pit", &w.pit),
             ("sectors", &w.sectors),
             ("wind", &w.wind),
             ("tires", &w.tires),
@@ -390,6 +410,7 @@ impl Config {
             "relative" => Some(&mut w.relative),
             "standings" => Some(&mut w.standings),
             "fuel" => Some(&mut w.fuel),
+            "pit" => Some(&mut w.pit),
             "sectors" => Some(&mut w.sectors),
             "wind" => Some(&mut w.wind),
             "tires" => Some(&mut w.tires),
