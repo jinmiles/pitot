@@ -47,6 +47,23 @@ Most of each error is one offset for the whole lap (up to 1.4 m); the shape itse
 every tick (60 Hz) the errors are the same within 0.05 m, so the widget integrates at its own rate instead of on
 the data thread. At the default size, one pixel is about 3 m at these tracks.
 
+## Pit exit
+
+An orange ring marks where the player would rejoin after a stop made now: the player's lap distance moved back by
+the stop's expected loss, converted with the player's last lap time (else the session's estimated lap time). The
+loss is the pit lane loss measured at this track plus the standing time for the fuel the stop adds (see
+[pit.md](pit.md#pit-lane-loss)), from the pit tracker the map shares with the pit widget:
+
+- in a race, once the fuel use per lap is known: the fuel left to finish (laps to go times fuel per lap, less the
+  fuel in the tank), within the room left in the tank;
+- otherwise, filling the tank.
+
+The ring shows only once the pit lane loss is measured at the track (until then the pit widget shows `--.-`), and
+not while the player is on pit road or after the checkered flag. The conversion uses the lap's average speed:
+where the field is slower or faster than average around the rejoin point, the ring is off by that difference.
+Where other cars rejoin after their next stops is in the pit widget, as an order and a gap at each car's own
+future stop; it is not drawn, since it is not a place on the current map.
+
 ## Orientation
 
 North is up, unless turning the map fills the widget better: of the turns in 5 degree steps, the one that draws the

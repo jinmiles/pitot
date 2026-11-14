@@ -10,10 +10,12 @@
 //! stops and the values remembered between sessions (`pit.toml` in the configuration directory), so a widget needs
 //! one call per update.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::fs;
 use std::path::PathBuf;
+use std::rc::Rc;
 
 use pitot_irsdk::live::Snapshot;
 use pitot_irsdk::session::SessionInfo;
@@ -36,6 +38,9 @@ pub(crate) const DEFAULT_REFUEL_RATE: f32 = 10.7;
 const STILL_PCT: f32 = 1.0e-6;
 /// A longer pause between observations (the widget was hidden) or time going back restarts the following.
 const MAX_STEP: f64 = 2.0;
+/// Least ticks between two observations. Widgets that share a tracker each observe at their own rate; one that
+/// asks just after another did is skipped, so the stops are followed about once per update, not once per widget.
+const MIN_OBSERVE_TICKS: i32 = 5;
 /// Pit lane losses kept for the median, over all cars.
 const LOSSES: usize = 9;
 /// Pit lane losses outside this range are not counted (a tow, a long repair, a timing gap).
@@ -386,6 +391,9 @@ impl Learned {
     }
 }
 
+/// One tracker for every widget that needs the stops (the pit widget and the track map).
+pub(crate) type SharedPitTracker = Rc<RefCell<PitTracker>>;
+
 /// Stops, the refueling speed, and the learned values, kept up to date from the view.
 #[derive(Debug)]
 pub(crate) struct PitTracker {
@@ -402,6 +410,8 @@ pub(crate) struct PitTracker {
     car: String,
     player_stops: u16,
     model: PitModel,
+    /// Tick of the last observation.
+    last_tick: Option<i32>,
 }
 
 impl PitTracker {
@@ -417,13 +427,27 @@ impl PitTracker {
             car: String::with_capacity(64),
             player_stops: 0,
             model: PitModel::default(),
+            last_tick: None,
         }
+    }
+
+    /// A tracker to share between widgets.
+    pub(crate) fn shared(store: Option<PathBuf>) -> SharedPitTracker {
+        Rc::new(RefCell::new(Self::new(store)))
     }
 
     /// Takes the latest tick. Allocates only when the session's track or car changes, or when a stop of the
     /// player's saves what was learned.
     pub(crate) fn observe(&mut self, view: &View) {
         let (snap, vars, session) = (view.snapshot(), view.vars(), view.session());
+        let tick = snap.tick();
+        if self
+            .last_tick
+            .is_some_and(|last| tick >= last && tick - last < MIN_OBSERVE_TICKS)
+        {
+            return;
+        }
+        self.last_tick = Some(tick);
         let Some(time) = snap.f64(vars.session_time, 0) else {
             return;
         };
@@ -530,6 +554,7 @@ impl PitTracker {
         self.car.clear();
         self.player_stops = 0;
         self.model = PitModel::default();
+        self.last_tick = None;
     }
 }
 

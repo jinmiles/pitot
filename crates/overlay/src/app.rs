@@ -6,6 +6,7 @@
 //! renderer and redraws everything. A configuration change rebuilds windows and widgets; the data pipeline
 //! keeps running.
 
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use pitot_irsdk::live::{ReaderConfig, SdkNames};
@@ -19,8 +20,9 @@ use crate::platform::{
 };
 use crate::render::{Canvas, Layer, RenderError, Renderer, WindowTarget};
 use crate::widgets::{
-    FuelWidget, InputTraceWidget, MAX_LAYERS, PitWidget, Redraw, RelativeWidget, SectorsWidget,
-    StandingsWidget, StatusWidget, TiresWidget, TrackMapWidget, Widget, WindWidget,
+    FuelWidget, InputTraceWidget, MAX_LAYERS, PitTracker, PitWidget, Redraw, RelativeWidget,
+    SectorsWidget, SharedPitTracker, StandingsWidget, StatusWidget, TiresWidget, TrackMapWidget,
+    Widget, WindWidget,
 };
 
 /// Saving a file often takes several writes; reload once they settle.
@@ -65,18 +67,22 @@ struct Layout {
 
 /// Builds the enabled widgets that exist so far. Widgets that are configured but not implemented yet are
 /// skipped.
-fn create_widget(name: &str, config: &WidgetConfig) -> Option<Box<dyn Widget>> {
+fn create_widget(
+    name: &str,
+    config: &WidgetConfig,
+    pit: &SharedPitTracker,
+) -> Option<Box<dyn Widget>> {
     match name {
         "status" => Some(Box::new(StatusWidget::new(config.opacity))),
         "inputs" => Some(Box::new(InputTraceWidget::new(config))),
         "relative" => Some(Box::new(RelativeWidget::new(config))),
         "standings" => Some(Box::new(StandingsWidget::new(config))),
         "fuel" => Some(Box::new(FuelWidget::new(config))),
-        "pit" => Some(Box::new(PitWidget::new(config))),
+        "pit" => Some(Box::new(PitWidget::new(config, Rc::clone(pit)))),
         "sectors" => Some(Box::new(SectorsWidget::new(config))),
         "wind" => Some(Box::new(WindWidget::new(config))),
         "tires" => Some(Box::new(TiresWidget::new(config))),
-        "trackmap" => Some(Box::new(TrackMapWidget::new(config))),
+        "trackmap" => Some(Box::new(TrackMapWidget::new(config, Rc::clone(pit)))),
         _ => None,
     }
 }
@@ -90,11 +96,13 @@ impl Layout {
         let mut window_monitors: Vec<usize> = Vec::new();
         let mut slots = Vec::new();
         let now = Instant::now();
+        // The pit widget and the track map follow the stops together.
+        let pit = PitTracker::shared(config::pit_file());
         for (name, widget_config) in config.widgets() {
             if !widget_config.enabled {
                 continue;
             }
-            let Some(widget) = create_widget(name, widget_config) else {
+            let Some(widget) = create_widget(name, widget_config, &pit) else {
                 continue;
             };
             let monitor = widget_config
