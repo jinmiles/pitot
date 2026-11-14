@@ -13,6 +13,7 @@ mod standings;
 mod status;
 mod text;
 mod timing;
+mod tires;
 mod wind;
 
 use std::time::{Duration, Instant};
@@ -24,6 +25,7 @@ pub use relative::RelativeWidget;
 pub use sectors::SectorsWidget;
 pub use standings::StandingsWidget;
 pub use status::StatusWidget;
+pub use tires::TiresWidget;
 pub use wind::WindWidget;
 
 use crate::pipeline::{Display, View};

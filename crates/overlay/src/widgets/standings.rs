@@ -290,15 +290,21 @@ struct Class {
 }
 
 /// Tire compound colors by `TireCompoundType`.
-fn tire_color(compound: &str) -> u32 {
-    let c = compound.to_ascii_lowercase();
-    if c.contains("wet") || c.contains("rain") {
+pub(crate) fn tire_color(compound: &str) -> u32 {
+    // Case-insensitive search without lowercasing into a new string.
+    let has = |word: &str| {
+        compound
+            .as_bytes()
+            .windows(word.len())
+            .any(|w| w.eq_ignore_ascii_case(word.as_bytes()))
+    };
+    if has("wet") || has("rain") {
         0x4F_A3FF
-    } else if c.contains("inter") {
+    } else if has("inter") {
         0x3D_D68C
-    } else if c.contains("soft") {
+    } else if has("soft") {
         0xFF_4D4D
-    } else if c.contains("medium") {
+    } else if has("medium") {
         0xFF_D24D
     } else {
         0xE8_EAED

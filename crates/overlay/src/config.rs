@@ -138,6 +138,16 @@ width = 200
 height = 170
 rate_hz = 5.0
 opacity = 0.82
+
+# Wear and carcass temperatures are from the last pit stall visit: the sim updates them only there.
+[widgets.tires]
+enabled = true
+x = 1680
+y = 370
+width = 220
+height = 170
+rate_hz = 1.0
+opacity = 0.82
 "#;
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -189,6 +199,7 @@ pub struct Widgets {
     pub pit: WidgetConfig,
     pub sectors: WidgetConfig,
     pub wind: WidgetConfig,
+    pub tires: WidgetConfig,
 }
 
 impl Default for Widgets {
@@ -212,6 +223,7 @@ impl Default for Widgets {
             pit: widget(800, 240, Some((400, 280)), Some(10.0)),
             sectors: widget(800, 24, Some((400, 200)), Some(5.0)),
             wind: widget(1460, 370, Some((200, 170)), Some(5.0)),
+            tires: widget(1680, 370, Some((220, 170)), Some(1.0)),
         }
     }
 }
@@ -252,6 +264,7 @@ struct FileWidgets {
     pit: WidgetPatch,
     sectors: WidgetPatch,
     wind: WidgetPatch,
+    tires: WidgetPatch,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -344,6 +357,7 @@ impl Config {
                 pit: w.pit.apply(defaults.pit),
                 sectors: w.sectors.apply(defaults.sectors),
                 wind: w.wind.apply(defaults.wind),
+                tires: w.tires.apply(defaults.tires),
             },
         };
         config.validate()?;
@@ -351,7 +365,7 @@ impl Config {
     }
 
     /// Widget configurations by name, in a fixed order.
-    pub fn widgets(&self) -> [(&'static str, &WidgetConfig); 8] {
+    pub fn widgets(&self) -> [(&'static str, &WidgetConfig); 9] {
         let w = &self.widgets;
         [
             ("status", &w.status),
@@ -362,6 +376,7 @@ impl Config {
             ("pit", &w.pit),
             ("sectors", &w.sectors),
             ("wind", &w.wind),
+            ("tires", &w.tires),
         ]
     }
 
@@ -377,6 +392,7 @@ impl Config {
             "pit" => Some(&mut w.pit),
             "sectors" => Some(&mut w.sectors),
             "wind" => Some(&mut w.wind),
+            "tires" => Some(&mut w.tires),
             _ => None,
         }
     }

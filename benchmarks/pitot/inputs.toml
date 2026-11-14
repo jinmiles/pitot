@@ -33,3 +33,6 @@ enabled = false
 
 [widgets.wind]
 enabled = false
+
+[widgets.tires]
+enabled = false
