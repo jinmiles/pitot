@@ -29,6 +29,17 @@ without per-tick allocations.
 
 Every shared value is an atomic, so the pipeline has no `unsafe` and no data races.
 
+## Variables
+
+The data thread copies only the variables it was asked for, resolved by name once per connection.
+`pipeline::Vars` holds those of the pipeline and the first widgets. A widget that reads others declares them in
+its own module with `var_group!` ([adding a widget](overlay-rendering.md#adding-a-widget)), and `Pipeline::start`
+registers every widget's group after `Vars`, in the order of the widget list. A name asked for again keeps its
+first handle (`VarSet::add`), so it is copied once however many groups name it. `View::var_set` is the whole set,
+and `View::resolve::<G>()` gives a group's handles; the render thread resolves each widget's group when it makes the
+widget. Every group is registered whether its widget is on or not, so turning a widget on needs no new
+connection. A variable the sim does not publish reads as `None`.
+
 ## Display state
 
 `View::display` returns:

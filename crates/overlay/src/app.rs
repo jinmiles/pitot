@@ -6,24 +6,19 @@
 //! renderer and redraws everything. A configuration change rebuilds windows and widgets; the data pipeline
 //! keeps running.
 
-use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use pitot_irsdk::live::{ReaderConfig, SdkNames};
+use pitot_irsdk::live::{ReaderConfig, SdkNames, VarSet};
 use tracing::{debug, info, warn};
 
-use crate::config::{self, Config, WidgetConfig};
+use crate::config::{self, Config};
 use crate::pipeline::{Display, Pipeline, RecordingConfig, Source, View};
 use crate::platform::{
     self, CONTROL_EXE, ControlEvent, DirectoryWatch, Monitor, MoveHandle, OverlayWindow,
     ScreenRect, Timer, Tray, TrayCommand, Wake, WidgetMove,
 };
 use crate::render::{Canvas, Layer, RenderError, Renderer, WindowTarget};
-use crate::widgets::{
-    FuelWidget, InputTraceWidget, MAX_LAYERS, PitTracker, PitWidget, Redraw, RelativeWidget,
-    SectorsWidget, SharedPitTracker, SharedTrackClock, StandingsWidget, StatusWidget, TiresWidget,
-    TrackClock, TrackMapWidget, Widget, WindWidget,
-};
+use crate::widgets::{self, Build, MAX_LAYERS, Redraw, Shared, Widget};
 
 /// Saving a file often takes several writes; reload once they settle.
 const RELOAD_DELAY: Duration = Duration::from_millis(250);
@@ -63,39 +58,17 @@ struct Slot {
 struct Layout {
     windows: Vec<OverlayWindow>,
     slots: Vec<Slot>,
-}
-
-/// Builds the enabled widgets that exist so far. Widgets that are configured but not implemented yet are
-/// skipped.
-fn create_widget(
-    name: &str,
-    config: &WidgetConfig,
-    pit: &SharedPitTracker,
-    clock: &SharedTrackClock,
-) -> Option<Box<dyn Widget>> {
-    match name {
-        "status" => Some(Box::new(StatusWidget::new(config.opacity))),
-        "inputs" => Some(Box::new(InputTraceWidget::new(config))),
-        "relative" => Some(Box::new(RelativeWidget::with_clock(
-            config,
-            Rc::clone(clock),
-        ))),
-        "standings" => Some(Box::new(StandingsWidget::with_clock(
-            config,
-            Rc::clone(clock),
-        ))),
-        "fuel" => Some(Box::new(FuelWidget::new(config))),
-        "pit" => Some(Box::new(PitWidget::new(config, Rc::clone(pit)))),
-        "sectors" => Some(Box::new(SectorsWidget::new(config))),
-        "wind" => Some(Box::new(WindWidget::new(config))),
-        "tires" => Some(Box::new(TiresWidget::new(config))),
-        "trackmap" => Some(Box::new(TrackMapWidget::new(config, Rc::clone(pit)))),
-        _ => None,
-    }
+    /// The trackers the widgets share, such as the clock that times gaps for the standings and the relative.
+    shared: Shared,
 }
 
 impl Layout {
-    fn build(config: &Config, monitors: &[Monitor]) -> Result<Self, platform::PlatformError> {
+    /// Makes every enabled widget of the registry, with its variables resolved in `vars` (the pipeline's set).
+    fn build(
+        config: &Config,
+        monitors: &[Monitor],
+        vars: &VarSet,
+    ) -> Result<Self, platform::PlatformError> {
         let rects: Vec<(i32, i32)> = monitors.iter().map(|m| (m.rect.x, m.rect.y)).collect();
         let order = config::monitor_order(&rects);
         let primary = monitors.iter().position(|m| m.primary).unwrap_or(0);
@@ -103,15 +76,16 @@ impl Layout {
         let mut window_monitors: Vec<usize> = Vec::new();
         let mut slots = Vec::new();
         let now = Instant::now();
-        // The pit widget and the track map follow the stops together.
-        let pit = PitTracker::shared(config::pit_file());
-        // The standings and the relative time gaps from one clock.
-        let clock = TrackClock::shared();
+        let shared = Shared::new();
         for (name, widget_config) in config.widgets() {
             if !widget_config.enabled {
                 continue;
             }
-            let Some(widget) = create_widget(name, widget_config, &pit, &clock) else {
+            let cx = Build {
+                config: widget_config,
+                shared: &shared,
+            };
+            let Some(widget) = widgets::make_widget(name, &cx, vars) else {
                 continue;
             };
             let monitor = widget_config
@@ -141,7 +115,11 @@ impl Layout {
                 stale: true,
             });
         }
-        Ok(Self { windows, slots })
+        Ok(Self {
+            windows,
+            slots,
+            shared,
+        })
     }
 }
 
@@ -274,7 +252,25 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     if monitors.is_empty() {
         return Err("no monitors found".into());
     }
-    let mut layout = Layout::build(&config, &monitors)?;
+    let recording = config
+        .recording
+        .enabled
+        .then(config::recordings_dir)
+        .flatten()
+        .map(|dir| RecordingConfig {
+            dir,
+            max_bytes: (f64::from(config.recording.max_gb) * 1.0e9) as u64,
+        });
+    // First, so the widgets can resolve their variables in its set.
+    let (pipeline, mut view) = Pipeline::start(
+        SdkNames::sim(),
+        ReaderConfig::default(),
+        config::capture_dirs(),
+        recording,
+    )?;
+    let documents = platform::documents_dir();
+    view.set_telemetry_folders(config::telemetry_dirs(&config.telemetry, documents.clone()));
+    let mut layout = Layout::build(&config, &monitors, view.var_set())?;
     let tray = Tray::create()?;
     // A Pitot window open from before learns that the overlay runs now.
     platform::notify_control(ControlEvent::State {
@@ -291,23 +287,6 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         Some(device) => Some(Scene::build(device, &layout)?),
         None => None,
     };
-    let recording = config
-        .recording
-        .enabled
-        .then(config::recordings_dir)
-        .flatten()
-        .map(|dir| RecordingConfig {
-            dir,
-            max_bytes: (f64::from(config.recording.max_gb) * 1.0e9) as u64,
-        });
-    let (pipeline, mut view) = Pipeline::start(
-        SdkNames::sim(),
-        ReaderConfig::default(),
-        config::capture_dirs(),
-        recording,
-    )?;
-    let documents = platform::documents_dir();
-    view.set_telemetry_folders(config::telemetry_dirs(&config.telemetry, documents.clone()));
     let timer = Timer::new()?;
     let mut reload_at: Option<Instant> = None;
     // Chosen from the tray menu: no widget is updated or drawn.
@@ -395,7 +374,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                         // Release GPU objects before their windows go away.
                         scene = None;
                         let moving = handles.take().is_some();
-                        layout = Layout::build(&fresh, &platform::monitors())?;
+                        layout = Layout::build(&fresh, &platform::monitors(), view.var_set())?;
                         config = fresh;
                         // New windows go above the old handles, so the handles are made again.
                         if moving {
@@ -423,6 +402,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 slot.widget.reset();
                 slot.stale = true;
             }
+            layout.shared.reset();
         }
         if renderer.is_none() {
             renderer = Renderer::new()

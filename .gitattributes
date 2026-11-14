@@ -1,0 +1,4 @@
+# Lists that every new widget adds one line to. Branches that each add a line merge by keeping both lines; a line
+# changed on two branches is kept twice, which the build (a widget declared twice) or the docs test catches.
+crates/overlay/src/widgets/list.rs merge=union
+docs/widgets.md merge=union

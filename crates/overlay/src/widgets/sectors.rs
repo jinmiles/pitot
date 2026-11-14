@@ -12,14 +12,14 @@ use std::time::{Duration, Instant};
 
 use pitot_irsdk::session::{Session, SessionInfo};
 
-use crate::config::WidgetConfig;
+use crate::config::{NoOptions, WidgetConfig};
 use crate::pipeline::View;
 use crate::render::{Align, Canvas, Color, Rect};
 
 use super::standings::write_lap_time;
 use super::text::FixedText;
 use super::timing::{MAX_SECTORS, SectorClock, SectorStarts};
-use super::{MAX_LAYERS, Redraw, Widget};
+use super::{Build, MAX_LAYERS, Redraw, Register, Widget};
 
 const HEADER_HEIGHT: f32 = 22.0;
 const MAX_ROW_HEIGHT: f32 = 24.0;
@@ -468,6 +468,15 @@ impl SectorsWidget {
     }
 }
 
+impl Register for SectorsWidget {
+    type Vars = ();
+    type Options = NoOptions;
+
+    fn build(cx: &Build<'_>, _: ()) -> Self {
+        Self::new(cx.config)
+    }
+}
+
 impl Widget for SectorsWidget {
     fn size(&self) -> (u32, u32) {
         (self.width, self.height)
@@ -829,7 +838,7 @@ SplitTimeInfo:
             height: Some(200),
             rate_hz: None,
             opacity: 0.8,
-            shape: None,
+            options: toml::Table::new(),
         };
         let mut widget = SectorsWidget::new(&config);
         let mut redraw = [Redraw::Nothing; MAX_LAYERS];

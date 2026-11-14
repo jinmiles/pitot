@@ -3,10 +3,11 @@
 use std::fmt::Write as _;
 use std::time::{Duration, Instant};
 
+use crate::config::NoOptions;
 use crate::pipeline::{Display, View};
 use crate::render::{Align, Canvas, Color, Rect};
 
-use super::{MAX_LAYERS, Redraw, Widget};
+use super::{Build, MAX_LAYERS, Redraw, Register, Widget};
 
 const WIDTH: u32 = 300;
 const HEIGHT: u32 = 54;
@@ -35,6 +36,15 @@ impl StatusWidget {
             display: Display::Disconnected,
             opacity,
         }
+    }
+}
+
+impl Register for StatusWidget {
+    type Vars = ();
+    type Options = NoOptions;
+
+    fn build(cx: &Build<'_>, _: ()) -> Self {
+        Self::new(cx.config.opacity)
     }
 }
 

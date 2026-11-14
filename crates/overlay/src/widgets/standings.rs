@@ -14,14 +14,14 @@ use std::time::{Duration, Instant};
 use pitot_irsdk::flags::session_state;
 use pitot_irsdk::session::SessionInfo;
 
-use crate::config::WidgetConfig;
+use crate::config::{NoOptions, WidgetConfig};
 use crate::pipeline::View;
 use crate::render::{Align, Canvas, Color, Rect};
 
 use super::text::FixedText;
 use super::timing::{Gap, RaceClock, SectorClock, SectorStarts};
 use super::trackclock::{SharedTrackClock, TrackClock};
-use super::{MAX_LAYERS, Redraw, Widget};
+use super::{Build, MAX_LAYERS, Redraw, Register, Widget};
 
 const ROW_HEIGHT: f32 = 24.0;
 const TEXT_SIZE: f32 = 13.0;
@@ -1403,6 +1403,15 @@ impl StandingsWidget {
     }
 }
 
+impl Register for StandingsWidget {
+    type Vars = ();
+    type Options = NoOptions;
+
+    fn build(cx: &Build<'_>, _: ()) -> Self {
+        Self::with_clock(cx.config, cx.shared.clock())
+    }
+}
+
 impl Widget for StandingsWidget {
     fn size(&self) -> (u32, u32) {
         (self.width, self.height)
@@ -1738,7 +1747,7 @@ SplitTimeInfo:
             height: Some(240),
             rate_hz: None,
             opacity: 0.8,
-            shape: None,
+            options: toml::Table::new(),
         };
         let mut widget = StandingsWidget::new(&config);
         widget.fill(&view);
@@ -1952,7 +1961,7 @@ DriverInfo:
             height: Some(240),
             rate_hz: None,
             opacity: 0.8,
-            shape: None,
+            options: toml::Table::new(),
         };
         let mut widget = StandingsWidget::new(&config);
 

@@ -1,42 +1,20 @@
 //! What the Pitot window lists and knows, and where it opens. No UI here, so it is tested without a window.
 
+use pitot_overlay::config::{self, Config, Spec};
 use serde::Deserialize;
 
-/// A widget as the window lists it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct WidgetInfo {
-    /// The name in `config.toml` (`[widgets.<name>]`).
-    pub name: &'static str,
-    pub label: &'static str,
+/// Every widget the window lists, one switch each: the overlay's registry, in its order. A widget's `name` is its
+/// `[widgets.<name>]` table in `config.toml`, and its `label` the switch's text.
+pub fn widgets() -> &'static [Spec] {
+    config::widget_specs()
 }
 
-/// Every widget, in the order of [`pitot_overlay::config::Config::widgets`].
-pub const WIDGETS: [WidgetInfo; 10] = [
-    info("status", "Status"),
-    info("inputs", "Input trace"),
-    info("relative", "Relative"),
-    info("standings", "Standings"),
-    info("fuel", "Fuel"),
-    info("pit", "Pit stops"),
-    info("sectors", "Sectors"),
-    info("wind", "Wind"),
-    info("tires", "Tires"),
-    info("trackmap", "Track map"),
-];
-
-const fn info(name: &'static str, label: &'static str) -> WidgetInfo {
-    WidgetInfo { name, label }
-}
-
-/// Whether each widget in [`WIDGETS`] is enabled in `config`.
-pub fn enabled(config: &pitot_overlay::config::Config) -> [bool; WIDGETS.len()] {
-    let widgets = config.widgets();
-    std::array::from_fn(|i| {
-        widgets
-            .iter()
-            .find(|(name, _)| *name == WIDGETS[i].name)
-            .is_some_and(|(_, widget)| widget.enabled)
-    })
+/// Whether each widget of [`widgets`] is enabled in `config`.
+pub fn enabled(config: &Config) -> Vec<bool> {
+    widgets()
+        .iter()
+        .map(|w| config.widget(w.name).is_some_and(|c| c.enabled))
+        .collect()
 }
 
 /// The overlay as the window knows it.
@@ -96,16 +74,16 @@ impl Placement {
 
 #[cfg(test)]
 mod tests {
-    use pitot_overlay::config::Config;
-
     use super::*;
 
     #[test]
     fn the_list_matches_the_configuration() {
         let config = Config::default();
-        let names: Vec<&str> = config.widgets().iter().map(|(name, _)| *name).collect();
-        let listed: Vec<&str> = WIDGETS.iter().map(|w| w.name).collect();
+        let names: Vec<&str> = config.widgets().map(|(name, _)| name).collect();
+        let listed: Vec<&str> = widgets().iter().map(|w| w.name).collect();
         assert_eq!(listed, names);
+        let labels: Vec<&str> = widgets().iter().map(|w| w.label).take(3).collect();
+        assert_eq!(labels, ["Status", "Input trace", "Relative"]);
     }
 
     #[test]
@@ -114,13 +92,10 @@ mod tests {
             Config::parse("[widgets.fuel]\nenabled = false\n[widgets.wind]\nenabled = false\n")
                 .expect("parses");
         let on = enabled(&config);
-        for (widget, on) in WIDGETS.iter().zip(on) {
-            assert_eq!(
-                on,
-                !matches!(widget.name, "fuel" | "wind"),
-                "{}",
-                widget.name
-            );
+        assert_eq!(on.len(), widgets().len());
+        for (widget, on) in widgets().iter().zip(on) {
+            let expected = widget.enabled && !matches!(widget.name, "fuel" | "wind");
+            assert_eq!(on, expected, "{}", widget.name);
         }
     }
 

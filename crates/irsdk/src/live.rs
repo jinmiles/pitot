@@ -100,6 +100,11 @@ impl SdkNames {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct VarId(usize);
 
+impl VarId {
+    /// A handle no set gives out: it always reads as unavailable.
+    pub const UNAVAILABLE: Self = Self(usize::MAX);
+}
+
 /// The variables a reader copies each tick.
 #[derive(Debug, Clone, Default)]
 pub struct VarSet {
@@ -121,9 +126,19 @@ impl VarSet {
         }
     }
 
+    /// Requests `name` and returns its handle. A name already in the set keeps its handle, so readers that ask
+    /// for the same variable share one copy of it.
     pub fn add(&mut self, name: &str) -> VarId {
+        if let Some(id) = self.find(name) {
+            return id;
+        }
         self.names.push(name.to_owned());
         VarId(self.names.len() - 1)
+    }
+
+    /// The handle of `name`, if it was requested.
+    pub fn find(&self, name: &str) -> Option<VarId> {
+        self.names.iter().position(|n| n == name).map(VarId)
     }
 
     pub fn len(&self) -> usize {
@@ -908,6 +923,24 @@ mod tests {
         assert_eq!(r.snapshot.f32(r.laps, 72), None);
         assert_eq!(r.snapshot.f64(r.throttle, 0), None, "type mismatch");
         assert_eq!(r.step(), Step::Idle);
+    }
+
+    #[test]
+    fn a_variable_requested_twice_is_copied_once() {
+        let names = names();
+        let mut publisher = publisher(&names);
+        let mut r = reader(&names);
+        let mut set = r.reader.var_set().clone();
+        assert_eq!(set.add("ThrottleRaw"), r.throttle, "the same handle");
+        assert_eq!(set.len(), 4, "nothing added");
+        assert_eq!(set.find("SessionTime"), Some(r.time));
+        assert_eq!(set.find("Gear"), None);
+        assert_eq!(r.step(), Step::Connected);
+        publisher.publish(&row(1.0, 0.75)).expect("publishes");
+        assert!(matches!(r.step(), Step::Tick { .. }));
+        assert_eq!(r.snapshot.f32(r.throttle, 0), Some(0.75));
+        assert!(!r.snapshot.available(VarId::UNAVAILABLE));
+        assert_eq!(r.snapshot.f32(VarId::UNAVAILABLE, 0), None);
     }
 
     #[test]

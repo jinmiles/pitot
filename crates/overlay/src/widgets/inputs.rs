@@ -8,11 +8,11 @@
 use std::f32::consts::PI;
 use std::time::{Duration, Instant};
 
-use crate::config::WidgetConfig;
+use crate::config::{NoOptions, WidgetConfig};
 use crate::pipeline::{InputSample, View};
 use crate::render::{Canvas, Color, Rect};
 
-use super::{LayerSpec, MAX_LAYERS, Redraw, Widget};
+use super::{Build, LayerSpec, MAX_LAYERS, Redraw, Register, Widget};
 
 const PX_PER_SAMPLE: u32 = 2;
 /// Live pedal bars: width and the gap before each bar.
@@ -274,6 +274,15 @@ impl InputTraceWidget {
     }
 }
 
+impl Register for InputTraceWidget {
+    type Vars = ();
+    type Options = NoOptions;
+
+    fn build(cx: &Build<'_>, _: ()) -> Self {
+        Self::new(cx.config)
+    }
+}
+
 impl Widget for InputTraceWidget {
     fn size(&self) -> (u32, u32) {
         (self.width, self.height)
@@ -369,7 +378,7 @@ mod tests {
             height: Some(120),
             rate_hz: None,
             opacity: 0.8,
-            shape: None,
+            options: toml::Table::new(),
         };
         InputTraceWidget::new(&config)
     }

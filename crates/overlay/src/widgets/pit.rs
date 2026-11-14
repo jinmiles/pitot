@@ -16,14 +16,14 @@ use std::time::{Duration, Instant};
 
 use pitot_irsdk::flags::session_flags;
 
-use crate::config::WidgetConfig;
+use crate::config::{NoOptions, WidgetConfig};
 use crate::pipeline::View;
 use crate::render::{Align, Canvas, Color, Rect};
 
 use super::fuel::{FuelTracker, is_green, laps_to_go};
 use super::pitstops::{PitModel, PitTracker, SharedPitTracker, Stop, player_index};
 use super::text::FixedText;
-use super::{MAX_LAYERS, Redraw, Widget};
+use super::{Build, MAX_LAYERS, Redraw, Register, Widget};
 
 /// Most car rows.
 const MAX_ROWS: usize = 16;
@@ -607,6 +607,15 @@ const PLAYER: u32 = 0xFF_B347;
 const PIT: u32 = 0x6C_9BFF;
 const FUEL: u32 = 0x82_B1FF;
 const BACKGROUND: u32 = 0x10_1418;
+
+impl Register for PitWidget {
+    type Vars = ();
+    type Options = NoOptions;
+
+    fn build(cx: &Build<'_>, _: ()) -> Self {
+        Self::new(cx.config, cx.shared.pit())
+    }
+}
 
 impl Widget for PitWidget {
     fn size(&self) -> (u32, u32) {

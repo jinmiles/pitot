@@ -1,10 +1,14 @@
 //! The telemetry variables the overlay reads, registered once and shared by the data and render threads.
+//!
+//! [`Vars`] holds the variables the pipeline and the first widgets read. A widget that needs others declares them
+//! in its own module with [`var_group!`]; the pipeline registers every widget's group after [`Vars`] at start
+//! (see `widgets::list`), and a name in several groups is copied once. So adding a widget does not edit this list.
 
 use pitot_irsdk::live::{VarId, VarSet};
 
 macro_rules! vars {
     ($($field:ident => $name:literal,)*) => {
-        /// Handles to every variable the widgets use. Unavailable variables read as `None`.
+        /// Handles to the variables of the pipeline and the first widgets. Unavailable variables read as `None`.
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
         pub struct Vars {
             $(pub $field: VarId,)*
@@ -18,6 +22,59 @@ macro_rules! vars {
         }
     };
 }
+
+/// A widget's own variables: their names, and handles resolved from the pipeline's set.
+pub trait VarGroup: Copy {
+    /// The sim's names of the variables, registered by the pipeline at start.
+    const NAMES: &'static [&'static str];
+
+    /// The handles of the variables in `set`. A name the set lacks reads as unavailable.
+    fn resolve(set: &VarSet) -> Self;
+}
+
+/// No variables beyond [`Vars`].
+impl VarGroup for () {
+    const NAMES: &'static [&'static str] = &[];
+
+    fn resolve(_: &VarSet) -> Self {}
+}
+
+/// The handle of `name` in `set`, or one that reads as unavailable.
+pub fn resolve_var(set: &VarSet, name: &str) -> VarId {
+    set.find(name).unwrap_or(VarId::UNAVAILABLE)
+}
+
+/// Declares a widget's own variables as a struct of handles implementing [`VarGroup`]:
+///
+/// ```ignore
+/// var_group! {
+///     /// The wind widget's variables.
+///     pub struct WindVars {
+///         wind_vel => "WindVel",
+///         wind_dir => "WindDir",
+///     }
+/// }
+/// ```
+///
+/// A name may also be in [`Vars`] or in another group; it is copied once.
+macro_rules! var_group {
+    ($(#[$meta:meta])* $vis:vis struct $group:ident { $($field:ident => $name:literal,)* }) => {
+        $(#[$meta])*
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        $vis struct $group {
+            $(pub $field: pitot_irsdk::live::VarId,)*
+        }
+
+        impl $crate::pipeline::VarGroup for $group {
+            const NAMES: &'static [&'static str] = &[$($name,)*];
+
+            fn resolve(set: &pitot_irsdk::live::VarSet) -> Self {
+                Self { $($field: $crate::pipeline::resolve_var(set, $name),)* }
+            }
+        }
+    };
+}
+pub(crate) use var_group;
 
 vars! {
     session_time => "SessionTime",
@@ -73,8 +130,6 @@ vars! {
     incidents => "PlayerCarMyIncidentCount",
     time_of_day => "SessionTimeOfDay",
     car_session_flags => "CarIdxSessionFlags",
-    wind_vel => "WindVel",
-    wind_dir => "WindDir",
     yaw_north => "YawNorth",
     // The tire widget: wear and carcass temperatures (updated in the pit stall), distance on each tire.
     tire_compound => "PlayerTireCompound",

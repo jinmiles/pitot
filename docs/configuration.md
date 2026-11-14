@@ -137,10 +137,11 @@ rate_hz = 60.0  # update rate; leave out for the widget's own rate
 opacity = 0.82  # background opacity, 0 to 1
 ```
 
-Widgets: `status`, `inputs`, `relative`, `standings`, `fuel`, `sectors` ([sectors.md](sectors.md)), `wind`
-([wind.md](wind.md)), `tires` ([tires.md](tires.md)), `trackmap` ([trackmap.md](trackmap.md)), `pit`
-([pit.md](pit.md)). Any field left out keeps that widget's default, so a table can set just `x` and `y`. Unknown
-widgets or fields are errors, so typos do not go unnoticed.
+The widgets, their names, and their pages are listed in [widgets.md](widgets.md). Widgets added after the first ten
+are off by default and are not written into the default file: turn one on in the Pitot window, or add its table
+with `enabled = true`. Any field left out keeps that widget's default, so a table can set just `x` and `y`. Unknown
+widgets or fields are errors, so typos do not go unnoticed. A widget can have fields of its own, such as the track
+map's `shape`, described on its page; an error in one names the widget and the line of its table.
 
 The pit widget keeps what it measures, the refueling speed by car and the pit lane loss by track, in
 `%APPDATA%\Pitot\pit.toml`. Delete a line there to measure that value again.

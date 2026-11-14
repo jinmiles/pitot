@@ -10,12 +10,12 @@ use std::time::{Duration, Instant};
 
 use pitot_irsdk::flags::{session_flags, session_state};
 
-use crate::config::WidgetConfig;
+use crate::config::{NoOptions, WidgetConfig};
 use crate::pipeline::View;
 use crate::render::{Align, Canvas, Color, Rect};
 
 use super::text::FixedText;
-use super::{MAX_LAYERS, Redraw, Widget};
+use super::{Build, MAX_LAYERS, Redraw, Register, Widget};
 
 /// Clean laps averaged for use per lap.
 const LAPS_AVERAGED: usize = 5;
@@ -291,6 +291,15 @@ const SHORT: u32 = 0xFF_6B5E;
 /// The pit window is open on the current lap.
 const OPEN: u32 = 0x3D_D68C;
 const BACKGROUND: u32 = 0x10_1418;
+
+impl Register for FuelWidget {
+    type Vars = ();
+    type Options = NoOptions;
+
+    fn build(cx: &Build<'_>, _: ()) -> Self {
+        Self::new(cx.config)
+    }
+}
 
 impl Widget for FuelWidget {
     fn size(&self) -> (u32, u32) {

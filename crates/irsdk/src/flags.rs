@@ -1,4 +1,5 @@
-//! Values of the `SessionState` and `SessionFlags` telemetry variables, mirroring `irsdk_defines.h`.
+//! Values of the `SessionState`, `SessionFlags`, and track location telemetry variables, mirroring
+//! `irsdk_defines.h`.
 
 /// `SessionState` values (`irsdk_SessionState`).
 pub mod session_state {
@@ -36,4 +37,13 @@ pub mod session_flags {
     pub const SERVICEABLE: u32 = 0x0004_0000;
     pub const FURLED: u32 = 0x0008_0000;
     pub const REPAIR: u32 = 0x0010_0000;
+}
+
+/// Where a car is (`irsdk_TrkLoc`), as `CarIdxTrackSurface` and `PlayerTrackSurface` report it.
+pub mod track_location {
+    pub const NOT_IN_WORLD: i32 = -1;
+    pub const OFF_TRACK: i32 = 0;
+    pub const IN_PIT_STALL: i32 = 1;
+    pub const APPROACHING_PITS: i32 = 2;
+    pub const ON_TRACK: i32 = 3;
 }

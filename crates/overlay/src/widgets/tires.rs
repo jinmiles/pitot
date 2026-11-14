@@ -16,12 +16,12 @@ use std::time::{Duration, Instant};
 use pitot_irsdk::capture::Moment;
 use pitot_irsdk::live::{Snapshot, VarId};
 
-use crate::config::WidgetConfig;
+use crate::config::{NoOptions, WidgetConfig};
 use crate::pipeline::{Display, Source, TireSample, Vars, View};
 use crate::render::{Align, Canvas, Color, Rect};
 
 use super::text::FixedText;
-use super::{MAX_LAYERS, Redraw, Widget};
+use super::{Build, MAX_LAYERS, Redraw, Register, Widget};
 
 /// Left front, right front, left rear, right rear: the order of the blocks, left to right and top to bottom.
 const CORNERS: usize = 4;
@@ -528,6 +528,15 @@ fn compound_color(compound: &str) -> u32 {
     super::standings::tire_color(compound)
 }
 
+impl Register for TiresWidget {
+    type Vars = ();
+    type Options = NoOptions;
+
+    fn build(cx: &Build<'_>, _: ()) -> Self {
+        Self::new(cx.config)
+    }
+}
+
 impl Widget for TiresWidget {
     fn size(&self) -> (u32, u32) {
         (self.width, self.height)
@@ -792,7 +801,7 @@ DriverInfo:
         };
         let (_pipeline, mut view) =
             Pipeline::start(names, config, Vec::new(), None).expect("starts");
-        let mut widget = TiresWidget::new(&crate::config::Config::default().widgets.tires);
+        let mut widget = TiresWidget::new(crate::config::Config::default().widget("tires").expect("tires"));
 
         let unchanged = [1.0, 1.0, 1.0, 66.9, 66.9, 66.9, 0.0];
         let first = row(1, 1.0, 66.9, unchanged);
@@ -888,7 +897,7 @@ DriverInfo:
         let (_pipeline, mut view) =
             Pipeline::start(names, reader, Vec::new(), None).expect("starts");
         view.set_telemetry_folders(vec![dir.clone()]);
-        let mut widget = TiresWidget::new(&crate::config::Config::default().widgets.tires);
+        let mut widget = TiresWidget::new(crate::config::Config::default().widget("tires").expect("tires"));
         let mut redraw = [Redraw::Nothing; MAX_LAYERS];
         // The search needs the live session info first, which names the session.
         let deadline = Instant::now() + Duration::from_secs(5);

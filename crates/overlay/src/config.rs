@@ -7,7 +7,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use serde::Deserialize;
+use serde::de::{self, DeserializeOwned, Deserializer, MapAccess, Visitor};
+use serde::{Deserialize, Serialize};
 
 /// The single source of truth for where configuration lives: `%APPDATA%\Pitot`.
 pub fn config_dir() -> Option<PathBuf> {
@@ -74,7 +75,8 @@ pub fn capture_dirs() -> Vec<PathBuf> {
     dirs
 }
 
-/// Written on first run; kept in sync with [`Config::default`] by a test.
+/// Written on first run; kept in sync with [`Config::default`] by a test. Widgets missing here (every widget added
+/// after the first ten, off by default) take their defaults from the registry.
 pub const DEFAULT_TOML: &str = r#"# Pitot overlay configuration. Changes apply when the file is saved.
 #
 # Positions are in physical pixels from the top-left corner of the widget's monitor.
@@ -248,49 +250,166 @@ pub struct Telemetry {
     pub folder: String,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct Widgets {
-    pub status: WidgetConfig,
-    pub inputs: WidgetConfig,
-    pub relative: WidgetConfig,
-    pub standings: WidgetConfig,
-    pub fuel: WidgetConfig,
-    pub pit: WidgetConfig,
-    pub sectors: WidgetConfig,
-    pub wind: WidgetConfig,
-    pub tires: WidgetConfig,
-    pub trackmap: WidgetConfig,
+/// Every widget, in the order of the registry (`crate::widgets`, the list in `widgets/list.rs`). Without the
+/// widgets (outside Windows) there are none.
+pub fn widget_specs() -> &'static [Spec] {
+    #[cfg(windows)]
+    {
+        crate::widgets::SPECS
+    }
+    #[cfg(not(windows))]
+    {
+        &[]
+    }
 }
+
+/// The fields every widget's table has; a widget declares any others itself.
+const COMMON_FIELDS: &str = "enabled, monitor, x, y, width, height, rate_hz, opacity";
+
+/// A widget as the registry lists it: its name in the file, its label in the Pitot window, and its defaults.
+#[derive(Debug, Clone, Copy)]
+pub struct Spec {
+    /// The name in `config.toml` (`[widgets.<name>]`), which is also the widget's module.
+    pub name: &'static str,
+    /// The name the Pitot window shows.
+    pub label: &'static str,
+    /// On by default. A widget is off unless its entry turns it on.
+    pub enabled: bool,
+    pub x: i32,
+    pub y: i32,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    /// `None` uses the widget's own rate.
+    pub rate_hz: Option<f32>,
+    pub opacity: f32,
+    /// Checks the widget's own fields and returns them with every default filled in.
+    options: fn(&toml::Table) -> Result<toml::Table, String>,
+}
+
+impl Spec {
+    /// A widget at (`x`, `y`) on the primary monitor, with its own size and rate, off by default.
+    pub const fn new(label: &'static str, x: i32, y: i32) -> Self {
+        Self {
+            name: "",
+            label,
+            enabled: false,
+            x,
+            y,
+            width: None,
+            height: None,
+            rate_hz: None,
+            opacity: 0.82,
+            options: normalize_options::<NoOptions>,
+        }
+    }
+
+    /// The default size in pixels.
+    pub const fn size(self, width: u32, height: u32) -> Self {
+        Self {
+            width: Some(width),
+            height: Some(height),
+            ..self
+        }
+    }
+
+    /// The default update rate.
+    pub const fn rate(self, hz: f32) -> Self {
+        Self {
+            rate_hz: Some(hz),
+            ..self
+        }
+    }
+
+    /// On by default.
+    pub const fn on(self) -> Self {
+        Self {
+            enabled: true,
+            ..self
+        }
+    }
+
+    /// The name, set by the registry from the widget's module.
+    pub(crate) const fn named(self, name: &'static str) -> Self {
+        Self { name, ..self }
+    }
+
+    /// The widget's own fields, set by the registry: see [`normalize_options`].
+    pub(crate) const fn with_options(
+        self,
+        options: fn(&toml::Table) -> Result<toml::Table, String>,
+    ) -> Self {
+        Self { options, ..self }
+    }
+
+    /// The widget's configuration when the file does not mention it.
+    pub fn defaults(&self) -> WidgetConfig {
+        WidgetConfig {
+            enabled: self.enabled,
+            monitor: None,
+            x: self.x,
+            y: self.y,
+            width: self.width,
+            height: self.height,
+            rate_hz: self.rate_hz,
+            opacity: self.opacity,
+            options: (self.options)(&toml::Table::new()).unwrap_or_default(),
+        }
+    }
+}
+
+/// A widget without fields of its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct NoOptions {}
+
+/// Reads a widget's own fields as `T` (a struct with `#[serde(default, deny_unknown_fields)]`) and returns them
+/// as written back from `T`, so every field is there and two tables are equal when their values are.
+pub fn normalize_options<T: DeserializeOwned + Serialize + Default>(
+    table: &toml::Table,
+) -> Result<toml::Table, String> {
+    let typed: T = table.clone().try_into().map_err(|e| {
+        let message = e.to_string().trim_end().replace('\n', " ");
+        if message.contains("there are no fields") {
+            message.replace(
+                "there are no fields",
+                &format!("expected one of {COMMON_FIELDS}"),
+            )
+        } else if message.contains("unknown field") {
+            format!("{message} (every widget also has {COMMON_FIELDS})")
+        } else {
+            message
+        }
+    })?;
+    toml::Table::try_from(typed).map_err(|e| e.to_string())
+}
+
+/// Every widget's configuration, in the registry's order.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Widgets(Vec<WidgetConfig>);
 
 impl Default for Widgets {
     fn default() -> Self {
-        let widget = |x, y, size: Option<(u32, u32)>, rate_hz: Option<f32>| WidgetConfig {
-            enabled: true,
-            monitor: None,
-            x,
-            y,
-            width: size.map(|s| s.0),
-            height: size.map(|s| s.1),
-            rate_hz,
-            opacity: 0.82,
-            shape: None,
-        };
-        Self {
-            status: widget(24, 24, None, None),
-            inputs: widget(660, 900, Some((600, 120)), Some(60.0)),
-            relative: widget(1460, 560, Some((460, 300)), Some(10.0)),
-            standings: widget(24, 260, Some((760, 560)), Some(2.0)),
-            fuel: widget(1460, 900, Some((420, 150)), Some(30.0)),
-            pit: widget(800, 240, Some((400, 280)), Some(10.0)),
-            sectors: widget(800, 24, Some((400, 200)), Some(5.0)),
-            wind: widget(1460, 370, Some((200, 170)), Some(5.0)),
-            tires: widget(1680, 370, Some((220, 170)), Some(5.0)),
-            trackmap: WidgetConfig {
-                shape: Some(MapShape::Circle),
-                ..widget(1460, 24, Some((440, 330)), Some(10.0))
-            },
-        }
+        Self(widget_specs().iter().map(Spec::defaults).collect())
     }
+}
+
+impl Widgets {
+    /// Widget configurations by name, in the registry's order.
+    pub fn iter(&self) -> impl Iterator<Item = (&'static str, &WidgetConfig)> {
+        widget_specs().iter().map(|s| s.name).zip(&self.0)
+    }
+
+    pub fn get(&self, name: &str) -> Option<&WidgetConfig> {
+        self.0.get(spec_index(name)?)
+    }
+
+    pub fn get_mut(&mut self, name: &str) -> Option<&mut WidgetConfig> {
+        self.0.get_mut(spec_index(name)?)
+    }
+}
+
+fn spec_index(name: &str) -> Option<usize> {
+    widget_specs().iter().position(|s| s.name == name)
 }
 
 /// One widget's placement and behavior.
@@ -307,19 +426,16 @@ pub struct WidgetConfig {
     pub rate_hz: Option<f32>,
     /// Background opacity, 0 to 1.
     pub opacity: f32,
-    /// The track map's shape; other widgets have none.
-    pub shape: Option<MapShape>,
+    /// The widget's own fields (such as the track map's `shape`), every one present: see [`normalize_options`].
+    pub options: toml::Table,
 }
 
-/// How the track map draws the track.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum MapShape {
-    /// Cars around a circle by lap distance; needs no lap.
-    #[default]
-    Circle,
-    /// The track's outline, recorded from a clean lap of the player's.
-    Outline,
+impl WidgetConfig {
+    /// The widget's own fields as `T`. They were checked when the file was read; a table that does not fit `T`
+    /// gives its defaults.
+    pub fn options_as<T: DeserializeOwned + Default>(&self) -> T {
+        self.options.clone().try_into().unwrap_or_default()
+    }
 }
 
 /// The file's shape: every field optional, applied over the defaults.
@@ -332,23 +448,54 @@ struct FileConfig {
     widgets: FileWidgets,
 }
 
-#[derive(Debug, Default, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-struct FileWidgets {
-    status: WidgetPatch,
-    inputs: WidgetPatch,
-    relative: WidgetPatch,
-    standings: WidgetPatch,
-    fuel: WidgetPatch,
-    pit: WidgetPatch,
-    sectors: WidgetPatch,
-    wind: WidgetPatch,
-    tires: WidgetPatch,
-    trackmap: WidgetPatch,
+/// The `[widgets]` table: patches by the widget's index in the registry. A name the registry does not have is an
+/// error at its place in the file.
+#[derive(Debug, Default)]
+struct FileWidgets(Vec<(usize, WidgetPatch)>);
+
+impl<'de> Deserialize<'de> for FileWidgets {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Tables;
+
+        impl<'de> Visitor<'de> for Tables {
+            type Value = FileWidgets;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a table of widgets")
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<FileWidgets, A::Error> {
+                let mut patches = Vec::new();
+                while let Some(WidgetName(index)) = map.next_key()? {
+                    patches.push((index, map.next_value()?));
+                }
+                Ok(FileWidgets(patches))
+            }
+        }
+
+        deserializer.deserialize_map(Tables)
+    }
 }
 
+/// A widget's name, as its index in the registry.
+struct WidgetName(usize);
+
+impl<'de> Deserialize<'de> for WidgetName {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let name = String::deserialize(deserializer)?;
+        spec_index(&name).map(WidgetName).ok_or_else(|| {
+            let known: Vec<&str> = widget_specs().iter().map(|s| s.name).collect();
+            de::Error::custom(format!(
+                "unknown widget `{name}`, expected one of {}",
+                known.join(", ")
+            ))
+        })
+    }
+}
+
+/// A widget's table: the fields every widget has, and the widget's own, which its registry entry checks.
 #[derive(Debug, Default, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default, expecting = "a widget's table")]
 struct WidgetPatch {
     enabled: Option<bool>,
     monitor: Option<usize>,
@@ -358,11 +505,12 @@ struct WidgetPatch {
     height: Option<u32>,
     rate_hz: Option<f32>,
     opacity: Option<f32>,
-    shape: Option<MapShape>,
+    #[serde(flatten)]
+    options: toml::Table,
 }
 
 impl WidgetPatch {
-    fn apply(self, mut config: WidgetConfig) -> WidgetConfig {
+    fn apply(self, config: &mut WidgetConfig, spec: &Spec) -> Result<(), String> {
         config.enabled = self.enabled.unwrap_or(config.enabled);
         config.monitor = self.monitor.or(config.monitor);
         config.x = self.x.unwrap_or(config.x);
@@ -371,9 +519,21 @@ impl WidgetPatch {
         config.height = self.height.or(config.height);
         config.rate_hz = self.rate_hz.or(config.rate_hz);
         config.opacity = self.opacity.unwrap_or(config.opacity);
-        config.shape = self.shape.or(config.shape);
-        config
+        if !self.options.is_empty() {
+            config.options = (spec.options)(&self.options)?;
+        }
+        Ok(())
     }
+}
+
+/// The line of widget `name`'s table in `text`, for errors found after parsing.
+fn widget_line(text: &str, name: &str) -> Option<usize> {
+    let document = toml::de::DeTable::parse(text).ok()?;
+    let toml::de::DeValue::Table(widgets) = document.get_ref().get("widgets")?.get_ref() else {
+        return None;
+    };
+    let (key, _) = widgets.get_key_value(name)?;
+    Some(text[..key.span().start].matches('\n').count() + 1)
 }
 
 /// Errors from loading the configuration.
@@ -425,62 +585,42 @@ impl Config {
     pub fn parse(text: &str) -> Result<Self, ConfigError> {
         let file: FileConfig =
             toml::from_str(text).map_err(|e| ConfigError::Parse(e.to_string()))?;
-        let defaults = Widgets::default();
-        let w = file.widgets;
+        let mut widgets = Widgets::default();
+        for (index, patch) in file.widgets.0 {
+            let (Some(spec), Some(widget)) = (widget_specs().get(index), widgets.0.get_mut(index))
+            else {
+                continue;
+            };
+            patch.apply(widget, spec).map_err(|message| {
+                let place = widget_line(text, spec.name)
+                    .map(|line| format!(" (line {line})"))
+                    .unwrap_or_default();
+                ConfigError::Parse(format!("widgets.{}{place}: {message}", spec.name))
+            })?;
+        }
         let config = Self {
             general: file.general,
             recording: file.recording,
             telemetry: file.telemetry,
-            widgets: Widgets {
-                status: w.status.apply(defaults.status),
-                inputs: w.inputs.apply(defaults.inputs),
-                relative: w.relative.apply(defaults.relative),
-                standings: w.standings.apply(defaults.standings),
-                fuel: w.fuel.apply(defaults.fuel),
-                pit: w.pit.apply(defaults.pit),
-                sectors: w.sectors.apply(defaults.sectors),
-                wind: w.wind.apply(defaults.wind),
-                tires: w.tires.apply(defaults.tires),
-                trackmap: w.trackmap.apply(defaults.trackmap),
-            },
+            widgets,
         };
         config.validate()?;
         Ok(config)
     }
 
-    /// Widget configurations by name, in a fixed order.
-    pub fn widgets(&self) -> [(&'static str, &WidgetConfig); 10] {
-        let w = &self.widgets;
-        [
-            ("status", &w.status),
-            ("inputs", &w.inputs),
-            ("relative", &w.relative),
-            ("standings", &w.standings),
-            ("fuel", &w.fuel),
-            ("pit", &w.pit),
-            ("sectors", &w.sectors),
-            ("wind", &w.wind),
-            ("tires", &w.tires),
-            ("trackmap", &w.trackmap),
-        ]
+    /// Widget configurations by name, in the registry's order.
+    pub fn widgets(&self) -> impl Iterator<Item = (&'static str, &WidgetConfig)> {
+        self.widgets.iter()
     }
 
-    /// The configuration of the widget called `name`, as listed by [`Config::widgets`].
+    /// The configuration of the widget called `name`.
+    pub fn widget(&self, name: &str) -> Option<&WidgetConfig> {
+        self.widgets.get(name)
+    }
+
+    /// The configuration of the widget called `name`, to change.
     pub fn widget_mut(&mut self, name: &str) -> Option<&mut WidgetConfig> {
-        let w = &mut self.widgets;
-        match name {
-            "status" => Some(&mut w.status),
-            "inputs" => Some(&mut w.inputs),
-            "relative" => Some(&mut w.relative),
-            "standings" => Some(&mut w.standings),
-            "fuel" => Some(&mut w.fuel),
-            "pit" => Some(&mut w.pit),
-            "sectors" => Some(&mut w.sectors),
-            "wind" => Some(&mut w.wind),
-            "tires" => Some(&mut w.tires),
-            "trackmap" => Some(&mut w.trackmap),
-            _ => None,
-        }
+        self.widgets.get_mut(name)
     }
 
     fn validate(&self) -> Result<(), ConfigError> {
@@ -491,9 +631,6 @@ impl Config {
         }
         for (widget, c) in self.widgets() {
             let invalid = |field| Err(ConfigError::Invalid { widget, field });
-            if c.shape.is_some() && widget != "trackmap" {
-                return invalid("shape");
-            }
             if c.rate_hz.is_some_and(|r| !(0.1..=120.0).contains(&r)) {
                 return invalid("rate_hz");
             }
@@ -672,6 +809,10 @@ pub fn monitor_order(rects: &[(i32, i32)]) -> Vec<usize> {
 mod tests {
     use super::*;
 
+    fn widget<'a>(config: &'a Config, name: &str) -> &'a WidgetConfig {
+        config.widget(name).expect("a widget")
+    }
+
     #[test]
     fn default_file_matches_defaults() {
         assert_eq!(
@@ -680,23 +821,110 @@ mod tests {
         );
     }
 
+    /// The first ten widgets' defaults as they were before the registry: on, in this order, at these places,
+    /// sizes, and rates.
+    #[test]
+    fn the_first_widgets_keep_their_defaults() {
+        type Defaults = (&'static str, i32, i32, Option<(u32, u32)>, Option<f32>);
+        let before: [Defaults; 10] = [
+            ("status", 24, 24, None, None),
+            ("inputs", 660, 900, Some((600, 120)), Some(60.0)),
+            ("relative", 1460, 560, Some((460, 300)), Some(10.0)),
+            ("standings", 24, 260, Some((760, 560)), Some(2.0)),
+            ("fuel", 1460, 900, Some((420, 150)), Some(30.0)),
+            ("pit", 800, 240, Some((400, 280)), Some(10.0)),
+            ("sectors", 800, 24, Some((400, 200)), Some(5.0)),
+            ("wind", 1460, 370, Some((200, 170)), Some(5.0)),
+            ("tires", 1680, 370, Some((220, 170)), Some(5.0)),
+            ("trackmap", 1460, 24, Some((440, 330)), Some(10.0)),
+        ];
+        let config = Config::default();
+        let names: Vec<&str> = config.widgets().map(|(name, _)| name).take(10).collect();
+        assert_eq!(
+            names,
+            before.map(|b| b.0),
+            "first in the registry, in order"
+        );
+        for (name, x, y, size, rate_hz) in before {
+            let w = widget(&config, name);
+            assert!(w.enabled, "{name}");
+            assert_eq!((w.x, w.y, w.monitor), (x, y, None), "{name}");
+            assert_eq!((w.width, w.height), size.unzip(), "{name}");
+            assert_eq!(w.rate_hz, rate_hz, "{name}");
+            assert_eq!(w.opacity, 0.82, "{name}");
+        }
+        let shape: toml::Table = "shape = \"circle\"".parse().expect("table");
+        assert_eq!(widget(&config, "trackmap").options, shape);
+        assert!(widget(&config, "status").options.is_empty());
+        let specs: Vec<&str> = widget_specs().iter().map(|s| s.label).take(10).collect();
+        assert_eq!(specs[1], "Input trace");
+        // Widgets added after these are off unless their entry says otherwise.
+        assert!(widget_specs().len() >= 10);
+    }
+
+    /// A file written by an earlier version, with its edits, reads as it did.
+    #[test]
+    fn an_older_file_reads_as_before() {
+        let older = DEFAULT_TOML
+            .replace(
+                "[widgets.wind]\nenabled = true",
+                "[widgets.wind]\nenabled = false",
+            )
+            .replace("shape = \"circle\"", "shape = \"outline\"")
+            .replace("x = 1460\ny = 560", "x = 1300\ny = 500\nmonitor = 2");
+        let config = Config::parse(&older).expect("parses");
+        assert!(!widget(&config, "wind").enabled);
+        assert_eq!(
+            widget(&config, "trackmap").options.get("shape"),
+            Some(&toml::Value::String("outline".into()))
+        );
+        let relative = widget(&config, "relative");
+        assert_eq!(
+            (relative.x, relative.y, relative.monitor),
+            (1300, 500, Some(2))
+        );
+        let mut expected = Config::default();
+        expected.widget_mut("wind").expect("wind").enabled = false;
+        let relative = expected.widget_mut("relative").expect("relative");
+        (relative.x, relative.y, relative.monitor) = (1300, 500, Some(2));
+        expected.widget_mut("trackmap").expect("trackmap").options =
+            "shape = \"outline\"".parse().expect("table");
+        assert_eq!(config, expected, "nothing else changed");
+        // Inline tables and dotted keys too.
+        let inline = Config::parse("[widgets]\nfuel = { x = 1, y = 2 }\nwind.enabled = false\n")
+            .expect("parses");
+        assert_eq!(
+            (widget(&inline, "fuel").x, widget(&inline, "fuel").y),
+            (1, 2)
+        );
+        assert!(!widget(&inline, "wind").enabled);
+    }
+
     #[test]
     fn benchmark_configurations_parse() {
         let four =
             Config::parse(include_str!("../../../benchmarks/pitot/four.toml")).expect("four");
-        let enabled = |c: &Config| c.widgets().iter().filter(|(_, w)| w.enabled).count();
-        assert_eq!(enabled(&four), 4);
-        assert!(!four.widgets.status.enabled);
-        let defaults = Widgets::default();
-        assert_eq!(
-            four.widgets.inputs, defaults.inputs,
-            "default positions and rates"
-        );
-        assert_eq!(four.widgets.standings, defaults.standings);
+        let enabled = |c: &Config| -> Vec<&'static str> {
+            c.widgets()
+                .filter(|(_, w)| w.enabled)
+                .map(|(name, _)| name)
+                .collect()
+        };
+        // A widget on by default would join the measured set: its entry would need `enabled = false` in both
+        // files.
+        assert_eq!(enabled(&four), ["inputs", "relative", "standings", "fuel"]);
+        let defaults = Config::default();
+        for name in ["inputs", "relative", "standings", "fuel"] {
+            assert_eq!(
+                widget(&four, name),
+                widget(&defaults, name),
+                "{name}: default positions and rates"
+            );
+        }
         let inputs =
             Config::parse(include_str!("../../../benchmarks/pitot/inputs.toml")).expect("inputs");
-        assert_eq!(enabled(&inputs), 1);
-        assert_eq!(inputs.widgets.inputs, defaults.inputs);
+        assert_eq!(enabled(&inputs), ["inputs"]);
+        assert_eq!(widget(&inputs, "inputs"), widget(&defaults, "inputs"));
         assert!(
             four.general.start_in_tray && inputs.general.start_in_tray,
             "measured without the Pitot window"
@@ -719,27 +947,43 @@ mod tests {
     #[test]
     fn missing_fields_keep_defaults() {
         let config = Config::parse("[widgets.fuel]\nx = 10\nmonitor = 2\n").expect("parses");
+        let fuel = widget(&config, "fuel");
+        assert_eq!((fuel.x, fuel.y), (10, 900), "y keeps the fuel default");
+        assert_eq!(fuel.width, Some(420));
+        assert_eq!(fuel.monitor, Some(2));
+        assert!(fuel.enabled);
+        assert_eq!(fuel.opacity, 0.82);
         assert_eq!(
-            (config.widgets.fuel.x, config.widgets.fuel.y),
-            (10, 900),
-            "y keeps the fuel default"
+            widget(&config, "relative"),
+            widget(&Config::default(), "relative")
         );
-        assert_eq!(config.widgets.fuel.width, Some(420));
-        assert_eq!(config.widgets.fuel.monitor, Some(2));
-        assert!(config.widgets.fuel.enabled);
-        assert_eq!(config.widgets.fuel.opacity, 0.82);
-        assert_eq!(config.widgets.relative, Widgets::default().relative);
         assert_eq!(Config::parse("").expect("empty file"), Config::default());
     }
 
     #[test]
     fn rejects_unknown_fields_and_bad_values() {
+        let unknown =
+            Config::parse("[general]\n\n[widgets.status]\ncolour = 1\n").expect_err("field");
+        assert!(matches!(unknown, ConfigError::Parse(_)));
+        let message = unknown.to_string();
+        assert!(
+            message.contains("widgets.status (line 3)") && message.contains("colour"),
+            "{message}"
+        );
+        let radar = Config::parse("[widgets.radar]\n").expect_err("widget");
+        assert!(matches!(radar, ConfigError::Parse(_)));
+        assert!(radar.to_string().contains("line 1"), "{radar}");
+        assert!(
+            radar.to_string().contains("unknown widget `radar`"),
+            "{radar}"
+        );
+        // A widget's own field belongs to it alone, and its values are checked.
+        let shape = Config::parse("[widgets.fuel]\nshape = \"circle\"\n").expect_err("shape");
+        assert!(shape.to_string().contains("shape"), "{shape}");
+        let square = Config::parse("[widgets.trackmap]\nshape = \"square\"\n").expect_err("value");
+        assert!(square.to_string().contains("square"), "{square}");
         assert!(matches!(
-            Config::parse("[widgets.status]\ncolour = 1\n"),
-            Err(ConfigError::Parse(_))
-        ));
-        assert!(matches!(
-            Config::parse("[widgets.radar]\n"),
+            Config::parse("[widgets.trackmap]\nshape = 3\n"),
             Err(ConfigError::Parse(_))
         ));
         assert!(matches!(
@@ -770,7 +1014,8 @@ mod tests {
         assert_eq!(load_or_create(&path).expect("creates"), Config::default());
         assert_eq!(fs::read_to_string(&path).expect("written"), DEFAULT_TOML);
         fs::write(&path, "[widgets.status]\nenabled = false\n").expect("edits");
-        assert!(!load_or_create(&path).expect("reads").widgets.status.enabled);
+        let edited = load_or_create(&path).expect("reads");
+        assert!(!widget(&edited, "status").enabled);
         fs::remove_dir_all(&dir).expect("cleans up");
     }
 
@@ -793,10 +1038,8 @@ mod tests {
     fn saving_a_position_changes_only_its_numbers() {
         let placed = with_position(DEFAULT_TOML, "standings", 1200, -40).expect("placed");
         let config = Config::parse(&placed).expect("parses");
-        assert_eq!(
-            (config.widgets.standings.x, config.widgets.standings.y),
-            (1200, -40)
-        );
+        let standings = widget(&config, "standings");
+        assert_eq!((standings.x, standings.y), (1200, -40));
         let changed: Vec<(&str, &str)> = DEFAULT_TOML
             .lines()
             .zip(placed.lines())
@@ -853,7 +1096,7 @@ mod tests {
     #[test]
     fn turning_a_widget_off_changes_only_its_value() {
         let off = with_enabled(DEFAULT_TOML, "wind", false).expect("edited");
-        assert!(!Config::parse(&off).expect("parses").widgets.wind.enabled);
+        assert!(!widget(&Config::parse(&off).expect("parses"), "wind").enabled);
         let changed: Vec<(&str, &str)> = DEFAULT_TOML
             .lines()
             .zip(off.lines())
@@ -903,13 +1146,7 @@ mod tests {
         let path = dir.join("config.toml");
         fs::write(&path, DEFAULT_TOML).expect("write");
         save_enabled(&path, "standings", false).expect("saved");
-        assert!(
-            !load_or_create(&path)
-                .expect("loads")
-                .widgets
-                .standings
-                .enabled
-        );
+        assert!(!widget(&load_or_create(&path).expect("loads"), "standings").enabled);
         assert!(!path.with_extension("toml.tmp").exists());
         fs::remove_dir_all(&dir).expect("cleans up");
     }
@@ -930,7 +1167,10 @@ mod tests {
         fs::write(&path, DEFAULT_TOML).expect("write");
         save_position(&path, "fuel", 10, 20).expect("saved");
         let config = load_or_create(&path).expect("loads");
-        assert_eq!((config.widgets.fuel.x, config.widgets.fuel.y), (10, 20));
+        assert_eq!(
+            (widget(&config, "fuel").x, widget(&config, "fuel").y),
+            (10, 20)
+        );
         assert!(!path.with_extension("toml.tmp").exists());
         fs::remove_dir_all(&dir).expect("cleans up");
     }

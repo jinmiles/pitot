@@ -8,7 +8,9 @@ off. It ships next to `pitot-overlay.exe` and runs as its own process.
 - **Overlay**: whether the overlay runs, with *Show widgets* (off is the tray menu's *Hide widgets*) and *Move
   widgets* (the tray menu's *Move widgets*). A change on either side shows on the other at once. When no
   overlay runs, a *Start the overlay* row starts `pitot-overlay.exe` from the same folder.
-- **Widgets**: one switch per widget. A switch writes that widget's `enabled` into `%APPDATA%\Pitot\config.toml`
+- **Widgets**: one switch per widget, for every widget of the overlay's [list](widgets.md) in its order, with
+  the label the list gives it (the window reads the list from `pitot-overlay`, so a new widget needs no change
+  here). A switch writes that widget's `enabled` into `%APPDATA%\Pitot\config.toml`
   in place, changing only that value, so comments and layout stay (a missing key goes under the widget's
   `[widgets.<name>]` header, a missing table at the end; see [Moving widgets](configuration.md#moving-widgets)
   for the same rules). The overlay reloads the file as it does after any edit. Edits made elsewhere show when

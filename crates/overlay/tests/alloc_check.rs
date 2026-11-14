@@ -211,7 +211,7 @@ fn playing_a_capture_does_not_allocate_per_tick() {
     )
     .expect("writes");
     view.set_telemetry_folders(vec![telemetry]);
-    let mut tires = TiresWidget::new(&Config::default().widgets.tires);
+    let mut tires = TiresWidget::new(Config::default().widget("tires").expect("tires"));
     let mut update = |view: &mut View| -> bool {
         let mut redraw = [Redraw::Nothing; MAX_LAYERS];
         tires.update(view, Instant::now(), &mut redraw);
@@ -382,7 +382,7 @@ fn tire_widget_updates_do_not_allocate() {
     };
     let (pipeline, mut view) =
         Pipeline::start(names, reader_config, Vec::new(), None).expect("starts");
-    let mut widget = TiresWidget::new(&Config::default().widgets.tires);
+    let mut widget = TiresWidget::new(Config::default().widget("tires").expect("tires"));
     let mut row = vec![0u8; row_len];
     // Each cycle the tires run on, and every hundredth one is a pit stop that changes wear and temperatures.
     let mut cycle = |n: u32, widget: &mut TiresWidget, view: &mut View| -> bool {
@@ -555,7 +555,7 @@ fn wind_widget_does_not_allocate_per_update() {
         view.poll();
         thread::sleep(Duration::from_millis(2));
     }
-    let mut widget = WindWidget::new(&WidgetConfig {
+    let config = WidgetConfig {
         enabled: true,
         monitor: None,
         x: 0,
@@ -564,8 +564,10 @@ fn wind_widget_does_not_allocate_per_update() {
         height: None,
         rate_hz: None,
         opacity: 0.82,
-        shape: None,
-    });
+        options: toml::Table::new(),
+    };
+    // The wind widget's own variables, as the registry resolves them.
+    let mut widget = WindWidget::new(&config, view.resolve());
     let mut row = [0u8; WIND_ROW];
     // The car turns through every heading and the wind changes, so most updates have something new to show.
     let mut cycle = |n: u32| -> bool {
@@ -686,7 +688,7 @@ fn sectors_widget_does_not_allocate_per_update() {
         height: Some(200),
         rate_hz: None,
         opacity: 0.8,
-        shape: None,
+        options: toml::Table::new(),
     };
     let mut widget = SectorsWidget::new(&widget_config);
     let mut redraw = [Redraw::Nothing; MAX_LAYERS];
@@ -834,7 +836,7 @@ fn standings_and_relative_do_not_allocate_per_update() {
         height: Some(240),
         rate_hz: None,
         opacity: 0.8,
-        shape: None,
+        options: toml::Table::new(),
     };
     let mut widgets = (
         StandingsWidget::new(&widget_config),
@@ -917,7 +919,7 @@ DriverInfo:
 /// The track map maps a lap and then moves the cars' dots and the pit exit without allocating per update.
 #[test]
 fn track_map_does_not_allocate_per_update() {
-    use pitot_overlay::config::{MapShape, WidgetConfig};
+    use pitot_overlay::config::WidgetConfig;
     use pitot_overlay::widgets::{MAX_LAYERS, Redraw, TrackMapWidget, Widget};
 
     let _turn = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
@@ -970,7 +972,7 @@ fn track_map_does_not_allocate_per_update() {
         height: Some(330),
         rate_hz: None,
         opacity: 0.8,
-        shape: Some(MapShape::Outline),
+        options: "shape = \"outline\"".parse().expect("a table"),
     };
     // A pit lane loss learned at this track before, so the pit exit shows.
     std::fs::create_dir_all(&folder).expect("creates the folder");
@@ -1064,7 +1066,7 @@ fn track_map_does_not_allocate_per_update() {
 
     // The circle, the default: no outline, the dots and the pit exit from the first update.
     let circle_config = WidgetConfig {
-        shape: None,
+        options: toml::Table::new(),
         ..widget_config
     };
     let mut circle = TrackMapWidget::with_pit_store(&circle_config, None, Some(pit_store));
@@ -1255,7 +1257,7 @@ fn pit_widget_does_not_allocate_per_update() {
         height: Some(280),
         rate_hz: None,
         opacity: 0.8,
-        shape: None,
+        options: toml::Table::new(),
     };
     let mut widget = PitWidget::with_store(&widget_config, None);
     let mut redraws = 0usize;
@@ -1345,7 +1347,7 @@ fn fuel_widget_does_not_allocate_per_update() {
         height: None,
         rate_hz: None,
         opacity: 0.82,
-        shape: None,
+        options: toml::Table::new(),
     });
     let mut row = [0u8; FUEL_ROW];
     // A lap every 20 updates at 1 L per lap, 80 laps to go with 48 L and a 50 L tank: the pit window and the
@@ -1384,6 +1386,131 @@ fn fuel_widget_does_not_allocate_per_update() {
         ALLOCATIONS.load(Ordering::Relaxed),
         0,
         "allocations across the data thread, view, and fuel widget"
+    );
+    drop(pipeline);
+}
+
+const EVERY_ROW: usize = 32 + 72 * 4 * 4 + 72;
+
+/// Every widget of the list at its defaults, as the render loop makes them, and the shared gap and lap histories:
+/// three cars race on 10 s laps, their lap times arrive a second after the line, the player has incidents and
+/// pit laps, and another car runs wide. A widget added to the list is checked here too.
+#[test]
+fn every_widget_and_the_histories_do_not_allocate_per_update() {
+    use pitot_overlay::widgets::AllWidgets;
+
+    let _turn = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let pid = std::process::id();
+    let names = SdkNames::new(
+        &format!("Local\\PitotOverlayAllocEveryMap-{pid}"),
+        &format!("Local\\PitotOverlayAllocEveryEvent-{pid}"),
+    );
+    let array = |k: usize| 32 + k * 288;
+    let var =
+        |kind, at: usize, count, name| VarHeader::new(kind, at as i32, count, name).expect("valid");
+    let config = PublisherConfig {
+        vars: vec![
+            var(VarType::Double, 0, 1, "SessionTime"),
+            var(VarType::Int, 8, 1, "SessionNum"),
+            var(VarType::Int, 12, 1, "SessionState"),
+            var(VarType::BitField, 16, 1, "SessionFlags"),
+            var(VarType::Int, 20, 1, "PlayerCarIdx"),
+            var(VarType::Bool, 24, 1, "IsOnTrack"),
+            var(VarType::Int, 28, 1, "PlayerCarMyIncidentCount"),
+            var(VarType::Float, array(0), 72, "CarIdxLapDistPct"),
+            var(VarType::Int, array(1), 72, "CarIdxLapCompleted"),
+            var(VarType::Float, array(2), 72, "CarIdxLastLapTime"),
+            var(VarType::Int, array(3), 72, "CarIdxTrackSurface"),
+            var(VarType::Bool, array(4), 72, "CarIdxOnPitRoad"),
+        ],
+        buf_len: EVERY_ROW,
+        num_buf: 3,
+        tick_rate: 60,
+        session_info_capacity: 4096,
+    };
+    let mut publisher = Publisher::create(&names, &config).expect("creates");
+    publisher.set_connected(true).expect("connects");
+    publisher.set_session_info(STANDINGS_SESSION).expect("fits");
+    let reader_config = ReaderConfig {
+        retry_interval: Duration::from_millis(5),
+        idle_timeout: Duration::from_millis(50),
+    };
+    let (pipeline, mut view) =
+        Pipeline::start(names, reader_config, Vec::new(), None).expect("starts");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !view.is_connected() {
+        assert!(Instant::now() < deadline, "connects");
+        view.poll();
+        thread::sleep(Duration::from_millis(2));
+    }
+    let mut widgets = AllWidgets::new(&view);
+    assert!(widgets.len() >= 10, "every widget is made");
+
+    let mut row = [0u8; EVERY_ROW];
+    fn put(row: &mut [u8; EVERY_ROW], at: usize, bytes: [u8; 4]) {
+        row[at..at + 4].copy_from_slice(&bytes);
+    }
+    put(&mut row, 12, 4i32.to_le_bytes());
+    put(&mut row, 20, 1i32.to_le_bytes());
+    row[24] = 1;
+    for car in 3..72 {
+        put(&mut row, array(3) + car * 4, (-1i32).to_le_bytes());
+    }
+    // Updated every half second of session time.
+    let mut cycle = |n: u32, view: &mut View, widgets: &mut AllWidgets| -> (usize, usize) {
+        let t = f64::from(n) * 0.5;
+        row[0..8].copy_from_slice(&t.to_le_bytes());
+        put(&mut row, 28, ((n / 50) as i32).to_le_bytes());
+        for (car, lap, offset) in [(0usize, 10.4f64, 0.6f64), (1, 10.0, 0.3), (2, 9.7, 0.0)] {
+            let progress = 1.0 + offset / lap + t / lap;
+            let laps = progress.floor();
+            let pct = progress - laps;
+            put(&mut row, array(0) + car * 4, (pct as f32).to_le_bytes());
+            put(&mut row, array(1) + car * 4, (laps as i32).to_le_bytes());
+            // The lap's time a second after the line, a little different every lap.
+            let timed = (progress - 1.0 / lap).floor();
+            let time = (lap + 0.01 * (timed % 7.0)) as f32;
+            put(&mut row, array(2) + car * 4, time.to_le_bytes());
+            // The player drives through the pits every fourth lap; car 2 runs wide every third.
+            let pit = car == 1 && laps % 4.0 == 0.0 && pct < 0.2;
+            row[array(4) + car] = u8::from(pit);
+            let wide = car == 2 && laps % 3.0 == 0.0 && (0.4..0.5).contains(&pct);
+            let surface: i32 = if wide { 0 } else { 3 };
+            put(&mut row, array(3) + car * 4, surface.to_le_bytes());
+        }
+        publisher.publish(&row).expect("publishes");
+        thread::sleep(Duration::from_millis(4));
+        view.poll();
+        view.drain_samples(|_| {});
+        widgets.update(view, Instant::now(), 1)
+    };
+    let mut n = 0;
+    // Warm-up: the session info, per-car storage, and the first laps of every car.
+    while view.session().is_none() || n < 200 {
+        assert!(Instant::now() < deadline, "session info parsed");
+        cycle(n, &mut view, &mut widgets);
+        n += 1;
+    }
+    let (_, laps_before) = cycle(n, &mut view, &mut widgets);
+
+    ALLOCATIONS.store(0, Ordering::Relaxed);
+    COUNTING.store(true, Ordering::Relaxed);
+    let mut held = (0, 0);
+    for _ in 0..400 {
+        n += 1;
+        held = cycle(n, &mut view, &mut widgets);
+    }
+    COUNTING.store(false, Ordering::Relaxed);
+    assert!(held.0 > 200, "gap samples taken: {}", held.0);
+    assert!(
+        held.1 >= laps_before + 15,
+        "laps kept: {laps_before} then {}",
+        held.1
+    );
+    assert_eq!(
+        ALLOCATIONS.load(Ordering::Relaxed),
+        0,
+        "allocations across the pipeline, every widget, and the histories"
     );
     drop(pipeline);
 }

@@ -10,8 +10,10 @@ Plans for the [runner](runner.md) live in `benchmarks/`, with the configurations
 
 - `benchmarks/pitot/four.toml` is the reference set of the project plan: input trace, relative, standings, and
   fuel at their default positions and update rates, with the status panel off. `inputs.toml` has the input trace
-  alone. Every field is spelled out, and widgets outside the set are switched off, so a change of defaults or a
-  new widget does not change a benchmark. Both set `start_in_tray = true`, so the [Pitot window](control-window.md)
+  alone. Every field is spelled out, and the first ten widgets outside the set are switched off, so a change of
+  defaults does not change a benchmark. Widgets added later are off by default and need no line here; one that
+  ships on by default must be switched off in both files, which a test checks (it fails while the set is not
+  exactly these widgets). Both set `start_in_tray = true`, so the [Pitot window](control-window.md)
   does not open: it would run as a child process of the overlay and be measured with it.
 - The race replay needs the capture under `data/irdashies/` (see [replay.md](replay.md)) and a release build:
   `cargo build --release -p pitot-overlay -p pitot-bench`.
