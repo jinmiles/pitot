@@ -9,6 +9,7 @@ mod relative;
 mod standings;
 mod status;
 mod text;
+mod tires;
 
 use std::time::{Duration, Instant};
 
@@ -17,6 +18,7 @@ pub use inputs::InputTraceWidget;
 pub use relative::RelativeWidget;
 pub use standings::StandingsWidget;
 pub use status::StatusWidget;
+pub use tires::TiresWidget;
 
 use crate::pipeline::{Display, View};
 use crate::render::{Canvas, Rect};

@@ -12,7 +12,9 @@ use pitot_irsdk::capture::test_capture::{Item, build};
 use pitot_irsdk::layout::{VarHeader, VarType};
 use pitot_irsdk::live::{ReaderConfig, SdkNames};
 use pitot_irsdk::publish::{Publisher, PublisherConfig};
+use pitot_overlay::config::Config;
 use pitot_overlay::pipeline::{Pipeline, RecordingConfig, Source, View};
+use pitot_overlay::widgets::{MAX_LAYERS, Redraw, TiresWidget, Widget};
 
 /// Counts allocations on every thread while switched on: the data thread is internal to the pipeline.
 struct Counting;
@@ -250,6 +252,105 @@ fn playing_a_capture_does_not_allocate_per_tick() {
     );
     drop(pipeline);
     let _ = std::fs::remove_dir_all(folder);
+}
+
+#[test]
+fn tire_widget_updates_do_not_allocate() {
+    let _turn = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let pid = std::process::id();
+    let names = SdkNames::new(
+        &format!("Local\\PitotOverlayAllocTiresMap-{pid}"),
+        &format!("Local\\PitotOverlayAllocTiresEvent-{pid}"),
+    );
+    // Lap and compound, then per corner wear L/M/R, carcass L/M/R, and distance.
+    let mut vars = vec![
+        VarHeader::new(VarType::Int, 0, 1, "Lap").expect("valid"),
+        VarHeader::new(VarType::Int, 4, 1, "PlayerTireCompound").expect("valid"),
+    ];
+    let mut at = 8;
+    for corner in ["LF", "RF", "LR", "RR"] {
+        for name in [
+            "wearL", "wearM", "wearR", "tempCL", "tempCM", "tempCR", "odometer",
+        ] {
+            vars.push(
+                VarHeader::new(VarType::Float, at, 1, &format!("{corner}{name}")).expect("valid"),
+            );
+            at += 4;
+        }
+    }
+    let row_len = at as usize;
+    let config = PublisherConfig {
+        vars,
+        buf_len: row_len,
+        num_buf: 3,
+        tick_rate: 60,
+        session_info_capacity: 4096,
+    };
+    let mut publisher = Publisher::create(&names, &config).expect("creates");
+    publisher.set_connected(true).expect("connects");
+    publisher
+        .set_session_info(
+            b"DriverInfo:\n DriverTires:\n - TireIndex: 0\n   TireCompoundType: \"Hard\"\n",
+        )
+        .expect("fits");
+    let reader_config = ReaderConfig {
+        retry_interval: Duration::from_millis(5),
+        idle_timeout: Duration::from_millis(50),
+    };
+    let (pipeline, mut view) =
+        Pipeline::start(names, reader_config, Vec::new(), None).expect("starts");
+    let mut widget = TiresWidget::new(&Config::default().widgets.tires);
+    let mut row = vec![0u8; row_len];
+    // Each cycle the tires run on, and every hundredth one is a pit stop that changes wear and temperatures.
+    let mut cycle = |n: u32, widget: &mut TiresWidget, view: &mut View| -> bool {
+        row[0..4].copy_from_slice(&((n / 100) as i32).to_le_bytes());
+        let stop = (n / 100) as f32;
+        for c in 0..4 {
+            let base = 8 + c * 28;
+            for z in 0..3 {
+                let wear = 1.0 - stop * 0.01 - z as f32 * 0.001;
+                row[base + z * 4..base + z * 4 + 4].copy_from_slice(&wear.to_le_bytes());
+                let temp = 70.0 + stop + z as f32;
+                row[base + 12 + z * 4..base + 16 + z * 4].copy_from_slice(&temp.to_le_bytes());
+            }
+            let meters = n as f32 * 100.0;
+            row[base + 24..base + 28].copy_from_slice(&meters.to_le_bytes());
+        }
+        publisher.publish(&row).expect("publishes");
+        thread::sleep(Duration::from_millis(4));
+        view.poll();
+        let mut redraw = [Redraw::Nothing; MAX_LAYERS];
+        widget.update(view, Instant::now(), &mut redraw);
+        redraw[0] != Redraw::Nothing
+    };
+    // Warm-up includes the session info, which names the compound.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut n = 0;
+    while view.session().is_none() || n < 150 {
+        assert!(Instant::now() < deadline, "session info parsed");
+        cycle(n, &mut widget, &mut view);
+        n += 1;
+    }
+
+    ALLOCATIONS.store(0, Ordering::Relaxed);
+    COUNTING.store(true, Ordering::Relaxed);
+    let mut redraws = 0;
+    for _ in 0..600 {
+        redraws += usize::from(cycle(n, &mut widget, &mut view));
+        n += 1;
+    }
+    COUNTING.store(false, Ordering::Relaxed);
+
+    assert!(
+        redraws >= 300,
+        "the values kept changing: {redraws} redraws"
+    );
+    assert_eq!(
+        ALLOCATIONS.load(Ordering::Relaxed),
+        0,
+        "allocations across the pipeline and the tire widget's updates"
+    );
+    drop(pipeline);
 }
 
 #[test]

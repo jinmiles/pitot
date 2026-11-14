@@ -43,3 +43,7 @@ width = 420
 height = 150
 rate_hz = 1.0
 opacity = 0.82
+
+# Widgets outside the reference set are off.
+[widgets.tires]
+enabled = false
