@@ -13,7 +13,12 @@
 //! While the sim plays a replay, the data thread publishes a capture of the session at the replayed moment
 //! instead of the live values (see `replay`). Each restart of the capture's input trace, and each switch
 //! between capture and live values, hands the render thread a new connection, so widgets reset.
+//!
+//! The render thread can also ask the session thread for the sim's own telemetry files of the session (see `ibt`),
+//! which the tire widget shows during replays.
 
+#[cfg(windows)]
+mod ibt;
 #[cfg(windows)]
 mod record;
 #[cfg(windows)]
@@ -24,6 +29,10 @@ mod wire;
 pub use vars::Vars;
 pub use wire::{InputSample, SampleRing, SeqBuffer};
 
+#[cfg(all(test, windows))]
+pub(crate) use ibt::tests as ibt_test;
+#[cfg(windows)]
+pub use ibt::{TireSample, TireTrack};
 #[cfg(windows)]
 pub use record::RecordingConfig;
 #[cfg(windows)]
@@ -39,6 +48,9 @@ pub enum Display {
     Idle,
     /// The player is in the car on track; inputs are the driver's own.
     Driving,
+    /// The sim plays a replay and no capture of it shows: the values are live, not the replayed moment's.
+    /// Widgets hide unless they have their own source for the replay.
+    Replay,
 }
 
 /// Samples the ring holds: about eight seconds at 60 Hz, far more than one late frame.
@@ -66,6 +78,7 @@ mod threads {
     use pitot_irsdk::session::{SessionInfo, SessionParser};
     use tracing::info;
 
+    use super::ibt::{TireFinder, TireSample, TireTrack};
     use super::record::{Recorder, RecordingConfig};
     use super::replay::{self, CaptureCache, Found, Plan, Player, SessionIds};
     use super::{
@@ -125,6 +138,8 @@ mod threads {
         Connected(Arc<Connection>),
         Disconnected,
         Session(Weak<Connection>, Arc<SessionInfo>),
+        /// Tire samples of the live session from the sim's telemetry files.
+        Tires(TireTrack),
     }
 
     /// Work for the session thread.
@@ -137,6 +152,12 @@ mod threads {
         },
         /// Look for a capture of the live session that covers the replayed moment.
         Find { at: Moment },
+        /// Look for the sim's telemetry files of the live session, for the replayed moment.
+        FindTires { at: Moment },
+        /// Where the sim's telemetry files are.
+        TireFolders(Vec<PathBuf>),
+        /// The pipeline is being dropped.
+        Stop,
     }
 
     /// Counters for diagnostics and tests.
@@ -154,6 +175,8 @@ mod threads {
     #[derive(Debug)]
     pub struct Pipeline {
         stop: Arc<AtomicBool>,
+        /// The view holds a sender too, so the session thread is told to stop rather than left waiting.
+        jobs: Sender<Job>,
         stats: Arc<PipelineStats>,
         data: Option<JoinHandle<()>>,
         session: Option<JoinHandle<()>>,
@@ -181,6 +204,8 @@ mod threads {
             let stats = Arc::new(PipelineStats::default());
             let (to_render, from_threads) = mpsc::channel();
             let (to_session, session_jobs) = mpsc::channel::<Job>();
+            let to_session_from_view = to_session.clone();
+            let to_session_on_drop = to_session.clone();
             // Text buffers go back to the data thread once parsed, so updates reuse them instead of allocating.
             let (recycle, recycled) = mpsc::channel::<Vec<u8>>();
             let (to_data, found) = mpsc::channel::<Option<Found>>();
@@ -219,6 +244,9 @@ mod threads {
             };
             let view = View {
                 vars,
+                jobs: to_session_from_view,
+                tires: None,
+                tire_search: None,
                 messages: from_threads,
                 connection: None,
                 snapshot: Snapshot::new(),
@@ -230,6 +258,7 @@ mod threads {
             Ok((
                 Self {
                     stop,
+                    jobs: to_session_on_drop,
                     stats,
                     data: Some(data),
                     session: Some(session),
@@ -246,6 +275,8 @@ mod threads {
     impl Drop for Pipeline {
         fn drop(&mut self) {
             self.stop.store(true, Ordering::Relaxed);
+            // Fails only once the session thread has exited.
+            let _ = self.jobs.send(Job::Stop);
             // The data thread notices within one reader timeout; the session thread ends when its sender drops.
             for handle in [self.data.take(), self.session.take()]
                 .into_iter()
@@ -268,6 +299,10 @@ mod threads {
     ) {
         let mut parser = SessionParser::new();
         let mut cache = CaptureCache::default();
+        let mut tire_finder = TireFinder::default();
+        let mut tire_folders: Vec<PathBuf> = Vec::new();
+        // Logged only when it changes, as searches repeat during a replay.
+        let mut tires_found: Option<bool> = None;
         let mut live_ids: Option<SessionIds> = None;
         while let Ok(job) = jobs.recv() {
             match job {
@@ -312,6 +347,25 @@ mod threads {
                         return;
                     }
                 }
+                Job::FindTires { at } => {
+                    let track = live_ids
+                        .and_then(|ids| tire_finder.find(&tire_folders, ids, at, &mut parser));
+                    if tires_found != Some(track.is_some()) {
+                        tires_found = Some(track.is_some());
+                        if track.is_some() {
+                            info!("replay: tire temperatures from the sim's telemetry files");
+                        } else {
+                            info!("replay: no telemetry file of this session");
+                        }
+                    }
+                    if let Some(track) = track
+                        && to_render.send(Message::Tires(track)).is_err()
+                    {
+                        return;
+                    }
+                }
+                Job::TireFolders(folders) => tire_folders = folders,
+                Job::Stop => return,
             }
         }
     }
@@ -636,6 +690,12 @@ mod threads {
     #[derive(Debug)]
     pub struct View {
         vars: Vars,
+        /// For requests to the session thread.
+        jobs: Sender<Job>,
+        /// The live session's tire samples from the sim's telemetry files, once found.
+        tires: Option<TireTrack>,
+        /// When the tire samples were last asked for.
+        tire_search: Option<Instant>,
         messages: Receiver<Message>,
         connection: Option<Arc<Connection>>,
         snapshot: Snapshot,
@@ -662,6 +722,11 @@ mod threads {
                 match message {
                     Message::Connected(connection) => {
                         self.retire_connection();
+                        // A new sim connection may be another session; replay connections keep the samples.
+                        if connection.source == Source::Sim {
+                            self.tires = None;
+                            self.tire_search = None;
+                        }
                         self.snapshot = connection.template.clone();
                         self.connection = Some(connection);
                         self.session = None;
@@ -670,6 +735,8 @@ mod threads {
                     }
                     Message::Disconnected => {
                         self.retire_connection();
+                        self.tires = None;
+                        self.tire_search = None;
                         self.session = None;
                         changes.connection = true;
                     }
@@ -680,6 +747,7 @@ mod threads {
                             changes.session = true;
                         }
                     }
+                    Message::Tires(track) => self.tires = Some(track),
                 }
             }
             if let Some(connection) = &self.connection
@@ -749,6 +817,32 @@ mod threads {
             &self.stats
         }
 
+        /// Where to look for the sim's telemetry files, for the tire samples of replays.
+        pub fn set_telemetry_folders(&self, folders: Vec<PathBuf>) {
+            // Fails only once the session thread has exited.
+            let _ = self.jobs.send(Job::TireFolders(folders));
+        }
+
+        /// Asks for the live session's tire samples around the replayed moment `at`, unless the samples already
+        /// cover it. Searches at most every few seconds, and sends nothing while covered, so it can be called on
+        /// every update.
+        pub fn want_tires(&mut self, at: Moment, now: Instant) {
+            if self.tires.as_ref().is_some_and(|t| t.covers(at))
+                || self
+                    .tire_search
+                    .is_some_and(|last| now.saturating_duration_since(last) < SEARCH_INTERVAL)
+            {
+                return;
+            }
+            self.tire_search = Some(now);
+            let _ = self.jobs.send(Job::FindTires { at });
+        }
+
+        /// The player's tires at the replayed moment `at`, from the sim's telemetry files.
+        pub fn tire_sample(&self, at: Moment) -> Option<&TireSample> {
+            self.tires.as_ref()?.sample_at(at)
+        }
+
         pub fn display(&self) -> Display {
             if self.connection.is_none() || self.version == 0 {
                 return Display::Disconnected;
@@ -761,7 +855,9 @@ mod threads {
                 .snapshot
                 .bool(self.vars.is_replay_playing, 0)
                 .unwrap_or(false);
-            if on_track && !replay {
+            if replay {
+                Display::Replay
+            } else if on_track {
                 Display::Driving
             } else {
                 Display::Idle
