@@ -151,6 +151,9 @@ const CHECKPOINTS: usize = 200;
 /// Within this lap distance of the line, `CarIdxLapDistPct` can wrap a moment before or after
 /// `CarIdxLapCompleted` counts the lap.
 const NEAR_LINE: f32 = 0.1;
+/// The two agree again within a moment; a disagreement that lasts longer than this is real (a car towed across the
+/// line) and the sim's counters are taken as they are.
+const LINE_SETTLE: f64 = 1.0;
 
 /// A car's place in the race for ordering, highest first.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -189,6 +192,8 @@ struct Progress {
     /// The last observation was valid, so the next one continues from it.
     tracking: bool,
     finished: bool,
+    /// Session time since which `value` has been a lap off the sim's counters, or NaN.
+    corrected: f64,
 }
 
 impl Default for Progress {
@@ -198,6 +203,7 @@ impl Default for Progress {
             time: 0.0,
             tracking: false,
             finished: false,
+            corrected: f64::NAN,
         }
     }
 }
@@ -221,8 +227,8 @@ pub(crate) struct RaceClock {
     cars: Vec<Progress>,
     /// Session time each car last passed each checkpoint, `CHECKPOINTS` per car.
     times: Vec<f64>,
-    /// Which pass each time belongs to: `laps * CHECKPOINTS + checkpoint`, or `i64::MIN` for none.
-    marks: Vec<i64>,
+    /// Which pass each time belongs to: `laps * CHECKPOINTS + checkpoint`, or `i32::MIN` for none.
+    marks: Vec<i32>,
     last: f64,
     finish: Finish,
 }
@@ -247,7 +253,7 @@ impl RaceClock {
         self.times.clear();
         self.times.resize(cars * CHECKPOINTS, 0.0);
         self.marks.clear();
-        self.marks.resize(cars * CHECKPOINTS, i64::MIN);
+        self.marks.resize(cars * CHECKPOINTS, i32::MIN);
         self.last = f64::NEG_INFINITY;
         self.finish = Finish::Pending;
     }
@@ -255,7 +261,7 @@ impl RaceClock {
     /// Forgets everything, keeping the storage.
     pub(crate) fn reset(&mut self) {
         self.cars.iter_mut().for_each(|c| *c = Progress::default());
-        self.marks.iter_mut().for_each(|m| *m = i64::MIN);
+        self.marks.iter_mut().for_each(|m| *m = i32::MIN);
         self.last = f64::NEG_INFINITY;
         self.finish = Finish::Pending;
     }
@@ -290,11 +296,24 @@ impl RaceClock {
             let raw = f64::from(laps) + f64::from(pct);
             let continued = c.tracking && now > c.time && now - c.time <= MAX_OBSERVATION_GAP;
             let mut value = raw;
+            let mut corrected = f64::NAN;
             if continued && !(NEAR_LINE..=1.0 - NEAR_LINE).contains(&pct) {
                 // The lap count and the lap distance can disagree by a lap for a moment at the line.
                 for candidate in [raw - 1.0, raw + 1.0] {
                     if (candidate - c.value).abs() < (value - c.value).abs() {
                         value = candidate;
+                    }
+                }
+                if value != raw {
+                    let since = if c.corrected.is_nan() {
+                        now
+                    } else {
+                        c.corrected
+                    };
+                    if now - since <= LINE_SETTLE {
+                        corrected = since;
+                    } else {
+                        value = raw;
                     }
                 }
             }
@@ -303,6 +322,7 @@ impl RaceClock {
                 time: now,
                 tracking: true,
                 finished: false,
+                corrected,
             };
             if continued && value > c.value && value - c.value < 0.5 {
                 self.pass(car, c.value, value, c.time, now);
@@ -318,6 +338,7 @@ impl RaceClock {
                             time: crossed,
                             tracking: false,
                             finished: true,
+                            corrected: f64::NAN,
                         };
                     }
                 }
@@ -352,6 +373,7 @@ impl RaceClock {
                     time: crossed,
                     tracking: false,
                     finished: true,
+                    corrected: f64::NAN,
                 };
             }
         }
@@ -366,12 +388,12 @@ impl RaceClock {
     /// Records when a car passed each checkpoint between two observations, interpolated by distance.
     fn pass(&mut self, car: usize, from: f64, to: f64, t0: f64, t1: f64) {
         let k = CHECKPOINTS as f64;
-        let first = (from * k).floor() as i64 + 1;
-        let last = (to * k).floor() as i64;
+        let first = (from * k).floor() as i32 + 1;
+        let last = (to * k).floor() as i32;
         for mark in first..=last {
             let at = mark as f64 / k;
             let time = t0 + (t1 - t0) * (at - from) / (to - from);
-            let slot = car * CHECKPOINTS + mark.rem_euclid(CHECKPOINTS as i64) as usize;
+            let slot = car * CHECKPOINTS + mark.rem_euclid(CHECKPOINTS as i32) as usize;
             if let (Some(t), Some(m)) = (self.times.get_mut(slot), self.marks.get_mut(slot)) {
                 *t = time;
                 *m = mark;
@@ -381,8 +403,8 @@ impl RaceClock {
 
     /// When `car` last passed the checkpoint at `progress` (a multiple of a checkpoint), if that pass was seen.
     fn crossing(&self, car: usize, progress: f64) -> Option<f64> {
-        let mark = (progress * CHECKPOINTS as f64).round() as i64;
-        let slot = car * CHECKPOINTS + mark.rem_euclid(CHECKPOINTS as i64) as usize;
+        let mark = (progress * CHECKPOINTS as f64).round() as i32;
+        let slot = car * CHECKPOINTS + mark.rem_euclid(CHECKPOINTS as i32) as usize;
         (self.marks.get(slot) == Some(&mark))
             .then(|| self.times.get(slot).copied())
             .flatten()
@@ -573,6 +595,17 @@ mod tests {
             assert!(pa > pb, "step {n}: {pa} {pb}");
             assert!(pa - pb < 0.05, "step {n}: {pa} {pb}");
         }
+        // A car moved across the line without the lap counting (towed into a pit stall just past it): after a
+        // moment the sim's counters are taken as they are.
+        let mut towed = RaceClock::default();
+        towed.resize(1);
+        towed.observe(0.0, false, |_| Some((5, 0.95)));
+        let mut t = 0.5;
+        while t < 10.0 {
+            towed.observe(t, false, |_| Some((5, 0.05)));
+            t += 0.5;
+        }
+        assert!(running(towed.standing(0)).is_some_and(|p| (p - 5.05).abs() < 1e-6));
         // Without a previous observation there is nothing to correct against.
         let mut fresh = RaceClock::default();
         fresh.resize(1);

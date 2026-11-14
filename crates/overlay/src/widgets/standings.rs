@@ -267,6 +267,56 @@ impl CarRow {
             sector_sign: [0; MAX_SECTOR_COLUMNS],
         }
     }
+
+    /// Equal but for the gap and interval, which in a race change on every update.
+    fn same_but_gaps(&self, other: &Self) -> bool {
+        let Self {
+            player,
+            leader,
+            in_pit,
+            break_before,
+            color,
+            position,
+            change,
+            change_text,
+            number,
+            name,
+            license,
+            license_color,
+            rating,
+            rating_change,
+            rating_change_text,
+            maker,
+            tire,
+            gap: _,
+            interval: _,
+            last_lap,
+            mark,
+            sectors,
+            sector_sign,
+        } = self;
+        *player == other.player
+            && *leader == other.leader
+            && *in_pit == other.in_pit
+            && *break_before == other.break_before
+            && *color == other.color
+            && *position == other.position
+            && *change == other.change
+            && *change_text == other.change_text
+            && *number == other.number
+            && *name == other.name
+            && *license == other.license
+            && *license_color == other.license_color
+            && *rating == other.rating
+            && *rating_change == other.rating_change
+            && *rating_change_text == other.rating_change_text
+            && *maker == other.maker
+            && *tire == other.tire
+            && *last_lap == other.last_lap
+            && *mark == other.mark
+            && *sectors == other.sectors
+            && *sector_sign == other.sector_sign
+    }
 }
 
 // Rows live in fixed vectors and move between them and the spare pools by value, so boxing the variants would
@@ -1061,6 +1111,15 @@ impl Columns {
     }
 }
 
+/// Draws text only when its cell reaches into the area being redrawn: clipped text still costs DirectWrite its
+/// layout, and in a race most updates redraw only the gap columns.
+fn text_in(canvas: &mut Canvas<'_>, text: &str, rect: Rect, size: f32, align: Align, color: Color) {
+    let area = canvas.area();
+    if rect.x < area.x + area.w && rect.x + rect.w > area.x {
+        canvas.text(text, rect, size, align, color);
+    }
+}
+
 const WHITE: u32 = 0xF0_F2F5;
 const DIM: u32 = 0xA0_A6AE;
 const GREEN: u32 = 0x3D_D68C;
@@ -1084,7 +1143,8 @@ impl StandingsWidget {
         let mut x = 10.0;
         let mut segment = |canvas: &mut Canvas<'_>, text: &str, width: f32, color: Color| {
             if !text.is_empty() && x + width <= w {
-                canvas.text(
+                text_in(
+                    canvas,
                     text,
                     Rect::new(x, y, width, ROW_HEIGHT),
                     TEXT_SIZE,
@@ -1137,7 +1197,8 @@ impl StandingsWidget {
             Rect::new(0.0, y + 2.0, 4.0, ROW_HEIGHT - 4.0),
             Color::rgb(car.color, 1.0),
         );
-        canvas.text(
+        text_in(
+            canvas,
             car.position.as_str(),
             cell(cols.position, 22.0),
             TEXT_SIZE,
@@ -1152,14 +1213,16 @@ impl StandingsWidget {
             } else {
                 ("\u{25BC}", RED)
             };
-            canvas.text(
+            text_in(
+                canvas,
                 arrow,
                 cell(x + 2.0, 12.0),
                 10.0,
                 Align::Center,
                 Color::rgb(color, alpha),
             );
-            canvas.text(
+            text_in(
+                canvas,
                 car.change_text.as_str(),
                 cell(x + 14.0, 18.0),
                 TEXT_SIZE,
@@ -1167,14 +1230,16 @@ impl StandingsWidget {
                 Color::rgb(color, alpha),
             );
         }
-        canvas.text(
+        text_in(
+            canvas,
             car.number.as_str(),
             cell(cols.number, 32.0),
             TEXT_SIZE,
             Align::Right,
             muted,
         );
-        canvas.text(
+        text_in(
+            canvas,
             car.name.as_str(),
             cell(cols.name.0, cols.name.1),
             TEXT_SIZE,
@@ -1186,7 +1251,8 @@ impl StandingsWidget {
                 Rect::new(cols.license, y + 4.0, 38.0, ROW_HEIGHT - 8.0),
                 Color::rgb(car.license_color, 0.85 * alpha),
             );
-            canvas.text(
+            text_in(
+                canvas,
                 car.license.as_str(),
                 cell(cols.license, 38.0),
                 12.0,
@@ -1194,7 +1260,8 @@ impl StandingsWidget {
                 Color::rgb(BACKGROUND, alpha),
             );
         }
-        canvas.text(
+        text_in(
+            canvas,
             car.rating.as_str(),
             cell(cols.rating, 38.0),
             TEXT_SIZE,
@@ -1209,14 +1276,16 @@ impl StandingsWidget {
             } else {
                 ("\u{25BC}", RED)
             };
-            canvas.text(
+            text_in(
+                canvas,
                 arrow,
                 cell(x + 4.0, 10.0),
                 9.0,
                 Align::Center,
                 Color::rgb(color, alpha),
             );
-            canvas.text(
+            text_in(
+                canvas,
                 car.rating_change_text.as_str(),
                 cell(x + 14.0, 26.0),
                 TEXT_SIZE,
@@ -1225,7 +1294,8 @@ impl StandingsWidget {
             );
         }
         if let Some(x) = cols.maker {
-            canvas.text(
+            text_in(
+                canvas,
                 car.maker.as_str(),
                 cell(x, 16.0),
                 TEXT_SIZE,
@@ -1244,12 +1314,20 @@ impl StandingsWidget {
             );
         }
         if car.leader {
-            canvas.text("GAP", cell(cols.gap, 44.0), 11.0, Align::Right, muted);
+            text_in(
+                canvas,
+                "GAP",
+                cell(cols.gap, 44.0),
+                11.0,
+                Align::Right,
+                muted,
+            );
             if let Some(x) = cols.interval {
-                canvas.text("INT", cell(x, 44.0), 11.0, Align::Right, muted);
+                text_in(canvas, "INT", cell(x, 44.0), 11.0, Align::Right, muted);
             }
         } else {
-            canvas.text(
+            text_in(
+                canvas,
                 car.gap.as_str(),
                 cell(cols.gap, 44.0),
                 TEXT_SIZE,
@@ -1257,7 +1335,8 @@ impl StandingsWidget {
                 text,
             );
             if let Some(x) = cols.interval {
-                canvas.text(
+                text_in(
+                    canvas,
                     car.interval.as_str(),
                     cell(x, 44.0),
                     TEXT_SIZE,
@@ -1271,7 +1350,8 @@ impl StandingsWidget {
         } else {
             car.last_lap.as_str()
         };
-        canvas.text(
+        text_in(
+            canvas,
             last,
             cell(cols.last, LAST_WIDTH - 4.0),
             TEXT_SIZE,
@@ -1301,7 +1381,8 @@ impl StandingsWidget {
                 -1 => RED,
                 _ => DIM,
             };
-            canvas.text(
+            text_in(
+                canvas,
                 car.sectors[s].as_str(),
                 cell(sx + s as f32 * SECTOR_WIDTH, SECTOR_WIDTH - 4.0),
                 TEXT_SIZE,
@@ -1323,20 +1404,43 @@ impl Widget for StandingsWidget {
 
     fn update(&mut self, view: &mut View, _now: Instant, redraw: &mut [Redraw; MAX_LAYERS]) {
         self.fill(view);
-        // Only the rows that changed are drawn again; the header's session clock alone changes every second.
-        let changed = |(a, b): (&Row, &Row)| a != b;
-        let pairs = || self.rows.iter().zip(&self.next);
-        let (Some(first), Some(last)) = (pairs().position(changed), pairs().rposition(changed))
-        else {
+        // Only the rows that changed are drawn again: whole rows, or just the gap columns of rows whose gaps alone
+        // changed (in a race, every row on every update). The header's session clock changes every second.
+        // First and last row of each kind of change.
+        let mut whole: Option<(usize, usize)> = None;
+        let mut gaps: Option<(usize, usize)> = None;
+        for (n, (old, new)) in self.rows.iter().zip(&self.next).enumerate() {
+            if old == new {
+                continue;
+            }
+            let range = match (old, new) {
+                (Row::Car(a), Row::Car(b)) if a.same_but_gaps(b) => &mut gaps,
+                _ => &mut whole,
+            };
+            *range = Some(range.map_or((n, n), |(first, _)| (first, n)));
+        }
+        if whole.is_none() && gaps.is_none() {
             return;
-        };
+        }
         std::mem::swap(&mut self.rows, &mut self.next);
-        redraw[0] = Redraw::Area(Rect::new(
-            0.0,
-            first as f32 * ROW_HEIGHT,
-            self.width as f32,
-            (last - first + 1) as f32 * ROW_HEIGHT,
-        ));
+        let w = self.width as f32;
+        let cols = Columns::for_width(w, self.sectors.len());
+        let rows = |(first, last): (usize, usize), x: f32, width: f32| {
+            Rect::new(
+                x,
+                first as f32 * ROW_HEIGHT,
+                width,
+                (last - first + 1) as f32 * ROW_HEIGHT,
+            )
+        };
+        let gap_columns = |range| rows(range, cols.gap, cols.last - cols.gap);
+        redraw[0] = match (whole, gaps) {
+            (Some(a), Some(g)) if g.0 >= a.0 && g.1 <= a.1 => Redraw::Area(rows(a, 0.0, w)),
+            (Some(a), Some(g)) => Redraw::Areas(rows(a, 0.0, w), gap_columns(g)),
+            (Some(a), None) => Redraw::Area(rows(a, 0.0, w)),
+            (None, Some(g)) => Redraw::Area(gap_columns(g)),
+            (None, None) => Redraw::Nothing,
+        };
     }
 
     fn draw(&self, _layer: usize, canvas: &mut Canvas<'_>) {
@@ -1719,9 +1823,9 @@ DriverInfo:
 ...
 ";
 
-    /// A race on 100 s laps at session time `t`: car 2 leads car 1 by 2 s on track although the results still
-    /// have car 1 ahead, car 3 (the player) is 10 s behind car 2, car 4 is 1.05 laps behind car 2. The pace car
-    /// is out ahead of everyone.
+    /// A race on 100 s laps from session time 1000 to `t`: car 2 leads car 1 by 2 s on track although the results
+    /// still have car 1 ahead. Car 3 (the player) starts 10 s behind car 2 and is slower, 125 s laps, so its gaps
+    /// grow by 0.2 s every second. Car 4 is 1.05 laps behind car 2. The pace car is out ahead of everyone.
     fn race_row(t: f64, state: i32) -> Vec<u8> {
         let mut row = vec![0u8; RACE_ROW];
         row[0..8].copy_from_slice(&t.to_le_bytes());
@@ -1731,9 +1835,15 @@ DriverInfo:
             let at = 20 + k * RACE_CARS * 4 + car * 4;
             row[at..at + 4].copy_from_slice(&bytes);
         };
-        let ahead_of_car_2 = [-0.5, 0.02, 0.0, 0.1, 1.05];
-        for (car, behind) in ahead_of_car_2.into_iter().enumerate() {
-            let progress = 3.40 - behind + (t - 1000.0) / 100.0;
+        let start_and_speed = [
+            (3.90, 0.01),
+            (3.38, 0.01),
+            (3.40, 0.01),
+            (3.30, 0.008),
+            (2.35, 0.01),
+        ];
+        for (car, (start, speed)) in start_and_speed.into_iter().enumerate() {
+            let progress = start + speed * (t - 1000.0);
             let laps = progress.floor();
             put(&mut row, 0, car, ((progress - laps) as f32).to_le_bytes());
             put(&mut row, 1, car, (laps as i32).to_le_bytes());
@@ -1851,9 +1961,10 @@ DriverInfo:
             (rows[1].gap.as_str(), rows[1].interval.as_str()),
             ("2.0", "2.0")
         );
+        // 110 s in, car 3 is 10 + 0.2 * 110 s behind car 2 and 8 + 0.2 * 110 s behind car 1.
         assert_eq!(
             (rows[2].gap.as_str(), rows[2].interval.as_str()),
-            ("10.0", "8.0")
+            ("32.0", "30.0")
         );
         assert!(rows[2].player);
         assert_eq!(
@@ -1861,6 +1972,32 @@ DriverInfo:
             "+1L",
             "more than a lap behind the leader"
         );
-        assert_eq!(rows[3].interval.as_str(), "1:35");
+        // Car 3 passed car 4's spot (3.45 laps) 18.75 s after the start.
+        assert_eq!(rows[3].interval.as_str(), "1:31");
+
+        // Half a second later only car 3's gaps change: only the gap columns of its row are drawn again.
+        let mut redraw = [Redraw::Nothing; MAX_LAYERS];
+        widget.update(&mut view, Instant::now(), &mut redraw);
+        assert_eq!(
+            redraw[0],
+            Redraw::Area(Rect::new(0.0, 0.0, 760.0, 5.0 * ROW_HEIGHT))
+        );
+        step(&mut view, 1110.5, session_state::RACING);
+        let mut redraw = [Redraw::Nothing; MAX_LAYERS];
+        widget.update(&mut view, Instant::now(), &mut redraw);
+        let cols = Columns::for_width(760.0, 0);
+        assert_eq!(
+            redraw[0],
+            Redraw::Area(Rect::new(
+                cols.gap,
+                3.0 * ROW_HEIGHT,
+                cols.last - cols.gap,
+                ROW_HEIGHT
+            ))
+        );
+        let Row::Car(car) = &widget.rows[3] else {
+            panic!("car 3's row: {:?}", widget.rows[3]);
+        };
+        assert_eq!((car.gap.as_str(), car.interval.as_str()), ("32.1", "30.1"));
     }
 }

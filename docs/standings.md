@@ -80,9 +80,10 @@ update (2 Hz by default) from before the green flag, so the first gaps are ready
   results' or grid order stands.
 - **At the line** the lap distance can wrap a moment before the lap count goes up, or the other way round, and the
   sim can report a lap distance a hair below zero. Near the line, progress is kept continuous: of the reading and
-  the reading a lap either side, the one closest to the previous progress is taken.
+  the reading a lap either side, the one closest to the previous progress is taken. A disagreement that lasts more
+  than a second is real (a car towed across the line), and the sim's counters are taken as they are.
 - **Cars out of the world** (disconnected, being towed) keep their last progress, so they keep their place until
-  others pass it. A car first seen when it returns starts again from what the sim reports. Cars never seen (in the
+  others pass it. When it returns it goes on from what the sim reports. Cars never seen (in the
   garage since the overlay connected) are placed by their results' laps. Cars on pit road keep their progress
   along the lap. The pace car and spectators are left out.
 - **Finish**: when the checkered flag comes out, the overall leader's finish is the moment it last reached the line,
@@ -95,7 +96,8 @@ update (2 Hz by default) from before the green flag, so the first gaps are ready
   the car ahead is the time since the car ahead passed the spot where this car is now; the gap to the class leader
   the same with the leader. A car more than a lap behind shows whole laps, `+1L`. For a finisher, the gap is taken
   at its finish. Until the car ahead has passed the spot since the overlay connected, the gap falls back to the
-  `CarIdxF2Time` difference. Practice and qualifying keep the best-lap order and gaps.
+  `CarIdxF2Time` difference, and so it does when updates are more than 5 s apart (a rate below 0.2 Hz). Practice
+  and qualifying keep the best-lap order and gaps.
 
 Checked against the AI race capture (41 cars, 3 classes, 10 minutes, about 4 laps), replayed through the overlay's
 code at 2 Hz:
@@ -114,7 +116,10 @@ code at 2 Hz:
 ## Drawing
 
 Rows and text buffers are pooled and reused, so updates do not allocate. Only the rows that changed are drawn
-again (the header's session clock alone changes every second).
+again (the header's session clock alone changes every second). In a race the live gaps change on nearly every
+update while the rest of a row stays the same until cars pass each other or reach the line, so rows whose gaps
+alone changed redraw only the gap and interval columns, and text outside the redrawn area is skipped rather than
+laid out and clipped.
 
 ## Cost
 
@@ -123,3 +128,10 @@ replayed at 1x, `pitot-bench collect` for 60 s after a 12 s warm-up, two runs ea
 and 23.57 ms/s before this layout, 24.79 and 25.26 ms/s with it (+1.3 ms/s); private bytes 14.8 MiB in both. Most
 of the difference is text with letters and digits (license, header values), which DirectWrite lays out on every
 draw; drawing their digits from the glyph atlas is a later optimization.
+
+Live race order and gaps, same setup but the AI race capture replayed at 4x so the race is under way,
+`pitot-bench collect` for 60 s after 80 s, two runs each, alternating: overlay CPU 30.37 and 30.27 ms/s before,
+31.43 and 31.43 ms/s with it (+1.1 ms/s); private bytes at most 20.6 and 18.1 MB before, 22.3 and 19.0 MB with it
+(runs of the same build differ by up to 3 MB; the gap history is 0.17 MB for 72 cars). The gaps now change on every
+update, so the gap columns of the rows shown are drawn twice a second instead of once a lap. At 4x, passes and line
+crossings, which redraw whole rows, come four times as often as in a race.
