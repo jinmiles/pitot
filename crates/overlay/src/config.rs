@@ -856,10 +856,35 @@ mod tests {
         let shape: toml::Table = "shape = \"circle\"".parse().expect("table");
         assert_eq!(widget(&config, "trackmap").options, shape);
         assert!(widget(&config, "status").options.is_empty());
-        let specs: Vec<&str> = widget_specs().iter().map(|s| s.label).take(10).collect();
-        assert_eq!(specs[1], "Input trace");
-        // Widgets added after these are off unless their entry says otherwise.
-        assert!(widget_specs().len() >= 10);
+        // The Pitot window's labels, as its own list had them.
+        let labels: Vec<&str> = widget_specs().iter().map(|s| s.label).take(10).collect();
+        assert_eq!(
+            labels,
+            [
+                "Status",
+                "Input trace",
+                "Relative",
+                "Standings",
+                "Fuel",
+                "Pit stops",
+                "Sectors",
+                "Wind",
+                "Tires",
+                "Track map"
+            ]
+        );
+    }
+
+    /// Every widget's own fields have defaults: a table that leaves them out reads.
+    #[test]
+    fn every_widget_reads_a_table_without_its_own_fields() {
+        for spec in widget_specs() {
+            assert!(
+                (spec.options)(&toml::Table::new()).is_ok(),
+                "{}: its options need #[serde(default)]",
+                spec.name
+            );
+        }
     }
 
     /// A file written by an earlier version, with its edits, reads as it did.
