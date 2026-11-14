@@ -179,7 +179,7 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
 name = "pitot-bench"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "csv",
  "pitot-irsdk",
@@ -192,7 +192,7 @@ dependencies = [
 
 [[package]]
 name = "pitot-irsdk"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "saphyr",
  "saphyr-parser",
@@ -202,7 +202,7 @@ dependencies = [
 
 [[package]]
 name = "pitot-overlay"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "pitot-irsdk",
  "serde",
