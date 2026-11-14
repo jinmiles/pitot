@@ -16,6 +16,7 @@ use crate::pipeline::View;
 use crate::render::{Align, Canvas, Color, Rect};
 
 use super::text::FixedText;
+use super::timing::{SectorClock, SectorStarts};
 use super::{MAX_LAYERS, Redraw, Widget};
 
 const ROW_HEIGHT: f32 = 24.0;
@@ -25,12 +26,8 @@ const LEADERS: usize = 3;
 /// Cars shown on each side of the player in the player's class.
 const AROUND: usize = 3;
 const MAX_CLASSES: usize = 8;
-/// Sectors tracked per car; tracks have up to about ten.
-const MAX_SECTORS: usize = 12;
 /// Sector columns drawn at most.
 const MAX_SECTOR_COLUMNS: usize = 6;
-/// A gap in observations longer than this restarts sector timing for a car.
-const MAX_OBSERVATION_GAP: f64 = 5.0;
 /// `CarIdxTrackSurface` value for a car that is not in the world.
 const NOT_IN_WORLD: i32 = -1;
 
@@ -152,83 +149,6 @@ fn write_delta(out: &mut FixedText, seconds: f32) {
         let _ = write!(out, "{d:.1}");
     } else {
         let _ = write!(out, "{d:.0}");
-    }
-}
-
-/// Times one car's sectors from its lap distance, observed a few times per second. Crossing times are
-/// interpolated between observations by distance.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct SectorClock {
-    pct: f32,
-    time: f64,
-    sector: usize,
-    /// When the car entered its current sector, or negative when unknown.
-    entered: f64,
-    /// Last time of each sector, or 0 when not timed yet.
-    pub last: [f32; MAX_SECTORS],
-}
-
-impl Default for SectorClock {
-    fn default() -> Self {
-        Self {
-            pct: -1.0,
-            time: 0.0,
-            sector: 0,
-            entered: -1.0,
-            last: [0.0; MAX_SECTORS],
-        }
-    }
-}
-
-fn sector_of(starts: &[f32], pct: f32) -> usize {
-    starts.iter().rposition(|&s| s <= pct).unwrap_or(0)
-}
-
-impl SectorClock {
-    /// Feeds the car's lap distance at session time `time`. `valid` is false off track, in the pits, or not in
-    /// the world; timing then restarts.
-    pub(crate) fn observe(&mut self, starts: &[f32], pct: f32, time: f64, valid: bool) {
-        if !valid || starts.len() < 2 || !(0.0..=1.0).contains(&pct) {
-            self.pct = -1.0;
-            self.entered = -1.0;
-            return;
-        }
-        let sector = sector_of(starts, pct);
-        let continued =
-            self.pct >= 0.0 && time > self.time && time - self.time <= MAX_OBSERVATION_GAP;
-        if !continued {
-            self.pct = pct;
-            self.time = time;
-            self.sector = sector;
-            self.entered = -1.0;
-            return;
-        }
-        if sector != self.sector {
-            let next = (self.sector + 1) % starts.len();
-            if sector == next {
-                // Distance travelled since the last observation, and to the boundary, across the line if needed.
-                let wrap = |d: f32| if d < 0.0 { d + 1.0 } else { d };
-                let boundary = starts[next];
-                let travelled = wrap(pct - self.pct);
-                let to_boundary = wrap(boundary - self.pct);
-                let fraction = if travelled > 0.0 {
-                    (to_boundary / travelled).clamp(0.0, 1.0)
-                } else {
-                    1.0
-                };
-                let crossed = self.time + (time - self.time) * f64::from(fraction);
-                if self.entered >= 0.0 {
-                    self.last[self.sector] = (crossed - self.entered) as f32;
-                }
-                self.entered = crossed;
-            } else {
-                // Skipped a sector (or went backwards): the next crossing starts timing again.
-                self.entered = -1.0;
-            }
-            self.sector = sector;
-        }
-        self.pct = pct;
-        self.time = time;
     }
 }
 
@@ -400,8 +320,7 @@ pub struct StandingsWidget {
     /// Index into the current session's results, per car.
     result_of: Vec<Option<usize>>,
     clocks: Vec<SectorClock>,
-    sector_starts: [f32; MAX_SECTORS],
-    sector_count: usize,
+    sectors: SectorStarts,
     /// Class position at the start of the race, per car; 0 when unknown.
     start_positions: Vec<i32>,
     start_session: Option<i64>,
@@ -428,8 +347,7 @@ impl StandingsWidget {
             entries: Vec::with_capacity(72),
             result_of: Vec::with_capacity(72),
             clocks: Vec::with_capacity(72),
-            sector_starts: [0.0; MAX_SECTORS],
-            sector_count: 0,
+            sectors: SectorStarts::default(),
             start_positions: Vec::with_capacity(72),
             start_session: None,
             ratings: Vec::with_capacity(72),
@@ -481,15 +399,8 @@ impl StandingsWidget {
         let now = snap.f64(vars.session_time, 0).unwrap_or(0.0);
 
         // Sector timing for every car.
-        self.sector_count = 0;
-        for sector in info.sectors.iter().take(MAX_SECTORS) {
-            if let Some(start) = sector.start_pct {
-                self.sector_starts[self.sector_count] = start as f32;
-                self.sector_count += 1;
-            }
-        }
-        self.sector_starts[..self.sector_count].sort_unstable_by(f32::total_cmp);
-        let starts = &self.sector_starts[..self.sector_count];
+        self.sectors.load(info);
+        let starts = self.sectors.as_slice();
         for (car, clock) in self.clocks.iter_mut().enumerate() {
             let pct = snap.f32(vars.car_lap_dist_pct, car).unwrap_or(-1.0);
             let in_world = snap.i32(vars.car_track_surface, car) != Some(NOT_IN_WORLD);
@@ -692,7 +603,7 @@ impl StandingsWidget {
                     class_best: class.best,
                     player,
                     clocks: &self.clocks,
-                    sector_count: self.sector_count,
+                    sector_count: self.sectors.len(),
                     start_position: self.start_positions.get(entry.car).copied().unwrap_or(0),
                 };
                 write_car(&mut row, &entry, &context);
@@ -1335,7 +1246,7 @@ impl Widget for StandingsWidget {
             Rect::new(0.0, 0.0, w, h),
             Color::rgb(BACKGROUND, self.opacity),
         );
-        let cols = Columns::for_width(w, self.sector_count);
+        let cols = Columns::for_width(w, self.sectors.len());
         let area = canvas.area();
         for (n, row) in self.rows.iter().enumerate() {
             let y = n as f32 * ROW_HEIGHT;
@@ -1441,34 +1352,6 @@ mod tests {
         assert_eq!(t.as_str(), "1.4");
         write_delta(&mut t, 13.2);
         assert_eq!(t.as_str(), "13");
-    }
-
-    #[test]
-    fn sectors_are_timed_between_crossings() {
-        let starts = [0.0, 0.3, 0.7];
-        let mut clock = SectorClock::default();
-        // 100 s laps, observed every half second: 0.005 of a lap per observation.
-        let mut t = 0.0;
-        let mut pct = 0.01;
-        for _ in 0..450 {
-            clock.observe(&starts, pct, t, true);
-            t += 0.5;
-            pct = (pct + 0.005) % 1.0;
-        }
-        // Each sector takes its share of the 100 s lap.
-        assert!((clock.last[0] - 30.0).abs() < 0.01, "{:?}", clock.last);
-        assert!((clock.last[1] - 40.0).abs() < 0.01, "{:?}", clock.last);
-        assert!((clock.last[2] - 30.0).abs() < 0.01, "{:?}", clock.last);
-
-        // A long gap restarts timing: the next crossing gives no time.
-        let mut clock = SectorClock::default();
-        clock.observe(&starts, 0.25, 0.0, true);
-        clock.observe(&starts, 0.29, 10.0, true);
-        clock.observe(&starts, 0.31, 10.5, true);
-        assert_eq!(clock.last, [0.0; MAX_SECTORS]);
-        // In the pits nothing is timed.
-        clock.observe(&starts, 0.71, 11.0, false);
-        assert_eq!(clock.last, [0.0; MAX_SECTORS]);
     }
 }
 

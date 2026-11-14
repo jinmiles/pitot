@@ -1,6 +1,7 @@
 # Pitot configuration for benchmarks: the four widgets of the reference set (input trace, relative,
-# standings, fuel) at their default positions and rates. The status panel is off. Every field is spelled out, so
-# a change of defaults does not change the benchmark. Widgets go on the primary monitor.
+# standings, fuel) at their default positions and rates. The status panel and the widgets outside the set are
+# off. Every field is spelled out, so a change of defaults does not change the benchmark. Widgets go on the
+# primary monitor.
 
 [general]
 font = "Segoe UI"
@@ -43,3 +44,6 @@ width = 420
 height = 150
 rate_hz = 1.0
 opacity = 0.82
+
+[widgets.sectors]
+enabled = false

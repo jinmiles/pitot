@@ -24,3 +24,6 @@ enabled = false
 
 [widgets.fuel]
 enabled = false
+
+[widgets.sectors]
+enabled = false
