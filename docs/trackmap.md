@@ -68,4 +68,10 @@ Direct2D path with round joins. Updates do not allocate; the per-car buffers are
 
 ## Cost
 
-Measured in the pull request that added the widget; see below.
+Lab PC (Parsec virtual display, release build), the public AI race capture replayed at 1x with the track's outline
+saved, `pitot-bench collect` for 60 s after a 12 s warm-up, the four reference widgets with the map off and on,
+two runs each, alternating: overlay CPU 27.20 and 24.09 ms/s without the map, 29.57 and 28.79 ms/s with it (+2.4
+and +4.7 ms/s); private bytes at most 20.2 and 17.4 MB without, 22.1 and 19.8 MB with (+1.9 and +2.4 MB, of which
+the two 440×330 surfaces are about 1.2 MB). Most of the CPU goes to drawing the whole dots layer again at 10 Hz.
+Moving each dot as its own composition visual, without drawing, is a later optimization. The release binary grows
+by 31 KB.
