@@ -19,7 +19,7 @@ use crate::platform::{
 };
 use crate::render::{Canvas, Layer, RenderError, Renderer, WindowTarget};
 use crate::widgets::{
-    FuelWidget, InputTraceWidget, MAX_LAYERS, Redraw, RelativeWidget, StandingsWidget,
+    FuelWidget, InputTraceWidget, MAX_LAYERS, PitWidget, Redraw, RelativeWidget, StandingsWidget,
     StatusWidget, Widget,
 };
 
@@ -72,6 +72,7 @@ fn create_widget(name: &str, config: &WidgetConfig) -> Option<Box<dyn Widget>> {
         "relative" => Some(Box::new(RelativeWidget::new(config))),
         "standings" => Some(Box::new(StandingsWidget::new(config))),
         "fuel" => Some(Box::new(FuelWidget::new(config))),
+        "pit" => Some(Box::new(PitWidget::new(config))),
         _ => None,
     }
 }
