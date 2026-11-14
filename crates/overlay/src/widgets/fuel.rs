@@ -298,7 +298,8 @@ impl Widget for FuelWidget {
     }
 
     fn interval(&self) -> Duration {
-        Duration::from_secs(1)
+        // 30 Hz: the level moves smoothly, and a lap's fuel is read within a frame of the line.
+        Duration::from_micros(33_333)
     }
 
     fn update(&mut self, view: &mut View, _now: Instant, redraw: &mut [Redraw; MAX_LAYERS]) {

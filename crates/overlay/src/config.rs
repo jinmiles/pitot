@@ -131,7 +131,7 @@ x = 1460
 y = 900
 width = 420
 height = 150
-rate_hz = 1.0
+rate_hz = 30.0
 opacity = 0.82
 
 # Other cars' pit stops: standing time, the fuel it allows, and the pit lane loss. See docs/pit.md.
@@ -268,7 +268,7 @@ impl Default for Widgets {
             inputs: widget(660, 900, Some((600, 120)), Some(60.0)),
             relative: widget(1460, 560, Some((460, 300)), Some(10.0)),
             standings: widget(24, 260, Some((760, 560)), Some(2.0)),
-            fuel: widget(1460, 900, Some((420, 150)), Some(1.0)),
+            fuel: widget(1460, 900, Some((420, 150)), Some(30.0)),
             pit: widget(800, 240, Some((400, 280)), Some(10.0)),
             sectors: widget(800, 24, Some((400, 200)), Some(5.0)),
             wind: widget(1460, 370, Some((200, 170)), Some(5.0)),
