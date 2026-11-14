@@ -1,10 +1,11 @@
 # Pitot configuration for benchmarks: the four widgets of the reference set (input trace, relative,
 # standings, fuel) at their default positions and rates. The status panel and the widgets outside the set are
 # off. Every field is spelled out, so a change of defaults does not change the benchmark. Widgets go on the
-# primary monitor.
+# primary monitor. The Pitot window does not open (start_in_tray), so only the overlay is measured.
 
 [general]
 font = "Segoe UI"
+start_in_tray = true
 
 [widgets.status]
 enabled = false

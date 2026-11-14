@@ -1,12 +1,20 @@
-//! Win32 platform layer: DPI awareness, monitors, overlay windows, the message loop, timers, the tray icon, and
-//! the single-instance lock.
+//! Win32 platform layer: DPI awareness, monitors, overlay windows, the message loop, timers, the tray icon, the
+//! single-instance lock, and the [`link`] to the Pitot window.
 //!
 //! All Win32 `unsafe` for windowing lives here; callers use the safe types below.
 
+mod link;
+
 use std::cell::{Cell, RefCell};
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
+
+pub use link::{
+    CONTROL_EXE, ControlEvent, ControlLink, OVERLAY_EXE, OverlayCommand, activate_control,
+    notify_control, open_control, overlay_running, send_to_overlay, start_sibling,
+};
+use link::{LINK_MESSAGE, TRAY_CLASS, register_class};
 
 use windows::Win32::Foundation::{
     COLORREF, CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE, HINSTANCE, HWND, LPARAM,
@@ -43,12 +51,12 @@ use windows::Win32::UI::WindowsAndMessaging::{
     MF_CHECKED, MF_SEPARATOR, MF_STRING, MSG, MWMO_INPUTAVAILABLE, MsgWaitForMultipleObjectsEx,
     PM_REMOVE, PeekMessageW, PostQuitMessage, QS_ALLINPUT, RegisterClassExW, SW_SHOWNOACTIVATE,
     SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetForegroundWindow,
-    SetLayeredWindowAttributes, SetWindowLongPtrW, SetWindowPos, ShowWindow, TPM_NONOTIFY,
-    TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, WINDOW_EX_STYLE, WM_APP,
-    WM_CAPTURECHANGED, WM_CLOSE, WM_CONTEXTMENU, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE,
-    WM_MOUSEMOVE, WM_NCHITTEST, WM_QUIT, WM_RBUTTONUP, WNDCLASSEXW, WS_EX_LAYERED,
-    WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-    WS_EX_TRANSPARENT, WS_POPUP,
+    SetLayeredWindowAttributes, SetMenuDefaultItem, SetWindowLongPtrW, SetWindowPos, ShowWindow,
+    TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage,
+    WINDOW_EX_STYLE, WM_APP, WM_CAPTURECHANGED, WM_CLOSE, WM_CONTEXTMENU, WM_LBUTTONDBLCLK,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_NCHITTEST, WM_QUIT,
+    WM_RBUTTONUP, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP,
+    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 use windows::core::{PCWSTR, w};
 
@@ -187,36 +195,42 @@ pub fn monitors() -> Vec<Monitor> {
 }
 
 const TRAY_MESSAGE: u32 = WM_APP + 1;
-const CMD_RELOAD: u8 = 1;
-const CMD_QUIT: u8 = 2;
-const CMD_HIDE: u8 = 3;
-const CMD_MOVE: u8 = 4;
+const CMD_RELOAD: usize = 1;
+const CMD_QUIT: usize = 2;
+const CMD_HIDE: usize = 3;
+const CMD_MOVE: usize = 4;
+const CMD_OPEN: usize = 5;
 
-/// Tray menu choice waiting to be handled by the app loop: one of the `CMD_` values, or 0.
-static PENDING: AtomicU8 = AtomicU8::new(0);
 /// Whether the menu shows *Hide widgets* checked; set by the app through [`Tray::set_hidden`].
 static HIDDEN: AtomicBool = AtomicBool::new(false);
 /// Whether the menu shows *Move widgets* checked; set by the app through [`Tray::set_moving`].
 static MOVING: AtomicBool = AtomicBool::new(false);
 
-/// A command chosen from the tray menu.
+/// A command from the tray menu or the Pitot window, for the app loop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrayCommand {
     Reload,
-    /// Hide the widgets if they are shown, show them if they are hidden.
-    ToggleHidden,
+    /// Hide the widgets, or show them again.
+    SetHidden(bool),
     /// Start or end moving widgets with the mouse.
-    ToggleMove,
+    SetMoving(bool),
 }
 
-/// Takes the pending tray command, if any. Quit ends the message loop instead.
+thread_local! {
+    // The tray window belongs to the app thread, so its commands queue there.
+    static COMMANDS: RefCell<Vec<TrayCommand>> = const { RefCell::new(Vec::new()) };
+}
+
+fn push_command(command: TrayCommand) {
+    COMMANDS.with(|commands| commands.borrow_mut().push(command));
+}
+
+/// Takes the oldest command waiting, if any. Quit ends the message loop instead.
 pub fn take_tray_command() -> Option<TrayCommand> {
-    match PENDING.swap(0, Ordering::Relaxed) {
-        CMD_RELOAD => Some(TrayCommand::Reload),
-        CMD_HIDE => Some(TrayCommand::ToggleHidden),
-        CMD_MOVE => Some(TrayCommand::ToggleMove),
-        _ => None,
-    }
+    COMMANDS.with(|commands| {
+        let mut commands = commands.borrow_mut();
+        (!commands.is_empty()).then(|| commands.remove(0))
+    })
 }
 
 unsafe extern "system" fn window_proc(
@@ -235,18 +249,39 @@ unsafe extern "system" fn window_proc(
             unsafe { PostQuitMessage(0) };
             LRESULT(0)
         }
-        // Either button opens the menu: a left click is what most people try first.
-        TRAY_MESSAGE
-            if matches!(
-                lparam.0 as u32,
-                WM_LBUTTONUP | WM_RBUTTONUP | WM_CONTEXTMENU
-            ) =>
-        {
-            show_tray_menu(hwnd);
+        // A left click opens the Pitot window, a right click the menu.
+        TRAY_MESSAGE => {
+            match lparam.0 as u32 {
+                WM_LBUTTONUP | WM_LBUTTONDBLCLK => open_window(),
+                WM_RBUTTONUP | WM_CONTEXTMENU => show_tray_menu(hwnd),
+                _ => {}
+            }
+            LRESULT(0)
+        }
+        LINK_MESSAGE => {
+            match OverlayCommand::decode(wparam.0, lparam.0) {
+                Some(OverlayCommand::Hello) => {
+                    notify_control(ControlEvent::State {
+                        hidden: HIDDEN.load(Ordering::Relaxed),
+                        moving: MOVING.load(Ordering::Relaxed),
+                    });
+                }
+                Some(OverlayCommand::SetHidden(on)) => push_command(TrayCommand::SetHidden(on)),
+                Some(OverlayCommand::SetMoving(on)) => push_command(TrayCommand::SetMoving(on)),
+                // SAFETY: posts WM_QUIT to this thread's own message queue.
+                Some(OverlayCommand::Quit) => unsafe { PostQuitMessage(0) },
+                None => {}
+            }
             LRESULT(0)
         }
         // SAFETY: forwards unchanged arguments for default handling.
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
+    }
+}
+
+fn open_window() {
+    if let Err(e) = open_control() {
+        tracing::warn!("cannot open the Pitot window ({CONTROL_EXE} next to the overlay): {e}");
     }
 }
 
@@ -263,26 +298,15 @@ fn show_tray_menu(hwnd: HWND) {
                 MF_STRING
             }
         };
-        let _ = AppendMenuW(
-            menu,
-            checked(&MOVING),
-            usize::from(CMD_MOVE),
-            w!("Move widgets"),
-        );
-        let _ = AppendMenuW(
-            menu,
-            checked(&HIDDEN),
-            usize::from(CMD_HIDE),
-            w!("Hide widgets"),
-        );
-        let _ = AppendMenuW(
-            menu,
-            MF_STRING,
-            usize::from(CMD_RELOAD),
-            w!("Reload configuration"),
-        );
+        let _ = AppendMenuW(menu, MF_STRING, CMD_OPEN, w!("Open Pitot"));
+        // Shown in bold, as what a left click does.
+        let _ = SetMenuDefaultItem(menu, CMD_OPEN as u32, 0);
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
-        let _ = AppendMenuW(menu, MF_STRING, usize::from(CMD_QUIT), w!("Quit Pitot"));
+        let _ = AppendMenuW(menu, checked(&MOVING), CMD_MOVE, w!("Move widgets"));
+        let _ = AppendMenuW(menu, checked(&HIDDEN), CMD_HIDE, w!("Hide widgets"));
+        let _ = AppendMenuW(menu, MF_STRING, CMD_RELOAD, w!("Reload configuration"));
+        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
+        let _ = AppendMenuW(menu, MF_STRING, CMD_QUIT, w!("Quit Pitot"));
         let mut cursor = POINT::default();
         let _ = GetCursorPos(&mut cursor);
         // Required so the menu closes when the user clicks elsewhere.
@@ -291,11 +315,12 @@ fn show_tray_menu(hwnd: HWND) {
         // With TPM_RETURNCMD the result is the chosen item's id, or 0.
         let chosen = TrackPopupMenu(menu, flags, cursor.x, cursor.y, None, hwnd, None).0;
         let _ = DestroyMenu(menu);
-        match u8::try_from(chosen) {
+        match usize::try_from(chosen) {
             Ok(CMD_QUIT) => PostQuitMessage(0),
-            Ok(command @ (CMD_RELOAD | CMD_HIDE | CMD_MOVE)) => {
-                PENDING.store(command, Ordering::Relaxed)
-            }
+            Ok(CMD_OPEN) => open_window(),
+            Ok(CMD_RELOAD) => push_command(TrayCommand::Reload),
+            Ok(CMD_HIDE) => push_command(TrayCommand::SetHidden(!HIDDEN.load(Ordering::Relaxed))),
+            Ok(CMD_MOVE) => push_command(TrayCommand::SetMoving(!MOVING.load(Ordering::Relaxed))),
             _ => {}
         }
     }
@@ -308,26 +333,23 @@ fn instance() -> Result<HINSTANCE, PlatformError> {
         .map_err(|e| error("GetModuleHandleW", &e))
 }
 
+/// The class of the overlay windows, registered on first use.
 fn class() -> Result<PCWSTR, PlatformError> {
     static REGISTERED: OnceLock<Result<(), PlatformError>> = OnceLock::new();
     let name = w!("PitotOverlay");
     REGISTERED
-        .get_or_init(|| {
-            let class = WNDCLASSEXW {
-                cbSize: size_of::<WNDCLASSEXW>() as u32,
-                lpfnWndProc: Some(window_proc),
-                hInstance: instance()?,
-                lpszClassName: name,
-                ..Default::default()
-            };
-            // SAFETY: the class structure is fully initialized and its strings are static.
-            if unsafe { RegisterClassExW(&class) } == 0 {
-                return Err(last_error("RegisterClassExW"));
-            }
-            Ok(())
-        })
+        .get_or_init(|| register_class(name, Some(window_proc)))
         .clone()?;
     Ok(name)
+}
+
+/// The class of the tray window: the overlay windows' behavior under a name the Pitot window looks for.
+fn tray_class() -> Result<PCWSTR, PlatformError> {
+    static REGISTERED: OnceLock<Result<(), PlatformError>> = OnceLock::new();
+    REGISTERED
+        .get_or_init(|| register_class(TRAY_CLASS, Some(window_proc)))
+        .clone()?;
+    Ok(TRAY_CLASS)
 }
 
 /// Extended styles of the overlay windows. Only `WS_EX_LAYERED` together with `WS_EX_TRANSPARENT` takes a
@@ -351,12 +373,16 @@ pub struct OverlayWindow {
 impl OverlayWindow {
     /// Creates a window covering `rect` and shows it without activating it.
     pub fn create(rect: ScreenRect) -> Result<Self, PlatformError> {
+        Self::create_in(class()?, rect)
+    }
+
+    fn create_in(class: PCWSTR, rect: ScreenRect) -> Result<Self, PlatformError> {
         let style = OVERLAY_STYLE;
         // SAFETY: the class is registered and all strings are static; no creation parameter is passed.
         let hwnd = unsafe {
             CreateWindowExW(
                 style,
-                class()?,
+                class,
                 w!("Pitot"),
                 WS_POPUP,
                 rect.x,
@@ -660,8 +686,9 @@ impl Drop for MoveHandle {
     }
 }
 
-/// The notification-area icon with its menu (Move widgets, Hide widgets, Reload configuration, Quit), owned
-/// by a hidden window.
+/// The notification-area icon, owned by a hidden window that the Pitot window finds by its class. A left click
+/// opens the Pitot window; a right click opens the menu (Open Pitot, Move widgets, Hide widgets, Reload
+/// configuration, Quit).
 #[derive(Debug)]
 pub struct Tray {
     window: OverlayWindow,
@@ -669,7 +696,7 @@ pub struct Tray {
 
 impl Tray {
     pub fn create() -> Result<Self, PlatformError> {
-        let window = OverlayWindow::create(ScreenRect::default())?;
+        let window = OverlayWindow::create_in(tray_class()?, ScreenRect::default())?;
         let mut data = tray_data(window.hwnd);
         data.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
         data.uCallbackMessage = TRAY_MESSAGE;
@@ -756,6 +783,8 @@ impl Drop for Timer {
 
 /// Name of the mutex that marks a running overlay in this Windows session.
 const INSTANCE_MUTEX: PCWSTR = w!("Local\\PitotOverlay");
+/// Name of the mutex that marks an open Pitot window in this Windows session.
+const CONTROL_MUTEX: PCWSTR = w!("Local\\PitotControl");
 
 /// Held for the life of the process so that a second overlay can tell one is already running. The OS releases
 /// it when the process exits, also after a crash.
@@ -768,6 +797,11 @@ impl SingleInstance {
     /// Takes the overlay's instance lock. `Ok(None)` means another overlay in this session holds it.
     pub fn acquire() -> Result<Option<Self>, PlatformError> {
         Self::acquire_named(INSTANCE_MUTEX)
+    }
+
+    /// Takes the Pitot window's instance lock. `Ok(None)` means a Pitot window is already open in this session.
+    pub fn acquire_control() -> Result<Option<Self>, PlatformError> {
+        Self::acquire_named(CONTROL_MUTEX)
     }
 
     fn acquire_named(name: PCWSTR) -> Result<Option<Self>, PlatformError> {
@@ -950,12 +984,30 @@ mod tests {
     }
 
     #[test]
-    fn tray_choices_reach_the_app_once() {
-        PENDING.store(CMD_HIDE, Ordering::Relaxed);
-        assert_eq!(take_tray_command(), Some(TrayCommand::ToggleHidden));
-        assert_eq!(take_tray_command(), None, "taken once");
-        PENDING.store(CMD_RELOAD, Ordering::Relaxed);
+    fn tray_choices_reach_the_app_once_in_order() {
+        push_command(TrayCommand::SetHidden(true));
+        push_command(TrayCommand::Reload);
+        assert_eq!(take_tray_command(), Some(TrayCommand::SetHidden(true)));
         assert_eq!(take_tray_command(), Some(TrayCommand::Reload));
+        assert_eq!(take_tray_command(), None, "taken once");
+    }
+
+    #[test]
+    fn the_pitot_window_reaches_the_app_through_the_tray_window() {
+        // A window of the tray's class, without the icon. Messages are sent to it directly rather than found by
+        // class, so an overlay running on this machine is not involved.
+        let window = OverlayWindow::create_in(tray_class().expect("class"), ScreenRect::default())
+            .expect("window");
+        let send = |command: OverlayCommand| {
+            let (c, v) = command.encode();
+            // SAFETY: sends to a window of this thread; its procedure runs synchronously.
+            unsafe { SendMessageW(window.hwnd, LINK_MESSAGE, Some(WPARAM(c)), Some(LPARAM(v))) };
+        };
+        send(OverlayCommand::SetMoving(true));
+        send(OverlayCommand::SetHidden(false));
+        assert_eq!(take_tray_command(), Some(TrayCommand::SetMoving(true)));
+        assert_eq!(take_tray_command(), Some(TrayCommand::SetHidden(false)));
+        assert_eq!(take_tray_command(), None);
     }
 
     #[test]
