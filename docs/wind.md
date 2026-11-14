@@ -42,4 +42,6 @@ changes. Text buffers are reused, so updates do not allocate.
 
 Lab PC (Parsec virtual display, release build), the home PC capture of an online practice session replayed at
 1x, the four reference widgets plus the wind widget against the same build without it, `pitot-bench collect` for
-60 s after a 12 s warm-up, two runs each, alternating: see the pull request that added the widget.
+60 s after a 12 s warm-up, two runs each, alternating, while other builds ran on the PC: overlay CPU 32.48 and
+32.14 ms/s without it, 31.08 and 34.04 ms/s with it (+0.25 ms/s on average, within the run-to-run spread);
+private bytes within the usual run-to-run spread (17.6 to 20.9 MB).
