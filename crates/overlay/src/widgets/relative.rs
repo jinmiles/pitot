@@ -2,11 +2,17 @@
 //! track temperature, incidents, clock) and a footer (lap, time of day in the sim, session time).
 //!
 //! Order on track comes from lap distance, normalized to half a lap either way so cars across the start line are
-//! placed correctly. The time gap is the distance times the player's lap time. For cars of the player's class,
-//! `CarIdxEstTime` (the sim's estimate of time into the lap) gives a more accurate gap and is used when it agrees
-//! with the distance. It is not compared across classes, because each class's estimate follows its own pace.
+//! placed correctly. The time gap is measured: for a car ahead, the time since it was where the player is now;
+//! for a car behind, the time since the player was where that car is. The passes come from the [`RaceClock`]
+//! shared with the standings, so laps and classes do not matter.
+//!
+//! Until a pass has been seen, or when either car is on pit road, the gap is estimated instead: the distance times
+//! the player's lap time, or for cars of the player's class `CarIdxEstTime` (the sim's estimate of time into the
+//! lap) when it agrees with the distance. Estimated times are not compared across classes, because each class's
+//! estimate follows its own pace.
 
 use std::fmt::Write as _;
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use pitot_irsdk::flags::session_flags;
@@ -18,6 +24,7 @@ use crate::render::{Align, Canvas, Color, Rect};
 
 use super::standings::{maker_letter, short_license, write_clock, write_length};
 use super::text::FixedText;
+use super::trackclock::{SharedTrackClock, TrackClock};
 use super::{MAX_LAYERS, Redraw, Widget};
 
 /// Cars shown on each side of the player.
@@ -41,7 +48,7 @@ pub(crate) fn normalize_gap(gap: f32, lap: f32) -> f32 {
     gap
 }
 
-/// Gap in seconds from the player to a car, positive when the car is ahead on track.
+/// Estimated gap in seconds from the player to a car, positive when the car is ahead on track.
 ///
 /// Distance decides the side. Estimated times are only comparable within a class, so they refine the gap for
 /// same-class cars and only when they agree with the distance.
@@ -73,6 +80,17 @@ pub(crate) fn lap_difference(
         diff += 1;
     }
     diff
+}
+
+/// The gap to show, positive when the car is ahead on track: the measured gap on track when the clock saw the
+/// pass, else the estimate. `measured` is the time since the car ahead of the two was where the other is; a pass
+/// older than a lap is stale.
+pub(crate) fn chosen_gap(ahead: bool, measured: Option<f64>, estimate: f32, lap: f32) -> f32 {
+    match measured.filter(|&g| (0.0..=f64::from(lap)).contains(&g)) {
+        Some(g) if ahead => g as f32,
+        Some(g) => -(g as f32),
+        None => estimate,
+    }
 }
 
 /// A gap as its size in seconds to the tenth, without a sign: the row's place shows the side.
@@ -200,12 +218,15 @@ pub struct RelativeWidget {
     next: Vec<Row>,
     frame: Frame,
     next_frame: Frame,
-    /// (gap, car index) of cars on track this update; capacity grows to the car count once.
-    cars: Vec<(f32, usize)>,
+    /// (lap distance from the player, gap, car index) of cars on track this update; capacity grows to the car
+    /// count once.
+    cars: Vec<(f32, f32, usize)>,
     /// Per car: on pit road at the last update, and the completed-lap count at its last pit exit (an out lap
     /// lasts while the count is unchanged), or -1.
     on_pit: Vec<bool>,
     out_lap_of: Vec<i32>,
+    /// Each car's passes around the lap, shared with the standings.
+    clock: SharedTrackClock,
 }
 
 /// Rows: the header, the cars, and the footer.
@@ -213,6 +234,11 @@ const SLOTS: usize = ROWS + 2;
 
 impl RelativeWidget {
     pub fn new(config: &WidgetConfig) -> Self {
+        Self::with_clock(config, TrackClock::shared())
+    }
+
+    /// A relative widget timing gaps with `clock`, which other widgets may observe too.
+    pub(crate) fn with_clock(config: &WidgetConfig, clock: SharedTrackClock) -> Self {
         Self {
             width: config.width.unwrap_or(460),
             height: config.height.unwrap_or(300).max(SLOTS as u32 * 12),
@@ -224,6 +250,7 @@ impl RelativeWidget {
             cars: Vec::with_capacity(72),
             on_pit: Vec::with_capacity(72),
             out_lap_of: Vec::with_capacity(72),
+            clock,
         }
     }
 
@@ -322,10 +349,19 @@ impl RelativeWidget {
             .unwrap_or(FALLBACK_LAP);
         let pct = |i: usize| snap.f32(vars.car_lap_dist_pct, i).unwrap_or(-1.0);
         let est = |i: usize| snap.f32(vars.car_est_time, i).unwrap_or(0.0);
+        let on_pit = |i: usize| snap.bool(vars.car_on_pit_road, i).unwrap_or(false);
         let (player_pct, player_est) = (pct(player), est(player));
         if player_pct < 0.0 {
             return;
         }
+        if let Ok(mut clock) = self.clock.try_borrow_mut() {
+            clock.observe(view);
+        }
+        let shared = Rc::clone(&self.clock);
+        let Ok(clock) = shared.try_borrow() else {
+            return;
+        };
+        let clock = clock.clock();
         self.cars.clear();
         for i in 0..count {
             if i == player || pct(i) < 0.0 {
@@ -343,26 +379,39 @@ impl RelativeWidget {
                     .or_else(|| driver(idx).and_then(|d| d.car_class_id))
             };
             let same_class = class_of(i) == class_of(player);
-            let gap = car_gap((pct(i), est(i)), (player_pct, player_est), lap, same_class);
-            self.cars.push((gap, i));
+            let estimate = car_gap((pct(i), est(i)), (player_pct, player_est), lap, same_class);
+            let distance = normalize_gap(pct(i) - player_pct, 1.0);
+            let ahead = distance > 0.0;
+            // Pit road does not follow the track's speeds, so a pass there says little.
+            let measured = if on_pit(i) || on_pit(player) {
+                None
+            } else if ahead {
+                clock.track_gap(i, player)
+            } else {
+                clock.track_gap(player, i)
+            };
+            let gap = chosen_gap(ahead, measured, estimate, lap);
+            self.cars.push((distance, gap, i));
         }
-        // Nearest ahead (smallest positive gaps) and nearest behind (largest negative gaps).
+        // Nearest ahead (smallest positive distances) and nearest behind (largest negative distances).
         self.cars.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
-        let split = self.cars.partition_point(|&(gap, _)| gap <= 0.0);
+        let split = self
+            .cars
+            .partition_point(|&(distance, _, _)| distance <= 0.0);
         let behind = self.cars[..split].iter().rev().take(SIDE);
         let ahead = self.cars[split..].iter().take(SIDE);
         let lap_of = |i: usize| snap.i32(vars.car_lap, i).unwrap_or(0);
         // Rows: farthest ahead at the top, the player in the middle, farthest behind at the bottom.
-        let mut slots: [Option<(f32, usize)>; ROWS] = [None; ROWS];
+        let mut slots: [Option<(f32, f32, usize)>; ROWS] = [None; ROWS];
         for (n, &car) in ahead.enumerate() {
             slots[SIDE - 1 - n] = Some(car);
         }
-        slots[SIDE] = Some((0.0, player));
+        slots[SIDE] = Some((0.0, 0.0, player));
         for (n, &car) in behind.enumerate() {
             slots[SIDE + 1 + n] = Some(car);
         }
         for (row, slot) in self.next.iter_mut().zip(slots) {
-            let Some((gap, i)) = slot else {
+            let Some((distance, gap, i)) = slot else {
                 continue;
             };
             let info = driver(i);
@@ -373,7 +422,8 @@ impl RelativeWidget {
             row.black_flag = snap
                 .bitfield(vars.car_session_flags, i)
                 .is_some_and(|f| f & session_flags::BLACK != 0);
-            row.laps = match lap_difference(lap_of(i), pct(i), lap_of(player), player_pct, gap) {
+            row.laps = match lap_difference(lap_of(i), pct(i), lap_of(player), player_pct, distance)
+            {
                 d if d > 0 && !row.player => Laps::Ahead,
                 d if d < 0 && !row.player => Laps::Behind,
                 _ => Laps::Same,
@@ -686,6 +736,9 @@ impl Widget for RelativeWidget {
         }
         self.on_pit.iter_mut().for_each(|p| *p = false);
         self.out_lap_of.iter_mut().for_each(|l| *l = -1);
+        if let Ok(mut clock) = self.clock.try_borrow_mut() {
+            clock.reset();
+        }
     }
 }
 
@@ -767,6 +820,18 @@ mod tests {
     }
 
     #[test]
+    fn measured_gaps_win_unless_missing_or_stale() {
+        assert_eq!(chosen_gap(true, Some(1.25), 1.0, 90.0), 1.25);
+        assert_eq!(chosen_gap(false, Some(2.5), -2.0, 90.0), -2.5);
+        assert_eq!(chosen_gap(true, None, 1.0, 90.0), 1.0, "not seen yet");
+        assert_eq!(
+            chosen_gap(false, Some(95.0), -2.0, 90.0),
+            -2.0,
+            "older than a lap"
+        );
+    }
+
+    #[test]
     fn lap_difference_handles_the_line() {
         // Same lap, car ahead on track.
         assert_eq!(lap_difference(5, 0.6, 5, 0.5, 1.0), 0);
@@ -778,5 +843,204 @@ mod tests {
         assert_eq!(lap_difference(6, 0.45, 5, 0.5, -2.0), 1);
         // Car a lap down, just ahead on track.
         assert_eq!(lap_difference(4, 0.55, 5, 0.5, 2.0), -1);
+    }
+}
+
+/// The widget against a simulated sim: telemetry through the real pipeline.
+#[cfg(all(test, windows))]
+mod pipeline_tests {
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    use pitot_irsdk::layout::{VarHeader, VarType};
+    use pitot_irsdk::live::{ReaderConfig, SdkNames};
+    use pitot_irsdk::publish::{Publisher, PublisherConfig};
+
+    use super::*;
+    use crate::pipeline::Pipeline;
+    use crate::widgets::StandingsWidget;
+
+    const CARS: usize = 5;
+    /// Per-car arrays of four bytes from byte 16, then the pit road flags (one byte each).
+    const PIT_AT: usize = 16 + 5 * CARS * 4;
+    const ROW: usize = PIT_AT + CARS;
+
+    /// A practice session: the sim estimates the player's lap at 90 s, the cars do 100 s laps.
+    const SESSION: &str = "---
+WeekendInfo:
+ TrackID: 7
+SessionInfo:
+ Sessions:
+ - SessionNum: 0
+   SessionLaps: unlimited
+   SessionTime: 3600.0000 sec
+   SessionType: Practice
+DriverInfo:
+ DriverCarIdx: 1
+ DriverCarEstLapTime: 90.0000
+ Drivers:
+ - CarIdx: 0
+   CarNumber: 0
+   CarIsPaceCar: 1
+ - CarIdx: 1
+   CarNumber: 1
+   CarClassID: 10
+ - CarIdx: 2
+   CarNumber: 2
+   CarClassID: 10
+ - CarIdx: 3
+   CarNumber: 3
+   CarClassID: 11
+ - CarIdx: 4
+   CarNumber: 4
+   CarClassID: 10
+...
+";
+
+    /// At session time `t` on 100 s laps: the player (car 1) at 2.30 laps at 0 s, car 2 3 s ahead, car 3 (another
+    /// class) 5 s behind, car 4 10 s ahead on track but a lap down. Car 2 is on pit road when `car_2_in_pit`.
+    fn row(t: f64, car_2_in_pit: bool) -> Vec<u8> {
+        let mut row = vec![0u8; ROW];
+        row[0..8].copy_from_slice(&t.to_le_bytes());
+        row[12..16].copy_from_slice(&1i32.to_le_bytes());
+        let put = |row: &mut Vec<u8>, k: usize, car: usize, bytes: [u8; 4]| {
+            let at = 16 + k * CARS * 4 + car * 4;
+            row[at..at + 4].copy_from_slice(&bytes);
+        };
+        let starts = [2.80, 2.30, 2.33, 2.25, 1.40];
+        let best = [0.0f32, 100.0, 99.5, 100.4, 101.0];
+        let class_position = [0i32, 2, 1, 1, 3];
+        for (car, start) in starts.into_iter().enumerate() {
+            let progress = start + t / 100.0;
+            let laps = progress.floor();
+            put(&mut row, 0, car, ((progress - laps) as f32).to_le_bytes());
+            put(&mut row, 1, car, (laps as i32).to_le_bytes());
+            put(&mut row, 2, car, 3i32.to_le_bytes());
+            put(&mut row, 3, car, best[car].to_le_bytes());
+            put(&mut row, 4, car, class_position[car].to_le_bytes());
+        }
+        row[PIT_AT + 2] = u8::from(car_2_in_pit);
+        row
+    }
+
+    fn publisher(names: &SdkNames) -> Publisher {
+        let array = |t, k: usize, name| {
+            VarHeader::new(t, (16 + k * CARS * 4) as i32, CARS as i32, name).expect("valid")
+        };
+        let config = PublisherConfig {
+            vars: vec![
+                VarHeader::new(VarType::Double, 0, 1, "SessionTime").expect("valid"),
+                VarHeader::new(VarType::Int, 8, 1, "SessionNum").expect("valid"),
+                VarHeader::new(VarType::Int, 12, 1, "PlayerCarIdx").expect("valid"),
+                array(VarType::Float, 0, "CarIdxLapDistPct"),
+                array(VarType::Int, 1, "CarIdxLapCompleted"),
+                array(VarType::Int, 2, "CarIdxTrackSurface"),
+                array(VarType::Float, 3, "CarIdxBestLapTime"),
+                array(VarType::Int, 4, "CarIdxClassPosition"),
+                VarHeader::new(VarType::Bool, PIT_AT as i32, CARS as i32, "CarIdxOnPitRoad")
+                    .expect("valid"),
+            ],
+            buf_len: ROW,
+            num_buf: 3,
+            tick_rate: 60,
+            session_info_capacity: 8192,
+        };
+        let mut publisher = Publisher::create(names, &config).expect("creates");
+        publisher.set_connected(true).expect("connects");
+        publisher
+            .set_session_info(SESSION.as_bytes())
+            .expect("fits");
+        publisher
+    }
+
+    /// "number gap" of the rows shown, top to bottom.
+    fn shown(widget: &RelativeWidget) -> Vec<String> {
+        widget
+            .next
+            .iter()
+            .filter(|r| r.used)
+            .map(|r| format!("{} {}", r.number.as_str(), r.gap.as_str()))
+            .collect()
+    }
+
+    #[test]
+    fn gaps_are_measured_on_track_once_the_passes_are_seen() {
+        let pid = std::process::id();
+        let names = SdkNames::new(
+            &format!("Local\\PitotRelativeMap-{pid}"),
+            &format!("Local\\PitotRelativeEvent-{pid}"),
+        );
+        let mut publisher = publisher(&names);
+        let reader = ReaderConfig {
+            retry_interval: Duration::from_millis(5),
+            idle_timeout: Duration::from_millis(50),
+        };
+        let (_pipeline, mut view) =
+            Pipeline::start(names, reader, Vec::new(), None).expect("starts");
+        // Publishes until the view shows this moment.
+        let mut step = |view: &mut View, t: f64, car_2_in_pit: bool| {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                assert!(Instant::now() < deadline, "the view reaches {t}");
+                publisher.publish(&row(t, car_2_in_pit)).expect("publishes");
+                thread::sleep(Duration::from_millis(2));
+                view.poll();
+                let at = view.snapshot().f64(view.vars().session_time, 0);
+                if view.session().is_some() && at == Some(t) {
+                    break;
+                }
+            }
+        };
+        let config = |width, height| WidgetConfig {
+            enabled: true,
+            monitor: None,
+            x: 0,
+            y: 0,
+            width: Some(width),
+            height: Some(height),
+            rate_hz: None,
+            opacity: 0.8,
+            shape: None,
+        };
+        // One clock for both widgets, as the overlay builds them.
+        let clock = TrackClock::shared();
+        let mut relative = RelativeWidget::with_clock(&config(460, 300), Rc::clone(&clock));
+        let mut standings = StandingsWidget::with_clock(&config(760, 240), Rc::clone(&clock));
+
+        // Nothing seen yet: the estimate, the distance times the 90 s lap.
+        step(&mut view, 1000.0, false);
+        relative.fill(&view);
+        assert_eq!(shown(&relative), ["#4 9.0", "#2 2.7", "#1 ", "#3 4.5"]);
+
+        // At 10 Hz, with the standings at 2 Hz on the same clock: after car 4 has passed the player's spot, every
+        // gap is measured. Car 4 is a lap down, which does not matter on track; car 3 is in another class.
+        let mut t = 1000.0;
+        for n in 1..=120 {
+            t = 1000.0 + f64::from(n) * 0.1;
+            step(&mut view, t, false);
+            relative.fill(&view);
+            if n % 5 == 0 {
+                standings.fill(&view);
+            }
+        }
+        assert_eq!(shown(&relative), ["#4 10.0", "#2 3.0", "#1 ", "#3 5.0"]);
+        // Practice standings keep the best-lap gaps on the shared clock: car 1 0.5 s and car 4 1.5 s off car 2's
+        // best lap.
+        let gaps = standings.filled_gaps();
+        let gap_of = |number: &str| {
+            gaps.iter()
+                .find(|(n, _)| n == number)
+                .map(|(_, g)| g.as_str())
+        };
+        assert_eq!(
+            (gap_of("1"), gap_of("4")),
+            (Some("0.5"), Some("1.5")),
+            "{gaps:?}"
+        );
+
+        // On pit road the pass says little: back to the estimate for that car.
+        step(&mut view, t + 0.1, true);
+        relative.fill(&view);
+        assert_eq!(shown(&relative)[1], "#2 2.7");
     }
 }

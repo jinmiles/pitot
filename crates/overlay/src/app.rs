@@ -21,8 +21,8 @@ use crate::platform::{
 use crate::render::{Canvas, Layer, RenderError, Renderer, WindowTarget};
 use crate::widgets::{
     FuelWidget, InputTraceWidget, MAX_LAYERS, PitTracker, PitWidget, Redraw, RelativeWidget,
-    SectorsWidget, SharedPitTracker, StandingsWidget, StatusWidget, TiresWidget, TrackMapWidget,
-    Widget, WindWidget,
+    SectorsWidget, SharedPitTracker, SharedTrackClock, StandingsWidget, StatusWidget, TiresWidget,
+    TrackClock, TrackMapWidget, Widget, WindWidget,
 };
 
 /// Saving a file often takes several writes; reload once they settle.
@@ -71,12 +71,19 @@ fn create_widget(
     name: &str,
     config: &WidgetConfig,
     pit: &SharedPitTracker,
+    clock: &SharedTrackClock,
 ) -> Option<Box<dyn Widget>> {
     match name {
         "status" => Some(Box::new(StatusWidget::new(config.opacity))),
         "inputs" => Some(Box::new(InputTraceWidget::new(config))),
-        "relative" => Some(Box::new(RelativeWidget::new(config))),
-        "standings" => Some(Box::new(StandingsWidget::new(config))),
+        "relative" => Some(Box::new(RelativeWidget::with_clock(
+            config,
+            Rc::clone(clock),
+        ))),
+        "standings" => Some(Box::new(StandingsWidget::with_clock(
+            config,
+            Rc::clone(clock),
+        ))),
         "fuel" => Some(Box::new(FuelWidget::new(config))),
         "pit" => Some(Box::new(PitWidget::new(config, Rc::clone(pit)))),
         "sectors" => Some(Box::new(SectorsWidget::new(config))),
@@ -98,11 +105,13 @@ impl Layout {
         let now = Instant::now();
         // The pit widget and the track map follow the stops together.
         let pit = PitTracker::shared(config::pit_file());
+        // The standings and the relative time gaps from one clock.
+        let clock = TrackClock::shared();
         for (name, widget_config) in config.widgets() {
             if !widget_config.enabled {
                 continue;
             }
-            let Some(widget) = create_widget(name, widget_config, &pit) else {
+            let Some(widget) = create_widget(name, widget_config, &pit, &clock) else {
                 continue;
             };
             let monitor = widget_config

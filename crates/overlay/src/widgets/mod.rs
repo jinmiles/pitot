@@ -14,6 +14,7 @@ mod status;
 mod text;
 mod timing;
 mod tires;
+mod trackclock;
 mod trackmap;
 mod wind;
 
@@ -28,6 +29,7 @@ pub use sectors::SectorsWidget;
 pub use standings::StandingsWidget;
 pub use status::StatusWidget;
 pub use tires::TiresWidget;
+pub(crate) use trackclock::{SharedTrackClock, TrackClock};
 pub use trackmap::TrackMapWidget;
 pub use wind::WindWidget;
 
