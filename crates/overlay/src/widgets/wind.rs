@@ -10,12 +10,21 @@ use std::f32::consts::{PI, TAU};
 use std::fmt::Write as _;
 use std::time::{Duration, Instant};
 
-use crate::config::WidgetConfig;
-use crate::pipeline::View;
+use crate::config::{NoOptions, WidgetConfig};
+use crate::pipeline::{View, var_group};
 use crate::render::{Align, Canvas, Color, Rect};
 
 use super::text::FixedText;
-use super::{MAX_LAYERS, Redraw, Widget};
+use super::{Build, MAX_LAYERS, Redraw, Register, Widget};
+
+var_group! {
+    /// The variables the wind widget reads. `YawNorth` is in `Vars` too, for the track map; it is copied once.
+    pub struct WindVars {
+        wind_vel => "WindVel",
+        wind_dir => "WindDir",
+        yaw_north => "YawNorth",
+    }
+}
 
 /// Angles are kept and drawn in steps of this many degrees, so a redraw happens only when the drawing moves.
 const STEP_DEGREES: f32 = 2.0;
@@ -169,16 +178,19 @@ pub struct WindWidget {
     width: u32,
     height: u32,
     opacity: f32,
+    vars: WindVars,
     shown: Reading,
     next: Reading,
 }
 
 impl WindWidget {
-    pub fn new(config: &WidgetConfig) -> Self {
+    /// A wind widget reading `vars`, from [`View::resolve`].
+    pub fn new(config: &WidgetConfig, vars: WindVars) -> Self {
         Self {
             width: config.width.unwrap_or(200).max(120),
             height: config.height.unwrap_or(170).max(100),
             opacity: config.opacity,
+            vars,
             shown: Reading::new(),
             next: Reading::new(),
         }
@@ -197,6 +209,15 @@ impl WindWidget {
 const COLUMN: f32 = 64.0;
 const PAD: f32 = 8.0;
 
+impl Register for WindWidget {
+    type Vars = WindVars;
+    type Options = NoOptions;
+
+    fn build(cx: &Build<'_>, vars: WindVars) -> Self {
+        Self::new(cx.config, vars)
+    }
+}
+
 impl Widget for WindWidget {
     fn size(&self) -> (u32, u32) {
         (self.width, self.height)
@@ -207,7 +228,7 @@ impl Widget for WindWidget {
     }
 
     fn update(&mut self, view: &mut View, _now: Instant, redraw: &mut [Redraw; MAX_LAYERS]) {
-        let (snap, vars) = (view.snapshot(), view.vars());
+        let (snap, vars) = (view.snapshot(), self.vars);
         self.next.fill(
             snap.f32(vars.wind_vel, 0),
             snap.f32(vars.wind_dir, 0),

@@ -7,13 +7,13 @@ use gpui::{
 use pitot_overlay::config;
 use pitot_overlay::platform::{self, ControlEvent, ControlLink, OVERLAY_EXE, OverlayCommand};
 
-use crate::model::{self, Overlay, WIDGETS};
+use crate::model::{self, Overlay};
 use crate::style;
 
 pub struct Panel {
     overlay: Overlay,
-    /// Per widget in [`WIDGETS`], whether it is enabled in `config.toml`.
-    enabled: [bool; WIDGETS.len()],
+    /// Per widget of [`model::widgets`], whether it is enabled in `config.toml`.
+    enabled: Vec<bool>,
     /// The last problem, such as a configuration file that does not parse.
     note: Option<SharedString>,
     _activation: Subscription,
@@ -112,12 +112,10 @@ impl Panel {
         cx.notify();
     }
 
-    fn set_widget(&mut self, index: usize, on: bool, cx: &mut Context<Self>) {
+    fn set_widget(&mut self, name: &'static str, on: bool, cx: &mut Context<Self>) {
         let saved = config::config_file()
             .ok_or_else(|| "No APPDATA folder: the configuration cannot be found.".to_owned())
-            .and_then(|path| {
-                config::save_enabled(&path, WIDGETS[index].name, on).map_err(|e| e.to_string())
-            });
+            .and_then(|path| config::save_enabled(&path, name, on).map_err(|e| e.to_string()));
         match saved {
             // The overlay sees the file change and reloads it.
             Ok(()) => self.load_config(),
@@ -188,11 +186,12 @@ impl Panel {
     }
 
     fn widget_rows(&self, cx: &mut Context<Self>) -> Vec<Stateful<Div>> {
-        WIDGETS
+        model::widgets()
             .iter()
-            .zip(self.enabled)
+            .zip(self.enabled.iter().copied())
             .enumerate()
             .map(|(index, (widget, on))| {
+                let name = widget.name;
                 switch_row(
                     ("widget", index),
                     widget.label,
@@ -200,7 +199,7 @@ impl Panel {
                     on,
                     true,
                     cx.listener(move |panel, _: &ClickEvent, _, cx| {
-                        panel.set_widget(index, !on, cx);
+                        panel.set_widget(name, !on, cx);
                     }),
                 )
             })

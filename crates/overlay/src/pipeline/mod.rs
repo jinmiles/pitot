@@ -26,7 +26,8 @@ mod replay;
 mod vars;
 mod wire;
 
-pub use vars::Vars;
+pub(crate) use vars::var_group;
+pub use vars::{VarGroup, Vars, resolve_var};
 pub use wire::{InputSample, SampleRing, SeqBuffer};
 
 #[cfg(all(test, windows))]
@@ -82,7 +83,8 @@ mod threads {
     use super::record::{Recorder, RecordingConfig};
     use super::replay::{self, CaptureCache, Found, Plan, Player, SessionIds};
     use super::{
-        Display, InputSample, SAMPLE_CAPACITY, SampleRing, SeqBuffer, Vars, ready_session_buffer,
+        Display, InputSample, SAMPLE_CAPACITY, SampleRing, SeqBuffer, VarGroup, Vars,
+        ready_session_buffer,
     };
 
     /// Least time between two searches for a capture during one replay.
@@ -199,6 +201,10 @@ mod threads {
                 VarSet::new()
             };
             let vars = Vars::register(&mut set);
+            for name in crate::widgets::widget_var_names() {
+                set.add(name);
+            }
+            let var_set = set.clone();
             let recorder = recording.map(Recorder::start).transpose()?;
             let stop = Arc::new(AtomicBool::new(false));
             let stats = Arc::new(PipelineStats::default());
@@ -244,6 +250,7 @@ mod threads {
             };
             let view = View {
                 vars,
+                var_set,
                 jobs: to_session_from_view,
                 tires: None,
                 tire_search: None,
@@ -690,6 +697,8 @@ mod threads {
     #[derive(Debug)]
     pub struct View {
         vars: Vars,
+        /// Every requested variable, for widgets to resolve their own groups.
+        var_set: VarSet,
         /// For requests to the session thread.
         jobs: Sender<Job>,
         /// The live session's tire samples from the sim's telemetry files, once found.
@@ -778,6 +787,16 @@ mod threads {
 
         pub fn vars(&self) -> &Vars {
             &self.vars
+        }
+
+        /// Every variable the pipeline requests: [`Vars`] and each widget's group.
+        pub fn var_set(&self) -> &VarSet {
+            &self.var_set
+        }
+
+        /// The handles of a widget's own variables.
+        pub fn resolve<G: VarGroup>(&self) -> G {
+            G::resolve(&self.var_set)
         }
 
         /// The latest tick's variables.

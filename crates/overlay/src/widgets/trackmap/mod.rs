@@ -22,16 +22,35 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use pitot_irsdk::flags::session_flags;
+use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
-use crate::config::{self, MapShape, WidgetConfig};
+use crate::config::{self, WidgetConfig};
 use crate::pipeline::View;
 use crate::render::{Align, Canvas, Color, Rect};
 
 use super::fuel::{FuelTracker, is_green, laps_to_go};
 use super::pitstops::{PitTracker, SharedPitTracker, player_index};
-use super::{LayerSpec, MAX_LAYERS, Redraw, Widget};
+use super::{Build, LayerSpec, MAX_LAYERS, Redraw, Register, Widget};
 use outline::{Builder, Motion, Progress};
+
+/// How the track map draws the track.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MapShape {
+    /// Cars around a circle by lap distance; needs no lap.
+    #[default]
+    Circle,
+    /// The track's outline, recorded from a clean lap of the player's.
+    Outline,
+}
+
+/// The track map's own fields in `[widgets.trackmap]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct MapOptions {
+    pub shape: MapShape,
+}
 
 /// `PlayerTrackSurface` on the racing surface, and `CarIdxTrackSurface` for a car out of the world.
 const ON_TRACK: i32 = 3;
@@ -209,7 +228,7 @@ impl TrackMapWidget {
         folder: Option<PathBuf>,
         pit: Option<SharedPitTracker>,
     ) -> Self {
-        let shape = config.shape.unwrap_or_default();
+        let shape = config.options_as::<MapOptions>().shape;
         let mut map = Self {
             width: config.width.unwrap_or(440),
             height: config.height.unwrap_or(330),
@@ -612,6 +631,15 @@ impl TrackMapWidget {
     }
 }
 
+impl Register for TrackMapWidget {
+    type Vars = ();
+    type Options = MapOptions;
+
+    fn build(cx: &Build<'_>, _: ()) -> Self {
+        Self::new(cx.config, cx.shared.pit())
+    }
+}
+
 impl Widget for TrackMapWidget {
     fn size(&self) -> (u32, u32) {
         (self.width, self.height)
@@ -832,7 +860,7 @@ mod tests {
             height: Some(330),
             rate_hz: None,
             opacity: 0.8,
-            shape: None,
+            options: toml::Table::new(),
         };
         let map = TrackMapWidget::with_folder(&config, None);
         assert_eq!(map.shape, MapShape::Circle, "the default");
@@ -848,7 +876,7 @@ mod tests {
         assert!(map.pit_radius() < radius && map.pit_radius() > radius / 2.0);
         let outline = TrackMapWidget::with_folder(
             &WidgetConfig {
-                shape: Some(MapShape::Outline),
+                options: "shape = \"outline\"".parse().expect("a table"),
                 ..config
             },
             None,

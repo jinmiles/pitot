@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 
 use pitot_irsdk::flags::session_flags;
 
-use crate::config::WidgetConfig;
+use crate::config::{NoOptions, WidgetConfig};
 use crate::pipeline::View;
 use crate::platform;
 use crate::render::{Align, Canvas, Color, Rect};
@@ -25,7 +25,7 @@ use crate::render::{Align, Canvas, Color, Rect};
 use super::standings::{maker_letter, short_license, write_clock, write_length};
 use super::text::FixedText;
 use super::trackclock::{SharedTrackClock, TrackClock};
-use super::{MAX_LAYERS, Redraw, Widget};
+use super::{Build, MAX_LAYERS, Redraw, Register, Widget};
 
 /// Cars shown on each side of the player.
 const SIDE: usize = 3;
@@ -656,6 +656,15 @@ const WHITE: u32 = 0xF0_F2F5;
 const DIM: u32 = 0xA0_A6AE;
 const BACKGROUND: u32 = 0x10_1418;
 
+impl Register for RelativeWidget {
+    type Vars = ();
+    type Options = NoOptions;
+
+    fn build(cx: &Build<'_>, _: ()) -> Self {
+        Self::with_clock(cx.config, cx.shared.clock())
+    }
+}
+
 impl Widget for RelativeWidget {
     fn size(&self) -> (u32, u32) {
         (self.width, self.height)
@@ -1000,7 +1009,7 @@ DriverInfo:
             height: Some(height),
             rate_hz: None,
             opacity: 0.8,
-            shape: None,
+            options: toml::Table::new(),
         };
         // One clock for both widgets, as the overlay builds them.
         let clock = TrackClock::shared();

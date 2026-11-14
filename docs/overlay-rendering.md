@@ -75,6 +75,128 @@ With no widget shown, the thread wakes once per second while the sim is not runn
 while it is connected (in the garage, for example), so widgets appear within a quarter second of getting in the
 car.
 
+## Widgets
+
+Every widget is one line of `crates/overlay/src/widgets/list.rs` ([the list](widgets.md)):
+
+```rust
+wind: WindWidget = Spec::new("Wind", 1460, 370).size(200, 170).rate(5.0).on(),
+```
+
+`wind` is the module (`widgets/wind.rs`) and the widget's `[widgets.wind]` table; `WindWidget` is the type in that
+module; the `Spec` is its label in the Pitot window, its default place (physical pixels from the top-left of the
+primary monitor), size, and update rate, and `.on()` when it is on by default. From the list come the module
+declarations, the defaults and the names the configuration accepts, the Pitot window's switches, the widgets the
+render thread makes for a configuration (`Layout::build`, in the list's order), and the variables the pipeline
+registers. The `status` widget is a small panel with the connection state, tick, car count, and session, shown in
+every display state.
+
+Each widget type implements `Register` next to its `Widget` implementation:
+
+- `type Vars`: the variables it reads beyond `pipeline::Vars`, declared in its module with `var_group!` (the wind
+  widget's `WindVars`), or `()`. The pipeline registers every widget's group at start and copies a variable once
+  however many groups name it ([pipeline](overlay-pipeline.md#variables)). `view.vars()` still reads `Vars`.
+- `type Options`: fields of its own in its table, a struct deriving `Deserialize`, `Serialize`, and `Default` with
+  `#[serde(default, deny_unknown_fields)]` (the track map's `MapOptions { shape }`), or `NoOptions`. The
+  configuration checks them when the file is read, and the widget reads them with
+  `config.options_as::<MapOptions>()`.
+- `fn build(cx, vars)`: makes the widget from `cx.config` (its `WidgetConfig`) and the shared trackers
+  `cx.shared`.
+
+### Shared trackers
+
+Trackers that several widgets read are made once per layout, when the first widget asks for one, so a tracker no
+enabled widget uses costs nothing. They are made again with the layout after a configuration change. At a new
+connection the clock and the histories forget the session; the pit tracker is reset by its widgets, which keep
+what it learned. Each user observes a tracker at its own rate with `observe(view)`, and the first observation of a
+moment does the work for all.
+
+| Tracker | Read by | What |
+|---|---|---|
+| `shared.clock()` | standings, relative | every car's progress and the times it passed 200 checkpoints a lap: race gaps (`RaceClock::gap`) and gaps on track (`RaceClock::track_gap`) |
+| `shared.pit()` | pit, track map | other cars' pit stops, the refueling speed, and the pit lane loss ([pit](pit.md)) |
+| `shared.gaps()` | widgets to come: battle, faster class, rejoin, side by side | the gap history (below) |
+| `shared.laps()` | widgets to come: lap log, lap times, lap time spread, stints | the lap history (below) |
+
+**Gap history** (`widgets/gaps.rs`). Every 0.5 s of session time it samples, for each car in the world, the gap on
+track to the player and to the next cars ahead and behind it on track, as the clock measured them: the time since
+the car in front passed the spot where the other one is now, whatever their laps. Pit road is included as
+measured. A sample is a `GapSample { time, to_player, ahead, behind }`: `to_player` is positive when the car is
+ahead of the player within half a lap, negative behind, 0 for the player, NaN when the pass was not measured;
+`ahead` and `behind` are `Some((car, seconds))` with NaN seconds when not measured. `latest(car)`, `samples(car)`
+(oldest first), and `ago(car, seconds)` (for how a gap changed) read it. 240 samples, two minutes, of 16 bytes
+per car: 276 KB for 72 cars, allocated at the first observation and again only when the car count changes. A
+replay going back in time or a new session starts it over.
+
+**Lap history** (`widgets/laps.rs`). A car's lap ends when `CarIdxLapCompleted` goes up. Its time is the sim's
+`CarIdxLastLapTime`, which changes 2 to 63 ticks after the line in the public AI race capture, so the lap joins the
+history when the time changes, or untimed (NaN) after 3 s. A `Lap { number, time, ended, flags }` has the flags
+`PIT` (on pit road during it), `OFF_TRACK` (seen off track), `INCIDENT` (the player's incident count went up; other
+cars' are not published), `CAUTION` (not under green), and `PARTIAL` (not observed from start to end: the first lap
+seen, or the car left the world or went unobserved for 5 s). `is_clean()` is timed and none of `PIT`, `OFF_TRACK`,
+`INCIDENT`, `PARTIAL`; a caution lap can be clean. Flags see only what the observations see: an excursion off
+track between two observations is missed. `laps(car)` (oldest first), `last(car)`, and `count(car)` read it. 100
+laps of 24 bytes per car: 173 KB for 72 cars, allocated like the gap history. The pace car is left out.
+
+Both are tested with synthetic data in their modules, and the allocation check observes both every update.
+
+### Adding a widget
+
+1. **The module**: `crates/overlay/src/widgets/<name>.rs` with a `pub struct` widget type, `impl Widget`, and
+   `impl Register`. Variables not in `Vars` go in a `var_group!` there; fields of its own in an options struct
+   there. Its unit tests go there too: they make the widget with its own constructor, its configuration from
+   `Config::default().widget("<name>")`, and its variables from `view.resolve()`. The type and its variable group
+   are `pub` (the list re-exports the type, and a private group in a public constructor fails the lint).
+
+   ```rust
+   use crate::config::{NoOptions, WidgetConfig};
+   use crate::pipeline::{View, var_group};
+
+   use super::{Build, MAX_LAYERS, Redraw, Register, Widget};
+
+   var_group! {
+       /// The variables only the blind spot widget reads.
+       pub struct SpotterVars {
+           car_left_right => "CarLeftRight",
+       }
+   }
+
+   impl Register for SpotterWidget {
+       type Vars = SpotterVars;
+       type Options = NoOptions;
+
+       fn build(cx: &Build<'_>, vars: SpotterVars) -> Self {
+           Self::new(cx.config, vars)
+       }
+   }
+   ```
+
+2. **The list**: one line at the end of `crates/overlay/src/widgets/list.rs`. Leave out `.on()` to ship it off by
+   default.
+3. **The docs**: `docs/<name>.md` (what it shows, where the numbers come from, its own fields, and its measured
+   cost), and one row at the end of the table in `docs/widgets.md`.
+
+Nothing else changes: not `config.rs` or its `DEFAULT_TOML`, not `pipeline/vars.rs`, `app.rs`, or the Pitot window,
+not `docs/configuration.md` or the benchmark configurations. `list.rs` and `docs/widgets.md` merge with
+`merge=union` (`.gitattributes`), so branches that each add a widget merge there without conflicts.
+
+What checks the new widget without more code:
+
+- `cargo test -p pitot-overlay`: names and labels are unique, rates are in range, every widget is made from its
+  defaults, `docs/widgets.md` has its row in the list's order, the default file and the defaults agree, and the
+  benchmark configurations still turn on exactly the four reference widgets.
+- `cargo test -p pitot-overlay --features alloc-check --test alloc_check`:
+  `every_widget_and_the_histories_do_not_allocate_per_update` makes every widget of the list and updates them
+  through a light race of three cars, counting allocations. A widget whose work needs other data adds its own
+  test there.
+
+A widget on by default joins the benchmark's measured set unless `benchmarks/pitot/four.toml` and `inputs.toml`
+turn it off; the benchmark test fails until both do (then copy them to the `*.local.toml` files with `monitor` set).
+Such a widget may also get a section in `DEFAULT_TOML`, at the end.
+
+The rules for every widget stay: no allocation per update or draw after warm-up, a redraw only of what changed,
+its own update rate, `visible()` for the display states it shows in, and no logging per update.
+
 ## Development measurement
 
 Lab PC (i7-9700, RTX 3090), release build, replaying the public AI race capture at 60 Hz with the status widget
