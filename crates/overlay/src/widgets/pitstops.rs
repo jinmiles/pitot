@@ -46,6 +46,8 @@ const LOSS_RANGE: std::ops::RangeInclusive<f32> = 0.0..=120.0;
 pub(crate) struct Stop {
     /// Laps the car had completed when it entered pit road.
     pub(crate) lap: i32,
+    /// Laps the car had completed when it left pit road: its next stint starts there.
+    pub(crate) left_lap: i32,
     /// Session time at which it left pit road.
     pub(crate) left_at: f64,
     /// Time on pit road, from entry to exit.
@@ -173,6 +175,7 @@ impl PitStops {
                     .filter(|l| LOSS_RANGE.contains(l));
                 f.last = Some(Stop {
                     lap: v.lap,
+                    left_lap: s.laps,
                     left_at: time,
                     lane_time,
                     stationary,

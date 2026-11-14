@@ -1,10 +1,20 @@
 # Pit widget
 
-Lists the cars of the player's class, in class order around the player, with their last pit stop: the lap they
-came in on (`L12`, or `PIT` while on pit road), the time they stood still in their pit stall, and the most fuel
-that standing time allows. Above them: the pit lane loss measured at this track, the refueling speed, and what a
-stop that fills the player's whole tank costs. Updates at 10 Hz by default; the standing time is measured to
-about one update.
+Lists the cars of the player's class, in class order around the player. Above them: the pit lane loss measured at
+this track, the refueling speed, and what a stop that fills the player's whole tank costs. Updates at 10 Hz by
+default; the standing time is measured to about one update.
+
+| Column | Meaning |
+|---|---|
+| Stint | Laps on the current stint: since the car left pit road, or since the start |
+| Stop | The lap the car came in on at its last stop (`L12`), or `PIT` while on pit road |
+| Stood | Seconds it stood still in its pit stall at that stop |
+| Fuel | The most fuel (liters) that standing time allows |
+| Pit | In a race: laps until the car must pit, minus the player's (`+2`: two laps after the player, `-1`: one lap before). The player's row shows the player's own pit lap (`L23`: in at the end of lap 23) |
+| Rejoin | In a race: the class position the car rejoins in after that stop, and its gap to the player then (`+3.2` ahead, `-1.4` behind) |
+
+Pit and Rejoin are blank outside races, until the player's fuel use and the lane loss are known, while the car is
+on pit road, and when its fuel lasts to the end.
 
 The sim does not publish other cars' fuel or what their crews do. It does publish where every car is
 (`CarIdxLapDistPct`), whether it is on pit road (`CarIdxOnPitRoad`), and whether it is in its pit stall
@@ -55,6 +65,32 @@ race. Until it is measured at this track, it shows `--.-`.
 For other widgets, `PitModel::expected_loss(fuel)` gives the time a stop that adds `fuel` liters costs: lane loss
 plus `service_time(fuel)`.
 
+## Next stops
+
+Other cars' fuel is not known, so each car's stints are followed with the player's fuel per lap (the fuel widget's
+average of clean laps):
+
+- **First stint**: the car starts with the player's fuel at the start line of the first lap, worked back from the
+  player's current fuel and laps until the player's first stop, within the tank. Same car, same pace laps: a full
+  tank at the grid less the pace laps, when the player started full.
+- **After a stop**: the fuel it had left when it came in (its stint's fuel less the laps driven) plus the fuel its
+  standing time allows, within the tank. That fuel is an upper bound, so the next stint can come out long.
+- **Must pit**: the car must come in at the end of the last lap its fuel covers. For the player, that is the
+  current fuel from the current lap distance. For other cars, it is their stint's fuel from their completed laps.
+- **Pit**: the laps until that lap for the car, minus the same for the player. A car just ahead on track that has
+  already crossed the line counts one lap more than the player.
+- **Rejoin**: at that stop the car takes the fuel for the rest of the race (laps to go as in the fuel widget, less
+  the laps until the stop), within the tank. It loses `expected_loss` of that fuel. Its race gap to the player
+  (`CarIdxF2Time` difference) less that loss gives its new gap. The class cars with a larger gap to the player are
+  ahead of it, counting the player at 0. The other cars keep their current gaps, so this is where the car would
+  rejoin if it stopped now, with the stop it will need.
+
+Limits:
+
+- A car that stopped before the overlay connected is followed from the start as if it had not stopped.
+- Short fills, fuel strategies different from the player's, and other car models in the class are not seen.
+- Rejoin ignores the other cars' own stops before then.
+
 ## Learned values
 
 `%APPDATA%\Pitot\pit.toml` holds the refueling speed by car and the lane loss by track:
@@ -72,5 +108,6 @@ widget closes. Delete a line to measure that value again.
 
 ## Cost
 
-The widget follows every car at its rate without allocating (checked by the `alloc-check` test with a stop during
-the measurement), and draws only the rows that changed.
+The widget follows every car at its rate without allocating, and draws only the rows that changed. The
+`alloc-check` test covers a race with a stop during the measurement, and the next stops and rejoins are estimated
+on every update.
