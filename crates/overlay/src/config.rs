@@ -39,6 +39,11 @@ pub fn recordings_dir() -> Option<PathBuf> {
     config_dir().map(|dir| dir.join("captures"))
 }
 
+/// Where the track map keeps the outlines it recorded, one file per track: `tracks` inside [`config_dir`].
+pub fn tracks_dir() -> Option<PathBuf> {
+    config_dir().map(|dir| dir.join("tracks"))
+}
+
 /// Folders searched for a capture of the session while the sim plays a replay: [`recordings_dir`], and
 /// `captures` next to the overlay executable, where `pitot-bench record` run from that folder writes them.
 pub fn capture_dirs() -> Vec<PathBuf> {
@@ -148,6 +153,17 @@ width = 220
 height = 170
 rate_hz = 1.0
 opacity = 0.82
+
+# The track map draws a track once you have driven one clean lap of it, and keeps the outline in
+# %APPDATA%\Pitot\tracks for later sessions.
+[widgets.trackmap]
+enabled = true
+x = 1460
+y = 24
+width = 440
+height = 330
+rate_hz = 10.0
+opacity = 0.82
 "#;
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -200,6 +216,7 @@ pub struct Widgets {
     pub sectors: WidgetConfig,
     pub wind: WidgetConfig,
     pub tires: WidgetConfig,
+    pub trackmap: WidgetConfig,
 }
 
 impl Default for Widgets {
@@ -224,6 +241,7 @@ impl Default for Widgets {
             sectors: widget(800, 24, Some((400, 200)), Some(5.0)),
             wind: widget(1460, 370, Some((200, 170)), Some(5.0)),
             tires: widget(1680, 370, Some((220, 170)), Some(1.0)),
+            trackmap: widget(1460, 24, Some((440, 330)), Some(10.0)),
         }
     }
 }
@@ -265,6 +283,7 @@ struct FileWidgets {
     sectors: WidgetPatch,
     wind: WidgetPatch,
     tires: WidgetPatch,
+    trackmap: WidgetPatch,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -358,6 +377,7 @@ impl Config {
                 sectors: w.sectors.apply(defaults.sectors),
                 wind: w.wind.apply(defaults.wind),
                 tires: w.tires.apply(defaults.tires),
+                trackmap: w.trackmap.apply(defaults.trackmap),
             },
         };
         config.validate()?;
@@ -365,7 +385,7 @@ impl Config {
     }
 
     /// Widget configurations by name, in a fixed order.
-    pub fn widgets(&self) -> [(&'static str, &WidgetConfig); 9] {
+    pub fn widgets(&self) -> [(&'static str, &WidgetConfig); 10] {
         let w = &self.widgets;
         [
             ("status", &w.status),
@@ -377,6 +397,7 @@ impl Config {
             ("sectors", &w.sectors),
             ("wind", &w.wind),
             ("tires", &w.tires),
+            ("trackmap", &w.trackmap),
         ]
     }
 
@@ -393,6 +414,7 @@ impl Config {
             "sectors" => Some(&mut w.sectors),
             "wind" => Some(&mut w.wind),
             "tires" => Some(&mut w.tires),
+            "trackmap" => Some(&mut w.trackmap),
             _ => None,
         }
     }
