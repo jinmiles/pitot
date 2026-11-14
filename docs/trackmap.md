@@ -2,9 +2,9 @@
 
 Every car as a dot at its lap distance (`CarIdxLapDistPct`), around a circle (`shape = "circle"`, the default) or
 along the track's outline recorded from a clean lap (`shape = "outline"`). Dots are colored by class
-(`CarClassColor`); the player's is orange with a white ring and drawn on top, and cars on pit road are dimmed. The
-pace car, spectators, and cars out of the world (`CarIdxTrackSurface` -1) are left out. Updates at 10 Hz by
-default.
+(`CarClassColor`); the player's is orange with a white ring and drawn on top, and cars on pit road are hollow rings
+in their class color. The pace car, spectators, and cars out of the world (`CarIdxTrackSurface` -1) are left out.
+Updates at 10 Hz by default.
 
 ```toml
 [widgets.trackmap]
@@ -14,9 +14,10 @@ shape = "circle"   # or "outline"
 ## Circle
 
 Start/finish at 12 o'clock, marked by a white tick across the ring. Cars go clockwise in driving order, at
-`CarIdxLapDistPct` × 360°. Cars on pit road sit on a smaller ring inside, dimmed. A short tick marks each sector
-start from the session's `SplitTimeInfo` (up to 16). The circle needs no lap, so it shows from the first moment of
-every session; nothing of the outline runs in this mode (no integration, no `.trk` files read or written).
+`CarIdxLapDistPct` × 360°. Cars on pit road sit on a smaller ring inside, labeled `PIT` at 6 o'clock, as hollow
+rings in their class color. A short tick marks each sector start from the session's `SplitTimeInfo` (up to 16). The
+circle needs no lap, so it shows from the first moment of every session; nothing of the outline runs in this mode (no
+integration, no `.trk` files read or written).
 
 The ring is a lap of distance, not of time: cars equally far apart on the ring are equally far apart in lap
 distance, which is not the same gap in seconds where the track is slow or fast.
@@ -75,7 +76,7 @@ track largest is used when it is more than 3% larger than north up. The outline 
 
 ### Limits
 
-- The pit lane is not drawn. Cars on pit road are placed by their lap distance on the track, dimmed.
+- The pit lane is not drawn. Cars on pit road are placed by their lap distance on the track, as hollow rings.
 - The outline follows the player's line on the mapping lap, not the track's center line.
 - A short excursion off track between two updates (less than 0.1 s) is not seen and stays in the outline.
 - With a recording of the player's car only (an `.ibt` replayed by `pitot-bench`), only the player's dot shows.
