@@ -65,6 +65,10 @@ race. Until it is measured at this track, it shows `--.-`.
 For other widgets, `PitModel::expected_loss(fuel)` gives the time a stop that adds `fuel` liters costs: lane loss
 plus `service_time(fuel)`.
 
+The pit widget and the [track map](trackmap.md) share one tracker, so the stops are followed once and both use
+the same loss. Each widget asks it to follow the cars at its own rate; a request within 5 ticks of the previous
+one is skipped, so two widgets at 10 Hz still follow the cars about 10 times a second.
+
 ## Next stops
 
 Other cars' fuel is not known, so each car's stints are followed with the player's fuel per lap (the fuel widget's

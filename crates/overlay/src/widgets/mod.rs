@@ -22,6 +22,7 @@ use std::time::{Duration, Instant};
 pub use fuel::FuelWidget;
 pub use inputs::InputTraceWidget;
 pub use pit::PitWidget;
+pub(crate) use pitstops::{PitTracker, SharedPitTracker};
 pub use relative::RelativeWidget;
 pub use sectors::SectorsWidget;
 pub use standings::StandingsWidget;

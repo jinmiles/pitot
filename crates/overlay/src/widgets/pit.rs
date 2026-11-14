@@ -16,12 +16,12 @@ use std::time::{Duration, Instant};
 
 use pitot_irsdk::flags::session_flags;
 
-use crate::config::{self, WidgetConfig};
+use crate::config::WidgetConfig;
 use crate::pipeline::View;
 use crate::render::{Align, Canvas, Color, Rect};
 
 use super::fuel::{FuelTracker, is_green, laps_to_go};
-use super::pitstops::{PitModel, PitTracker, Stop, player_index};
+use super::pitstops::{PitModel, PitTracker, SharedPitTracker, Stop, player_index};
 use super::text::FixedText;
 use super::{MAX_LAYERS, Redraw, Widget};
 
@@ -196,7 +196,8 @@ pub struct PitWidget {
     next: Vec<Row>,
     head: Head,
     next_head: Head,
-    tracker: PitTracker,
+    /// Shared with the track map, which draws where the player would rejoin.
+    tracker: SharedPitTracker,
     /// The player's fuel per lap.
     fuel: FuelTracker,
     /// The player's fuel at the start line of the first lap, worked back from the current fuel until the player's
@@ -211,13 +212,8 @@ pub struct PitWidget {
 }
 
 impl PitWidget {
-    /// A pit widget that keeps what it learns in `pit.toml` in the configuration directory.
-    pub fn new(config: &WidgetConfig) -> Self {
-        Self::with_store(config, config::pit_file())
-    }
-
-    /// A pit widget that keeps what it learns in `store`, or only in memory when `None`.
-    pub fn with_store(config: &WidgetConfig, store: Option<PathBuf>) -> Self {
+    /// A pit widget following the stops with `tracker`, which other widgets may share.
+    pub(crate) fn new(config: &WidgetConfig, tracker: SharedPitTracker) -> Self {
         let height = config.height.unwrap_or(280).max(ROW_HEIGHT * 3);
         let rows = ((height / ROW_HEIGHT) as usize)
             .saturating_sub(HEAD_ROWS)
@@ -230,7 +226,7 @@ impl PitWidget {
             next: (0..rows).map(|_| Row::new()).collect(),
             head: Head::new(),
             next_head: Head::new(),
-            tracker: PitTracker::new(store),
+            tracker,
             fuel: FuelTracker::default(),
             opening: None,
             stints: Vec::with_capacity(72),
@@ -239,10 +235,16 @@ impl PitWidget {
         }
     }
 
+    /// A pit widget with its own tracker, keeping what it learns in `store`, or only in memory when `None`.
+    pub fn with_store(config: &WidgetConfig, store: Option<PathBuf>) -> Self {
+        Self::new(config, PitTracker::shared(store))
+    }
+
     /// Brings every car's stint up to date with its stops.
     fn follow(&mut self, view: &View, per_lap: Option<f32>, fuel: Option<Fuel>) {
-        let model = self.tracker.model();
-        let stops = self.tracker.stops();
+        let tracker = self.tracker.borrow();
+        let model = tracker.model();
+        let stops = tracker.stops();
         let count = view.snapshot().count(view.vars().car_lap_dist_pct);
         if self.stints.len() != count {
             self.stints.clear();
@@ -281,7 +283,7 @@ impl PitWidget {
         for row in &mut self.next {
             row.used = false;
         }
-        let model = self.tracker.model();
+        let model = self.tracker.borrow().model();
         self.next_head.fill(&model);
         let (snap, vars, session) = (view.snapshot(), view.vars(), view.session());
 
@@ -301,7 +303,7 @@ impl PitWidget {
             laps_of(p).max(0) as f32 + snap.f32(vars.lap_dist_pct, 0).unwrap_or(0.0)
         });
         if let (Some(p), Some(fuel), Some(per_lap)) = (player, fuel_now, per_lap)
-            && self.tracker.stops().stops(p) == 0
+            && self.tracker.borrow().stops().stops(p) == 0
         {
             self.opening = Some(fuel + distance * per_lap);
         }
@@ -380,7 +382,8 @@ impl PitWidget {
         let start = at
             .saturating_sub(rows / 2)
             .min(self.cars.len().saturating_sub(rows));
-        let stops = self.tracker.stops();
+        let tracker = self.tracker.borrow();
+        let stops = tracker.stops();
         for (row, &(position, i)) in self.next.iter_mut().zip(&self.cars[start..]) {
             let info = driver(i);
             row.used = true;
@@ -615,7 +618,7 @@ impl Widget for PitWidget {
     }
 
     fn update(&mut self, view: &mut View, _now: Instant, redraw: &mut [Redraw; MAX_LAYERS]) {
-        self.tracker.observe(view);
+        self.tracker.borrow_mut().observe(view);
         self.fill(view);
         // Slots: the head line, the column names (never change), then the cars. Only the changed span is drawn.
         let head = self.next_head != self.head;
@@ -667,7 +670,7 @@ impl Widget for PitWidget {
         for row in self.rows.iter_mut().chain(self.next.iter_mut()) {
             row.used = false;
         }
-        self.tracker.reset();
+        self.tracker.borrow_mut().reset();
         self.fuel = FuelTracker::default();
         self.opening = None;
         self.stints.iter_mut().for_each(|s| *s = Stint::default());

@@ -746,6 +746,7 @@ const MAP_SESSION: &[u8] = b"WeekendInfo:
  TrackLength: 1.88 km
 DriverInfo:
  DriverCarIdx: 0
+ DriverCarEstLapTime: 37.7
  Drivers:
  - CarIdx: 0
    CarClassColor: 0xffda59
@@ -755,7 +756,7 @@ DriverInfo:
    CarClassColor: 0x33ceff
 ";
 
-/// The track map maps a lap and then moves the cars' dots without allocating per update.
+/// The track map maps a lap and then moves the cars' dots and the pit exit without allocating per update.
 #[test]
 fn track_map_does_not_allocate_per_update() {
     use pitot_overlay::config::WidgetConfig;
@@ -812,7 +813,12 @@ fn track_map_does_not_allocate_per_update() {
         rate_hz: None,
         opacity: 0.8,
     };
-    let mut widget = TrackMapWidget::with_folder(&widget_config, Some(folder.clone()));
+    // A pit lane loss learned at this track before, so the pit exit shows.
+    std::fs::create_dir_all(&folder).expect("creates the folder");
+    let pit_store = folder.join("pit.toml");
+    std::fs::write(&pit_store, "[lane_loss]\n\"77\" = 25.0\n").expect("writes");
+    let mut widget =
+        TrackMapWidget::with_pit_store(&widget_config, Some(folder.clone()), Some(pit_store));
 
     // The player drives the circle counterclockwise from half a lap; the other cars follow at fixed distances.
     let lap_ticks = 2.0 * std::f64::consts::PI * MAP_RADIUS / MAP_SPEED * 60.0;
