@@ -39,7 +39,8 @@ Car rows, left to right:
 - the maker's letter: the first letter of `CarScreenName` (BMW is B, Porsche is P), instead of a logo,
 - tire compound as a colored ring (hard white, medium yellow, soft red, intermediate green, wet blue),
 - gap to the class leader and interval to the car ahead (the leader shows the column names),
-- last lap: underlined in green when it is the car's best lap, in purple when it is the class's best,
+- last lap to the millisecond (`1:45.345`): underlined in green when it is the car's best lap, in purple when it
+  is the class's best,
 - per sector, the car's last time in that sector minus the player's (green when the car was slower, red when
   faster), as many sectors as fit.
 

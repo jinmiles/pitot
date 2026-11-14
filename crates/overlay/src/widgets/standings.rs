@@ -122,14 +122,14 @@ pub(crate) fn write_length(out: &mut FixedText, seconds: f64) {
     }
 }
 
-/// `m:ss.s`, or nothing for a missing time.
+/// `m:ss.sss`, or nothing for a missing time.
 pub(crate) fn write_lap_time(out: &mut FixedText, seconds: f32) {
     out.clear();
     if seconds > 0.0 {
-        // Round to tenths first, so 59.96 s shows as 1:00.0, not 0:60.0.
-        let tenths = (seconds * 10.0).round() as u32;
-        let (minutes, rest) = (tenths / 600, tenths % 600);
-        let _ = write!(out, "{minutes}:{:02}.{}", rest / 10, rest % 10);
+        // Round to milliseconds first, so 59.9996 s shows as 1:00.000, not 0:60.000.
+        let millis = (f64::from(seconds) * 1000.0).round() as u64;
+        let (minutes, rest) = (millis / 60_000, millis % 60_000);
+        let _ = write!(out, "{minutes}:{:02}.{:03}", rest / 1000, rest % 1000);
     }
 }
 
@@ -969,12 +969,14 @@ struct Columns {
 }
 
 const SECTOR_WIDTH: f32 = 34.0;
+/// Room for the last lap, `1:45.345` at the text size with a margin before it.
+const LAST_WIDTH: f32 = 68.0;
 
 impl Columns {
     fn for_width(w: f32, sectors: usize) -> Self {
         const NAME_MIN: f32 = 110.0;
-        // Fixed columns: position 24, number 36, license 40, rating 40, gap 46, last 60, margins 20.
-        let fixed = 24.0 + 36.0 + 40.0 + 40.0 + 46.0 + 60.0 + 20.0;
+        // Fixed columns: position 24, number 36, license 40, rating 40, gap 46, the last lap, margins 20.
+        let fixed = 24.0 + 36.0 + 40.0 + 40.0 + 46.0 + LAST_WIDTH + 20.0;
         let mut spare = (w - fixed - NAME_MIN).max(0.0);
         let mut take = |width: f32| {
             if spare >= width {
@@ -997,7 +999,7 @@ impl Columns {
         let mut x = w - 6.0;
         let sectors_x = x - SECTOR_WIDTH * sector_columns as f32;
         x = sectors_x;
-        let last = x - 60.0;
+        let last = x - LAST_WIDTH;
         x = last;
         let interval_x = interval.then(|| {
             x -= 46.0;
@@ -1259,7 +1261,13 @@ impl StandingsWidget {
         } else {
             car.last_lap.as_str()
         };
-        canvas.text(last, cell(cols.last, 56.0), TEXT_SIZE, Align::Right, text);
+        canvas.text(
+            last,
+            cell(cols.last, LAST_WIDTH - 4.0),
+            TEXT_SIZE,
+            Align::Right,
+            text,
+        );
         let underline = match car.mark {
             LapMark::Class => Some(PURPLE),
             LapMark::Personal => Some(GREEN),
@@ -1270,8 +1278,8 @@ impl StandingsWidget {
         {
             let base = y + ROW_HEIGHT - 4.0;
             canvas.line(
-                (cols.last + 6.0, base),
-                (cols.last + 56.0, base),
+                (cols.last + 10.0, base),
+                (cols.last + LAST_WIDTH - 4.0, base),
                 2.0,
                 Color::rgb(color, alpha),
             );
@@ -1360,14 +1368,24 @@ mod tests {
     #[test]
     fn lap_times_are_minutes_and_seconds() {
         let mut out = FixedText::new(12);
-        write_lap_time(&mut out, 105.34);
-        assert_eq!(out.as_str(), "1:45.3");
-        write_lap_time(&mut out, 59.96);
-        assert_eq!(out.as_str(), "1:00.0");
+        write_lap_time(&mut out, 105.345);
+        assert_eq!(out.as_str(), "1:45.345");
+        write_lap_time(&mut out, 59.9996);
+        assert_eq!(out.as_str(), "1:00.000");
         write_lap_time(&mut out, 61.05);
-        assert_eq!(out.as_str(), "1:01.1");
+        assert_eq!(out.as_str(), "1:01.050");
+        write_lap_time(&mut out, 605.1234);
+        assert_eq!(out.as_str(), "10:05.123");
         write_lap_time(&mut out, -1.0);
         assert_eq!(out.as_str(), "");
+    }
+
+    #[test]
+    fn the_default_width_keeps_every_column() {
+        let cols = Columns::for_width(760.0, 6);
+        assert_eq!(cols.sectors.1, 6);
+        assert!(cols.interval.is_some() && cols.rating_change.is_some());
+        assert!(cols.name.1 >= 110.0, "{:?}", cols.name);
     }
 
     #[test]
@@ -1634,7 +1652,7 @@ SplitTimeInfo:
         assert_eq!(first.position.as_str(), "1");
         assert_eq!(
             first.last_lap.as_str(),
-            "1:21.0",
+            "1:21.000",
             "from the session's results"
         );
         assert_eq!(first.mark, LapMark::None);
@@ -1646,7 +1664,7 @@ SplitTimeInfo:
         assert!(second.player);
         assert_eq!(second.gap.as_str(), "0.5", "best laps outside a race");
         assert_eq!(second.interval.as_str(), "0.5");
-        assert_eq!(second.last_lap.as_str(), "1:20.5");
+        assert_eq!(second.last_lap.as_str(), "1:20.500");
         assert_eq!(second.mark, LapMark::Personal);
         assert_eq!(second.maker.as_str(), "P");
         assert_eq!(second.change, 0, "no position change outside a race");
