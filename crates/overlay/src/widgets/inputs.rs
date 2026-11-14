@@ -23,7 +23,8 @@ const PEDALS_WIDTH: u32 = 52;
 /// Largest steering wheel icon, in pixels.
 const WHEEL_MAX: u32 = 72;
 const PAD: u32 = 6;
-const LINE: f32 = 2.0;
+/// Trace line width.
+const LINE: f32 = 2.5;
 
 const THROTTLE: Color = Color::rgb(0x3D_D68C, 1.0);
 const BRAKE: Color = Color::rgb(0xF0_524F, 1.0);
@@ -184,8 +185,9 @@ impl InputTraceWidget {
     }
 
     fn y(&self, level: f32) -> f32 {
-        let inner = self.trace.h - 2.0;
-        1.0 + (1.0 - level.clamp(0.0, 1.0)) * inner
+        // Half a line from each edge, so a line at zero or full stays whole.
+        let inner = self.trace.h - LINE;
+        LINE / 2.0 + (1.0 - level.clamp(0.0, 1.0)) * inner
     }
 
     /// Columns `[from, to)` of the trace, which may wrap around the ring.
@@ -489,7 +491,8 @@ mod tests {
         );
         assert_eq!(steering_level(&sample), 0.25);
         let w = widget();
-        assert_eq!(w.y(1.0), 1.0);
-        assert_eq!(w.y(0.0), w.trace.h - 1.0);
+        // Full and zero pedal keep the whole line inside the trace.
+        assert_eq!(w.y(1.0), LINE / 2.0);
+        assert_eq!(w.y(0.0), w.trace.h - LINE / 2.0);
     }
 }
