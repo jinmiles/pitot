@@ -25,5 +25,14 @@ enabled = false
 [widgets.fuel]
 enabled = false
 
+[widgets.sectors]
+enabled = false
+
+[widgets.wind]
+enabled = false
+
+[widgets.tires]
+enabled = false
+
 [widgets.trackmap]
 enabled = false

@@ -100,8 +100,9 @@ rate_hz = 60.0  # update rate; leave out for the widget's own rate
 opacity = 0.82  # background opacity, 0 to 1
 ```
 
-Widgets: `status`, `inputs`, `relative`, `standings`, `fuel`, `trackmap`. Any field left out keeps that widget's default,
-so a table can set just `x` and `y`. Unknown widgets or fields are errors, so typos do not go unnoticed.
+Widgets: `status`, `inputs`, `relative`, `standings`, `fuel`, `sectors` ([sectors.md](sectors.md)), `wind`
+([wind.md](wind.md)), `tires` ([tires.md](tires.md)), `trackmap` ([trackmap.md](trackmap.md)). Any field left out keeps that widget's default, so a
+table can set just `x` and `y`. Unknown widgets or fields are errors, so typos do not go unnoticed.
 
 | Field | Range |
 |---|---|
