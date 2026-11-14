@@ -564,6 +564,7 @@ fn wind_widget_does_not_allocate_per_update() {
         height: None,
         rate_hz: None,
         opacity: 0.82,
+        shape: None,
     });
     let mut row = [0u8; WIND_ROW];
     // The car turns through every heading and the wind changes, so most updates have something new to show.
@@ -685,6 +686,7 @@ fn sectors_widget_does_not_allocate_per_update() {
         height: Some(200),
         rate_hz: None,
         opacity: 0.8,
+        shape: None,
     };
     let mut widget = SectorsWidget::new(&widget_config);
     let mut redraw = [Redraw::Nothing; MAX_LAYERS];
@@ -759,7 +761,7 @@ DriverInfo:
 /// The track map maps a lap and then moves the cars' dots and the pit exit without allocating per update.
 #[test]
 fn track_map_does_not_allocate_per_update() {
-    use pitot_overlay::config::WidgetConfig;
+    use pitot_overlay::config::{MapShape, WidgetConfig};
     use pitot_overlay::widgets::{MAX_LAYERS, Redraw, TrackMapWidget, Widget};
 
     let _turn = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
@@ -812,13 +814,17 @@ fn track_map_does_not_allocate_per_update() {
         height: Some(330),
         rate_hz: None,
         opacity: 0.8,
+        shape: Some(MapShape::Outline),
     };
     // A pit lane loss learned at this track before, so the pit exit shows.
     std::fs::create_dir_all(&folder).expect("creates the folder");
     let pit_store = folder.join("pit.toml");
     std::fs::write(&pit_store, "[lane_loss]\n\"77\" = 25.0\n").expect("writes");
-    let mut widget =
-        TrackMapWidget::with_pit_store(&widget_config, Some(folder.clone()), Some(pit_store));
+    let mut widget = TrackMapWidget::with_pit_store(
+        &widget_config,
+        Some(folder.clone()),
+        Some(pit_store.clone()),
+    );
 
     // The player drives the circle counterclockwise from half a lap; the other cars follow at fixed distances.
     let lap_ticks = 2.0 * std::f64::consts::PI * MAP_RADIUS / MAP_SPEED * 60.0;
@@ -898,6 +904,36 @@ fn track_map_does_not_allocate_per_update() {
         ALLOCATIONS.load(Ordering::Relaxed),
         0,
         "allocations while moving the dots"
+    );
+
+    // The circle, the default: no outline, the dots and the pit exit from the first update.
+    let circle_config = WidgetConfig {
+        shape: None,
+        ..widget_config
+    };
+    let mut circle = TrackMapWidget::with_pit_store(&circle_config, None, Some(pit_store));
+    for _ in 0..60 {
+        cycle(n, &mut circle, &mut view);
+        n += 1;
+    }
+    ALLOCATIONS.store(0, Ordering::Relaxed);
+    COUNTING.store(true, Ordering::Relaxed);
+    let mut circle_drawn = 0;
+    for _ in 0..600 {
+        if cycle(n, &mut circle, &mut view)[1] != Redraw::Nothing {
+            circle_drawn += 1;
+        }
+        n += 1;
+    }
+    COUNTING.store(false, Ordering::Relaxed);
+    assert!(
+        circle_drawn >= 90,
+        "the dots move on the circle: {circle_drawn} redraws"
+    );
+    assert_eq!(
+        ALLOCATIONS.load(Ordering::Relaxed),
+        0,
+        "allocations while moving the dots on the circle"
     );
     drop(pipeline);
     let _ = std::fs::remove_dir_all(folder);
@@ -1063,6 +1099,7 @@ fn pit_widget_does_not_allocate_per_update() {
         height: Some(280),
         rate_hz: None,
         opacity: 0.8,
+        shape: None,
     };
     let mut widget = PitWidget::with_store(&widget_config, None);
     let mut redraws = 0usize;
@@ -1152,6 +1189,7 @@ fn fuel_widget_does_not_allocate_per_update() {
         height: None,
         rate_hz: None,
         opacity: 0.82,
+        shape: None,
     });
     let mut row = [0u8; FUEL_ROW];
     // A lap every 20 updates at 1 L per lap, 80 laps to go with 48 L and a 50 L tank: the pit window and the

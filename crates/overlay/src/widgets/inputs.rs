@@ -367,6 +367,7 @@ mod tests {
             height: Some(120),
             rate_hz: None,
             opacity: 0.8,
+            shape: None,
         };
         InputTraceWidget::new(&config)
     }

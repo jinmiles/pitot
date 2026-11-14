@@ -1,11 +1,31 @@
 # Track map widget
 
-The track's outline with every car as a dot at its lap distance (`CarIdxLapDistPct`). Dots are colored by class
+Every car as a dot at its lap distance (`CarIdxLapDistPct`), around a circle (`shape = "circle"`, the default) or
+along the track's outline recorded from a clean lap (`shape = "outline"`). Dots are colored by class
 (`CarClassColor`); the player's is orange with a white ring and drawn on top, and cars on pit road are dimmed. The
-pace car, spectators, and cars out of the world (`CarIdxTrackSurface` -1) are left out. A white tick across the
-road marks the start line. Updates at 10 Hz by default.
+pace car, spectators, and cars out of the world (`CarIdxTrackSurface` -1) are left out. Updates at 10 Hz by
+default.
 
-## Where the outline comes from
+```toml
+[widgets.trackmap]
+shape = "circle"   # or "outline"
+```
+
+## Circle
+
+Start/finish at 12 o'clock, marked by a white tick across the ring. Cars go clockwise in driving order, at
+`CarIdxLapDistPct` × 360°. Cars on pit road sit on a smaller ring inside, dimmed. A short tick marks each sector
+start from the session's `SplitTimeInfo` (up to 16). The circle needs no lap, so it shows from the first moment of
+every session; nothing of the outline runs in this mode (no integration, no `.trk` files read or written).
+
+The ring is a lap of distance, not of time: cars equally far apart on the ring are equally far apart in lap
+distance, which is not the same gap in seconds where the track is slow or fast.
+
+## Outline
+
+The track's outline, with a white tick across the road at the start line.
+
+### Where the outline comes from
 
 The live telemetry has no position (`Lat` and `Lon` are only in `.ibt` files), so the overlay records the outline
 from the player's own driving the first time a track is driven, and keeps it:
@@ -32,7 +52,7 @@ The file is a 16-byte header (`PTRK`, version 1, point count, a reserved word) a
 little-endian `f32`, meters east and north of the line. A file that is not exactly that is ignored and the track is
 mapped again.
 
-### Accuracy
+#### Accuracy
 
 Checked against the latitude and longitude in two sim `.ibt` files, integrating every sixth tick as the widget
 does at 10 Hz (the same lap's `Lat`/`Lon`, interpolated to the outline's lap distances, in local meters on the
@@ -46,6 +66,19 @@ WGS84 ellipsoid):
 Most of each error is one offset for the whole lap (up to 1.4 m); the shape itself is within 0.2 to 0.8 m RMS. At
 every tick (60 Hz) the errors are the same within 0.05 m, so the widget integrates at its own rate instead of on
 the data thread. At the default size, one pixel is about 3 m at these tracks.
+
+### Orientation
+
+North is up, unless turning the map fills the widget better: of the turns in 5 degree steps, the one that draws the
+track largest is used when it is more than 3% larger than north up. The outline is fitted once per track, with
+14 pixels around it.
+
+### Limits
+
+- The pit lane is not drawn. Cars on pit road are placed by their lap distance on the track, dimmed.
+- The outline follows the player's line on the mapping lap, not the track's center line.
+- A short excursion off track between two updates (less than 0.1 s) is not seen and stays in the outline.
+- With a recording of the player's car only (an `.ibt` replayed by `pitot-bench`), only the player's dot shows.
 
 ## Pit exit
 
@@ -64,29 +97,23 @@ where the field is slower or faster than average around the rejoin point, the ri
 Where other cars rejoin after their next stops is in the pit widget, as an order and a gap at each car's own
 future stop; it is not drawn, since it is not a place on the current map.
 
-## Orientation
-
-North is up, unless turning the map fills the widget better: of the turns in 5 degree steps, the one that draws the
-track largest is used when it is more than 3% larger than north up. The outline is fitted once per track, with
-14 pixels around it.
-
-## Limits
-
-- The pit lane is not drawn. Cars on pit road are placed by their lap distance on the track, dimmed.
-- The outline follows the player's line on the mapping lap, not the track's center line.
-- A short excursion off track between two updates (less than 0.1 s) is not seen and stays in the outline.
-- With a recording of the player's car only (an `.ibt` replayed by `pitot-bench`), only the player's dot shows.
-
 ## Drawing
 
-Two layers: the background and outline, drawn when the track or its outline changes (and while mapping, when the
-progress changes by a percent), and the dots, drawn again only when a dot moved by half a pixel. The outline is one
-Direct2D path with round joins. Updates do not allocate; the per-car buffers are sized once.
+Two layers: the background with the circle or outline, drawn when the track, its outline, or (for the circle) the
+sector starts change (and while mapping, when the progress changes by a percent), and the dots, drawn again only when a dot moved by half a pixel. The outline is one
+Direct2D path with round joins; the circle is two ellipse strokes and the ticks. Updates do not allocate; the
+per-car buffers are sized once.
 
 ## Cost
 
-Lab PC (Parsec virtual display, release build), the public AI race capture replayed at 1x with the track's outline
-saved, `pitot-bench collect` for 60 s after a 12 s warm-up, the four reference widgets with the map off and on,
+The circle, against the outline it replaced as the default: lab PC (Parsec virtual display, release builds), the
+public AI race capture at 1x, the four reference widgets with the pit widget and the map (the outline with track
+18 saved, against the circle), a learned lane loss so the pit exit shows, `pitot-bench collect` for 60 s after a
+12 s warm-up, alternating: overlay CPU 32.62 and 27.79 ms/s with the outline, 27.73 and 26.61 ms/s with the circle;
+private bytes at most 21.8 and 19.0 MB against 21.9 and 18.1 MB. No cost shows above the run-to-run spread.
+
+The outline, when it was added: lab PC (Parsec virtual display, release build), the public AI race capture
+replayed at 1x with the track's outline saved, `pitot-bench collect` for 60 s after a 12 s warm-up, the four reference widgets with the map off and on,
 two runs each, alternating: overlay CPU 27.20 and 24.09 ms/s without the map, 29.57 and 28.79 ms/s with it (+2.4
 and +4.7 ms/s); private bytes at most 20.2 and 17.4 MB without, 22.1 and 19.8 MB with (+1.9 and +2.4 MB, of which
 the two 440×330 surfaces are about 1.2 MB). Most of the CPU goes to drawing the whole dots layer again at 10 Hz.
