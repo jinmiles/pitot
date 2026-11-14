@@ -7,8 +7,8 @@ default.
   line land on the correct side. The gap is that distance times the player's lap time. For cars of the player's
   class, `CarIdxEstTime` (the sim's estimate of time into the lap) refines the gap when it agrees with the
   distance. It is never compared across classes: each class's estimate follows its own pace, so a faster car
-  ahead on track can have a lower estimate than the player. As in the sim's own relative, cars ahead show a
-  negative gap and cars behind a positive one.
+  ahead on track can have a lower estimate than the player. The gap shows without a sign (`1.4`): rows above the
+  player are ahead, rows below are behind.
 - **Lap difference**: from `CarIdxLap`, corrected when one of the two cars has just crossed the line. Cars at
   least a lap ahead are shown in red, cars at least a lap behind in blue.
 - **Columns**: class position, car number in the class color, driver name, badges, license class and safety
