@@ -69,4 +69,7 @@ vars! {
     incidents => "PlayerCarMyIncidentCount",
     time_of_day => "SessionTimeOfDay",
     car_session_flags => "CarIdxSessionFlags",
+    wind_vel => "WindVel",
+    wind_dir => "WindDir",
+    yaw_north => "YawNorth",
 }
