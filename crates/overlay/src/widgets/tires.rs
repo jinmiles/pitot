@@ -5,14 +5,19 @@
 //! they describe the last stop, not the tire now. Until they change during the connection the widget cannot
 //! tell how old they are and dims them; afterwards the header shows the lap they were taken on. The distance
 //! updates every 100 m.
+//!
+//! While the sim plays a replay, the widget shows the surface temperatures, tread, and hot pressures of the
+//! replayed moment instead, from the sim's own telemetry files of the session (live telemetry has no surface
+//! temperatures). Without such a file it shows the capture's values, or nothing when no capture plays either.
 
 use std::fmt::Write as _;
 use std::time::{Duration, Instant};
 
+use pitot_irsdk::capture::Moment;
 use pitot_irsdk::live::{Snapshot, VarId};
 
 use crate::config::WidgetConfig;
-use crate::pipeline::{Vars, View};
+use crate::pipeline::{Display, Source, TireSample, Vars, View};
 use crate::render::{Align, Canvas, Color, Rect};
 
 use super::text::FixedText;
@@ -184,6 +189,25 @@ impl Corner {
             let _ = write!(out, "{:.1}", m / 1000.0);
         });
     }
+
+    /// Corner `c` at a replayed moment: surface temperatures, tread, and, in place of the distance, hot pressure.
+    fn fill_replay(&mut self, sample: &TireSample, c: usize) {
+        for z in 0..ZONES {
+            let temp = sample.temp(c, z);
+            write_or_dash(&mut self.temps[z], temp, |out, t| {
+                let _ = write!(out, "{t:.0}");
+            });
+            self.temp_colors[z] = temp.map_or(DIM, temperature_color);
+            let wear = sample.wear(c, z).filter(|w| *w > 0.0);
+            write_or_dash(&mut self.wear[z], wear, |out, w| {
+                let _ = write!(out, "{:.0}", (w * 100.0).min(100.0));
+            });
+            self.wear_colors[z] = wear.map_or(DIM, wear_color);
+        }
+        write_or_dash(&mut self.distance, sample.pressure(c), |out, kpa| {
+            let _ = write!(out, "{kpa:.0}");
+        });
+    }
 }
 
 fn write_or_dash(out: &mut FixedText, value: Option<f32>, write: impl FnOnce(&mut FixedText, f32)) {
@@ -194,9 +218,21 @@ fn write_or_dash(out: &mut FixedText, value: Option<f32>, write: impl FnOnce(&mu
     }
 }
 
+/// Where the values come from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    /// Live telemetry, or a capture during a replay: wear and carcass temperatures from the last stop.
+    Live,
+    /// A replayed moment from the sim's telemetry files: surface temperatures, tread, and hot pressure.
+    Replay,
+    /// A replay with neither a capture nor a telemetry file: nothing to show.
+    Blank,
+}
+
 /// Everything the widget shows.
 #[derive(Debug, Clone, PartialEq)]
 struct Shown {
+    mode: Mode,
     corners: [Corner; CORNERS],
     compound: FixedText,
     compound_color: u32,
@@ -210,6 +246,7 @@ struct Shown {
 impl Shown {
     fn new() -> Self {
         Self {
+            mode: Mode::Live,
             corners: std::array::from_fn(|_| Corner::new()),
             compound: FixedText::new(16),
             compound_color: 0,
@@ -224,6 +261,9 @@ impl Shown {
 const HEADER: u8 = 1;
 
 fn changed_regions(a: &Shown, b: &Shown) -> u8 {
+    if a.mode != b.mode {
+        return 0xFF;
+    }
     let mut mask = 0;
     if a.compound != b.compound
         || a.compound_color != b.compound_color
@@ -265,12 +305,52 @@ impl TiresWidget {
         }
     }
 
-    /// Fills the next state from the view.
-    fn fill(&mut self, view: &View) {
+    /// Fills the next state from the view: live values, or a replayed moment's when the sim's telemetry files have
+    /// it.
+    fn fill(&mut self, view: &mut View, now: Instant) {
+        let display = view.display();
+        let at = replay_moment(view, display);
+        if let Some(at) = at {
+            view.want_tires(at, now);
+        }
+        // During a live replay only this widget shows, so it follows the camera: the files hold the player's
+        // car only. A capture replays the player's whole view, as the other widgets show it.
+        let sample = at
+            .and_then(|at| view.tire_sample(at))
+            .copied()
+            .filter(|_| display != Display::Replay || camera_on_player(view));
+        // A live replay keeps the driving connection, but its values are not the car's: they must not date the
+        // last stop.
+        if display != Display::Replay {
+            self.watch_stop(view);
+        }
+        self.fill_live(view);
+        let next = &mut self.next;
+        next.mode = match (sample, display) {
+            (Some(sample), _) => {
+                for (c, corner) in next.corners.iter_mut().enumerate() {
+                    corner.fill_replay(&sample, c);
+                }
+                next.dated = true;
+                next.taken.clear();
+                Mode::Replay
+            }
+            (None, Display::Replay) => Mode::Blank,
+            (None, _) => Mode::Live,
+        };
+    }
+
+    /// Feeds the pit stall values to the watch that dates them.
+    fn watch_stop(&mut self, view: &View) {
+        let (snap, vars) = (view.snapshot(), view.vars());
+        self.watch
+            .observe(&pit_values(snap, &corner_vars(vars)), snap.i32(vars.lap, 0));
+    }
+
+    /// Fills the next state from the snapshot's live values.
+    fn fill_live(&mut self, view: &View) {
         let (snap, vars) = (view.snapshot(), view.vars());
         let corners = corner_vars(vars);
-        self.watch
-            .observe(&pit_values(snap, &corners), snap.i32(vars.lap, 0));
         let next = &mut self.next;
         for (corner, ids) in next.corners.iter_mut().zip(&corners) {
             corner.fill(snap, ids);
@@ -327,6 +407,7 @@ impl TiresWidget {
         canvas.fill(block, Color::rgb(BLOCK, self.opacity));
         let cell_w = block.w / ZONES as f32;
         let row_h = block.h / 3.0;
+        let replay = self.shown.mode == Mode::Replay;
         // Undated values may be from the garage or a stop before the overlay started.
         let strength = if self.shown.dated { 0.85 } else { 0.35 };
         let ink = if self.shown.dated { BLOCK } else { WHITE };
@@ -365,7 +446,8 @@ impl TiresWidget {
             block.w * 0.4 - 3.0,
             row_h,
         );
-        canvas.text("km", unit, 12.0, Align::Left, Color::rgb(DIM, 1.0));
+        let unit_name = if replay { "kPa" } else { "km" };
+        canvas.text(unit_name, unit, 12.0, Align::Left, Color::rgb(DIM, 1.0));
     }
 
     fn draw_header(&self, canvas: &mut Canvas<'_>) {
@@ -396,9 +478,18 @@ impl TiresWidget {
                 Color::rgb(WHITE, 1.0),
             );
         }
-        // Where the wear and temperatures are from: a stop on a known lap, or an unknown last stop.
+        // Where the wear and temperatures are from: the replayed moment, a stop on a known lap, or an unknown
+        // last stop.
         let right = Rect::new(w * 0.62, 0.0, w * 0.38 - PAD, HEADER_HEIGHT);
-        if s.dated {
+        if s.mode == Mode::Replay {
+            canvas.text(
+                "Replay",
+                right,
+                12.0,
+                Align::Right,
+                Color::rgb(CAUTION, 1.0),
+            );
+        } else if s.dated {
             let number = Rect::new(right.x + right.w - 26.0, 0.0, 26.0, HEADER_HEIGHT);
             canvas.text(
                 s.taken.as_str(),
@@ -443,11 +534,11 @@ impl Widget for TiresWidget {
     }
 
     fn interval(&self) -> Duration {
-        Duration::from_secs(1)
+        Duration::from_millis(200)
     }
 
-    fn update(&mut self, view: &mut View, _now: Instant, redraw: &mut [Redraw; MAX_LAYERS]) {
-        self.fill(view);
+    fn update(&mut self, view: &mut View, now: Instant, redraw: &mut [Redraw; MAX_LAYERS]) {
+        self.fill(view, now);
         let mask = changed_regions(&self.shown, &self.next);
         if mask == 0 {
             return;
@@ -464,6 +555,9 @@ impl Widget for TiresWidget {
     }
 
     fn draw(&self, _layer: usize, canvas: &mut Canvas<'_>) {
+        if self.shown.mode == Mode::Blank {
+            return;
+        }
         let (w, h) = (self.width as f32, self.height as f32);
         canvas.fill(
             Rect::new(0.0, 0.0, w, h),
@@ -475,8 +569,37 @@ impl Widget for TiresWidget {
         }
     }
 
+    fn visible(&self, display: Display) -> bool {
+        matches!(display, Display::Driving | Display::Replay)
+    }
+
     fn reset(&mut self) {
         self.watch = PitWatch::default();
+    }
+}
+
+/// The moment a replay shows: a capture's own clock while it plays, else the sim's replay position. `None`
+/// outside replays.
+fn replay_moment(view: &View, display: Display) -> Option<Moment> {
+    let (snap, vars) = (view.snapshot(), view.vars());
+    let (num, time) = match view.source() {
+        Some(Source::Capture { .. }) => (vars.session_num, vars.session_time),
+        _ if display == Display::Replay => (vars.replay_session_num, vars.replay_session_time),
+        _ => return None,
+    };
+    let at = Moment::new(snap.i32(num, 0)?, snap.f64(time, 0)?);
+    (at.session >= 0 && at.time.is_finite()).then_some(at)
+}
+
+/// The replay camera shows the player's car, or the sim does not say.
+fn camera_on_player(view: &View) -> bool {
+    let (snap, vars) = (view.snapshot(), view.vars());
+    match (
+        snap.i32(vars.cam_car_idx, 0),
+        snap.i32(vars.player_car_idx, 0),
+    ) {
+        (Some(camera), Some(player)) => camera == player,
+        _ => true,
     }
 }
 
@@ -651,7 +774,8 @@ DriverInfo:
             }
             assert!(Instant::now() < deadline, "the row arrives");
         }
-        widget.fill(view);
+        widget.watch_stop(view);
+        widget.fill_live(view);
     }
 
     #[test]
@@ -698,5 +822,113 @@ DriverInfo:
         assert_eq!(lf.temp_colors[0], temperature_color(73.3));
         assert!(s.dated);
         assert_eq!(s.taken.as_str(), "3");
+        assert_eq!(s.mode, Mode::Live);
+    }
+
+    /// A live session in a replay: replay position, camera, and the player's car.
+    const REPLAY_ROW: usize = 32;
+    const REPLAY_SESSION: &str = "---
+WeekendInfo:
+ TrackID: 5
+ SubSessionID: 77
+DriverInfo:
+ DriverCarIdx: 0
+...
+";
+
+    fn replay_row(time: f64, camera: i32) -> Vec<u8> {
+        let mut row = vec![0u8; REPLAY_ROW];
+        row[0..8].copy_from_slice(&time.to_le_bytes());
+        row[8..12].copy_from_slice(&2i32.to_le_bytes());
+        row[12] = 1;
+        row[16..20].copy_from_slice(&camera.to_le_bytes());
+        row
+    }
+
+    #[test]
+    fn replays_show_surface_temperatures_from_the_sims_telemetry_files() {
+        let pid = std::process::id();
+        let dir = std::env::temp_dir().join(format!("pitot-tires-replay-{pid}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("creates the folder");
+        let records = crate::pipeline::ibt_test::stint(2, 100.0, 10.0);
+        std::fs::write(
+            dir.join("stint.ibt"),
+            crate::pipeline::ibt_test::ibt(77, 5, &records),
+        )
+        .expect("writes");
+
+        let names = SdkNames::new(
+            &format!("Local\\PitotTiresReplayMap-{pid}"),
+            &format!("Local\\PitotTiresReplayEvent-{pid}"),
+        );
+        let config = PublisherConfig {
+            vars: vec![
+                VarHeader::new(VarType::Double, 0, 1, "ReplaySessionTime").expect("valid"),
+                VarHeader::new(VarType::Int, 8, 1, "ReplaySessionNum").expect("valid"),
+                VarHeader::new(VarType::Bool, 12, 1, "IsReplayPlaying").expect("valid"),
+                VarHeader::new(VarType::Int, 16, 1, "CamCarIdx").expect("valid"),
+                VarHeader::new(VarType::Int, 20, 1, "PlayerCarIdx").expect("valid"),
+                VarHeader::new(VarType::Float, 24, 2, "CarIdxLapDistPct").expect("valid"),
+            ],
+            buf_len: REPLAY_ROW,
+            num_buf: 3,
+            tick_rate: 60,
+            session_info_capacity: 4096,
+        };
+        let mut publisher = Publisher::create(&names, &config).expect("creates");
+        publisher.set_connected(true).expect("connects");
+        publisher
+            .set_session_info(REPLAY_SESSION.as_bytes())
+            .expect("fits");
+        let reader = ReaderConfig {
+            retry_interval: Duration::from_millis(5),
+            idle_timeout: Duration::from_millis(50),
+        };
+        let (_pipeline, mut view) =
+            Pipeline::start(names, reader, Vec::new(), None).expect("starts");
+        view.set_telemetry_folders(vec![dir.clone()]);
+        let mut widget = TiresWidget::new(&crate::config::Config::default().widgets.tires);
+        let mut redraw = [Redraw::Nothing; MAX_LAYERS];
+        // The search needs the live session info first, which names the session.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while view.session().is_none() {
+            assert!(Instant::now() < deadline, "session info");
+            publisher.publish(&replay_row(105.0, 0)).expect("publishes");
+            thread::sleep(Duration::from_millis(5));
+            view.poll();
+        }
+        assert_eq!(view.display(), Display::Replay);
+        assert!(widget.visible(Display::Replay));
+        assert!(!widget.visible(Display::Idle));
+        let mut show = |time: f64, camera: i32, want: Mode| -> Shown {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                publisher
+                    .publish(&replay_row(time, camera))
+                    .expect("publishes");
+                thread::sleep(Duration::from_millis(5));
+                view.poll();
+                widget.update(&mut view, Instant::now(), &mut redraw);
+                if widget.shown.mode == want {
+                    return widget.shown.clone();
+                }
+                assert!(Instant::now() < deadline, "shows {want:?}");
+            }
+        };
+
+        let s = show(105.0, 0, Mode::Replay);
+        let lf = &s.corners[0];
+        let temps: Vec<&str> = lf.temps.iter().map(FixedText::as_str).collect();
+        assert_eq!(temps, ["85", "85", "85"], "85.0, 85.1, 85.2 °C");
+        assert_eq!(lf.wear[0].as_str(), "95");
+        assert_eq!(lf.distance.as_str(), "170", "hot pressure in kPa");
+        assert_eq!(s.corners[3].distance.as_str(), "173");
+        assert_eq!(s.corners[0].temp_colors[0], temperature_color(85.0));
+        let s = show(109.0, 0, Mode::Replay);
+        assert_eq!(s.corners[0].temps[0].as_str(), "89", "follows the replay");
+        show(106.0, 1, Mode::Blank);
+        show(150.0, 0, Mode::Blank);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

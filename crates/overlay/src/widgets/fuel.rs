@@ -1,5 +1,5 @@
-//! Fuel calculator: current fuel and laps left in the race, then by the average of recent clean laps and by the
-//! last clean lap: fuel per lap, laps the fuel lasts, fuel to add, and fuel left at the end.
+//! Fuel calculator: current fuel and laps left in the race, the pit window, then by the average of recent clean
+//! laps and by the last clean lap: fuel per lap, laps the fuel lasts, fuel to add, and fuel left at the end.
 //!
 //! Use per lap is the average of the last few clean laps: full laps driven under green-flag running, without
 //! visiting pit road and without fuel being added. Laps to go come from the session's remaining laps, or from the time
@@ -115,6 +115,57 @@ pub(crate) fn laps_to_go(
     }
 }
 
+/// When the next stop can be made, by lap number: the lap during which the car enters the pits.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum PitWindow {
+    /// Use per lap, the race length, or the tank size is not known yet.
+    Unknown,
+    /// The fuel lasts to the end.
+    NoStop,
+    /// The next stop can be made from lap `open` to lap `close`; `stops` are needed in all.
+    Laps { open: i32, close: i32, stops: u32 },
+}
+
+/// The pit window for `fuel` in the tank, `per_lap` use, `to_go` laps left in the race, and a `tank` that holds
+/// that much, with `completed` laps done and `pct` of the current lap driven.
+///
+/// The stops needed fill the shortfall a full tank at a time. The window opens on the first lap from which a full
+/// tank, and full tanks at the stops after it, reach the finish, and closes on the last lap the fuel reaches. Laps
+/// to go count from the car's position, as the estimates do.
+pub(crate) fn pit_window(
+    fuel: f32,
+    per_lap: Option<f32>,
+    to_go: Option<f32>,
+    tank: Option<f32>,
+    completed: i32,
+    pct: f32,
+) -> PitWindow {
+    let (Some(per_lap), Some(to_go), Some(tank)) = (
+        per_lap.filter(|&p| p > 0.0),
+        to_go.filter(|&t| t >= 0.0),
+        tank.filter(|&t| t > 0.0),
+    ) else {
+        return PitWindow::Unknown;
+    };
+    let short = to_go * per_lap - fuel;
+    if short <= 0.0 {
+        return PitWindow::NoStop;
+    }
+    let at = completed.max(0) as f32 + pct.clamp(0.0, 1.0);
+    let now = completed.max(0) + 1;
+    let close = ((at + fuel.max(0.0) / per_lap).floor() as i32).max(now);
+    let finish = at + to_go;
+    let mut stops = (short / tank).ceil().max(1.0) as u32;
+    loop {
+        let open = ((finish - stops as f32 * tank / per_lap).ceil() as i32).max(now);
+        // Laps are whole: when rounding leaves no lap that works, one more stop opens the window.
+        if open <= close {
+            return PitWindow::Laps { open, close, stops };
+        }
+        stops += 1;
+    }
+}
+
 /// One basis for the estimates: the average of recent clean laps, or the last clean lap.
 #[derive(Debug, Clone, PartialEq)]
 struct Estimate {
@@ -170,10 +221,23 @@ fn write_value(out: &mut FixedText, value: f32) {
     let _ = write!(out, "{value:.2}");
 }
 
+/// How the pit window shows: not open yet, open on the current lap, or closing on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WindowState {
+    Later,
+    Open,
+    Closing,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 struct Lines {
     fuel: FixedText,
     laps_to_go: FixedText,
+    /// "Pit Window", or "Pit 1 of 3" when more than one stop is needed.
+    window_label: FixedText,
+    /// "L23-31", "L23", "no stop", or dashes.
+    window: FixedText,
+    window_state: WindowState,
     average: Estimate,
     last: Estimate,
     /// Lights the pit sign: at the average, the fuel does not last to the end.
@@ -185,6 +249,9 @@ impl Lines {
         Self {
             fuel: FixedText::new(12),
             laps_to_go: FixedText::new(12),
+            window_label: FixedText::new(16),
+            window: FixedText::new(16),
+            window_state: WindowState::Later,
             average: Estimate::new(),
             last: Estimate::new(),
             pit: false,
@@ -221,6 +288,8 @@ const DIM: u32 = 0xA0_A6AE;
 const AVERAGE: u32 = 0x82_B1FF;
 const LAST: u32 = 0xF2_C14E;
 const SHORT: u32 = 0xFF_6B5E;
+/// The pit window is open on the current lap.
+const OPEN: u32 = 0x3D_D68C;
 const BACKGROUND: u32 = 0x10_1418;
 
 impl Widget for FuelWidget {
@@ -237,6 +306,7 @@ impl Widget for FuelWidget {
         let next = &mut self.next;
         next.fuel.set(NO_VALUE);
         next.laps_to_go.set(NO_VALUE);
+        next.fill_window(PitWindow::Unknown, 0);
         next.pit = false;
         if let Some(fuel) = snap.f32(vars.fuel_level, 0) {
             let laps_completed = snap.i32(vars.lap_completed, 0).unwrap_or(0);
@@ -260,6 +330,21 @@ impl Widget for FuelWidget {
             next.average.fill(fuel, self.tracker.per_lap(), to_go);
             next.last.fill(fuel, self.tracker.last_lap(), to_go);
             next.pit = next.average.short;
+            // The tank as filled in this session: a balance of performance can cap it below its size.
+            let tank = view.session().and_then(|s| {
+                let d = &s.driver_info;
+                Some((d.fuel_max_liters? * d.max_fuel_pct.unwrap_or(1.0)) as f32)
+            });
+            let pct = snap.f32(vars.lap_dist_pct, 0).unwrap_or(0.0);
+            let window = pit_window(
+                fuel,
+                self.tracker.per_lap(),
+                to_go,
+                tank,
+                laps_completed,
+                pct,
+            );
+            next.fill_window(window, laps_completed);
         } else {
             next.average.fill(0.0, None, None);
             next.last.fill(0.0, None, None);
@@ -294,6 +379,25 @@ impl Widget for FuelWidget {
             value,
             Align::Left,
             white,
+        );
+        canvas.text(
+            l.window_label.as_str(),
+            cell(2.0, 0.0),
+            label,
+            Align::Left,
+            dim,
+        );
+        let window_ink = match l.window_state {
+            WindowState::Later => white,
+            WindowState::Open => Color::rgb(OPEN, 1.0),
+            WindowState::Closing => Color::rgb(SHORT, 1.0),
+        };
+        canvas.text(
+            l.window.as_str(),
+            cell(2.0, 1.0),
+            value,
+            Align::Left,
+            window_ink,
         );
         // The pit sign, lit when the fuel does not last to the end.
         let sign = Rect::new(
@@ -358,6 +462,38 @@ impl Widget for FuelWidget {
 
     fn reset(&mut self) {
         self.tracker = FuelTracker::default();
+    }
+}
+
+impl Lines {
+    /// Fills the pit window's label and value; `completed` is the laps done.
+    fn fill_window(&mut self, window: PitWindow, completed: i32) {
+        self.window_label.set("Pit Window");
+        self.window_state = WindowState::Later;
+        match window {
+            PitWindow::Unknown => self.window.set(NO_VALUE),
+            PitWindow::NoStop => self.window.set("no stop"),
+            PitWindow::Laps { open, close, stops } => {
+                if stops > 1 {
+                    self.window_label.clear();
+                    let _ = write!(self.window_label, "Pit 1 of {stops}");
+                }
+                self.window.clear();
+                if open == close {
+                    let _ = write!(self.window, "L{open}");
+                } else {
+                    let _ = write!(self.window, "L{open}-{close}");
+                }
+                let now = completed.max(0) + 1;
+                self.window_state = if close <= now {
+                    WindowState::Closing
+                } else if open <= now {
+                    WindowState::Open
+                } else {
+                    WindowState::Later
+                };
+            }
+        }
     }
 }
 
@@ -452,6 +588,148 @@ mod tests {
             Some(session_state::RACING),
             session_flags::CAUTION_WAVING
         ));
+    }
+
+    #[test]
+    fn pit_window_one_stop() {
+        // 52 L tank, 4 L per lap, 30 L in the tank after 10 laps, 20 laps to go: 80 L needed, 50 short.
+        // The fuel reaches lap 17 (10 + 30 / 4 = 17.5); a full tank reaches the finish from lap 17 (30 - 13).
+        let w = pit_window(30.0, Some(4.0), Some(20.0), Some(52.0), 10, 0.0);
+        assert_eq!(
+            w,
+            PitWindow::Laps {
+                open: 17,
+                close: 17,
+                stops: 1
+            }
+        );
+        // More fuel now: the window opens at the same lap and closes later.
+        let w = pit_window(40.0, Some(4.0), Some(20.0), Some(52.0), 10, 0.0);
+        assert_eq!(
+            w,
+            PitWindow::Laps {
+                open: 17,
+                close: 20,
+                stops: 1
+            }
+        );
+        // Halfway round the lap, the fuel reaches half a lap further, and so must a full tank.
+        let w = pit_window(40.0, Some(4.0), Some(20.0), Some(52.0), 10, 0.5);
+        assert_eq!(
+            w,
+            PitWindow::Laps {
+                open: 18,
+                close: 20,
+                stops: 1
+            }
+        );
+    }
+
+    #[test]
+    fn pit_window_open_now_or_not_needed() {
+        // Ten laps to go, a full tank lasts 13: the window is open from the current lap.
+        let w = pit_window(20.0, Some(4.0), Some(10.0), Some(52.0), 30, 0.0);
+        assert_eq!(
+            w,
+            PitWindow::Laps {
+                open: 31,
+                close: 35,
+                stops: 1
+            }
+        );
+        assert_eq!(
+            pit_window(41.0, Some(4.0), Some(10.0), Some(52.0), 30, 0.0),
+            PitWindow::NoStop
+        );
+        // Out of fuel before the end of this lap: the current lap is the only one.
+        let w = pit_window(1.0, Some(4.0), Some(10.0), Some(52.0), 30, 0.2);
+        assert_eq!(
+            w,
+            PitWindow::Laps {
+                open: 31,
+                close: 31,
+                stops: 1
+            }
+        );
+    }
+
+    #[test]
+    fn pit_window_more_stops() {
+        // 100 laps to go at 4 L per lap with a 52 L tank (13 laps): 400 L, 30 in the tank, 370 short: 8 stops.
+        let w = pit_window(30.0, Some(4.0), Some(100.0), Some(52.0), 0, 0.0);
+        assert_eq!(
+            w,
+            PitWindow::Laps {
+                open: 1,
+                close: 7,
+                stops: 8
+            }
+        );
+        // Stops are made on whole laps. The fuel reaches lap 10.8 and the finish is 22.7, so one stop on lap 10
+        // with a 12.5-lap tank reaches 22.5: short by a fifth of a lap, although 47.6 L short fits one tank.
+        let w = pit_window(23.2, Some(4.0), Some(17.7), Some(50.0), 5, 0.0);
+        assert_eq!(
+            w,
+            PitWindow::Laps {
+                open: 6,
+                close: 10,
+                stops: 2
+            }
+        );
+    }
+
+    #[test]
+    fn pit_window_unknown_without_inputs() {
+        for w in [
+            pit_window(30.0, None, Some(20.0), Some(52.0), 10, 0.0),
+            pit_window(30.0, Some(4.0), None, Some(52.0), 10, 0.0),
+            pit_window(30.0, Some(4.0), Some(20.0), None, 10, 0.0),
+            pit_window(30.0, Some(4.0), Some(20.0), Some(0.0), 10, 0.0),
+        ] {
+            assert_eq!(w, PitWindow::Unknown);
+        }
+    }
+
+    #[test]
+    fn pit_window_text() {
+        let mut l = Lines::new();
+        l.fill_window(PitWindow::Unknown, 3);
+        assert_eq!(
+            (l.window_label.as_str(), l.window.as_str()),
+            ("Pit Window", NO_VALUE)
+        );
+        l.fill_window(PitWindow::NoStop, 3);
+        assert_eq!(l.window.as_str(), "no stop");
+        l.fill_window(
+            PitWindow::Laps {
+                open: 23,
+                close: 31,
+                stops: 1,
+            },
+            10,
+        );
+        assert_eq!(l.window.as_str(), "L23-31");
+        assert_eq!(l.window_state, WindowState::Later);
+        l.fill_window(
+            PitWindow::Laps {
+                open: 11,
+                close: 31,
+                stops: 2,
+            },
+            10,
+        );
+        assert_eq!(l.window_label.as_str(), "Pit 1 of 2");
+        assert_eq!(l.window_state, WindowState::Open);
+        l.fill_window(
+            PitWindow::Laps {
+                open: 11,
+                close: 11,
+                stops: 1,
+            },
+            10,
+        );
+        assert_eq!(l.window.as_str(), "L11");
+        assert_eq!(l.window_state, WindowState::Closing);
     }
 
     #[test]

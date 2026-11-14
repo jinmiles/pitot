@@ -185,6 +185,7 @@ fn playing_a_capture_does_not_allocate_per_tick() {
             VarHeader::new(VarType::Int, 16, 1, "ReplaySessionNum").expect("valid"),
             VarHeader::new(VarType::Bool, 20, 1, "IsReplayPlaying").expect("valid"),
             VarHeader::new(VarType::Int, 24, 1, "ReplayPlaySpeed").expect("valid"),
+            VarHeader::new(VarType::Int, 28, 1, "SessionNum").expect("valid"),
             VarHeader::new(VarType::Float, 32, 72, "CarIdxLapDistPct").expect("valid"),
         ],
         buf_len: REPLAY_ROW,
@@ -201,6 +202,21 @@ fn playing_a_capture_does_not_allocate_per_tick() {
     };
     let (pipeline, mut view) =
         Pipeline::start(names, reader_config, vec![folder.clone()], None).expect("starts");
+    // The sim's telemetry file of the session, for the tire widget's surface temperatures.
+    let telemetry = folder.join("telemetry");
+    std::fs::create_dir_all(&telemetry).expect("creates the folder");
+    std::fs::write(
+        telemetry.join("stint.ibt"),
+        telemetry_file(4242, 1, 100.0, 40.0),
+    )
+    .expect("writes");
+    view.set_telemetry_folders(vec![telemetry]);
+    let mut tires = TiresWidget::new(&Config::default().widgets.tires);
+    let mut update = |view: &mut View| -> bool {
+        let mut redraw = [Redraw::Nothing; MAX_LAYERS];
+        tires.update(view, Instant::now(), &mut redraw);
+        redraw[0] != Redraw::Nothing
+    };
 
     let mut row = [0u8; REPLAY_ROW];
     row[20] = 1;
@@ -219,27 +235,40 @@ fn playing_a_capture_does_not_allocate_per_tick() {
         view.poll();
         view.drain_samples(|_| {})
     }
-    // Warm-up: the live session info, the search, the first restart, and its session info.
+    // Warm-up: the live session info, the searches, the first restart, and its session info. The tire widget
+    // asks for the telemetry files once the live session info has named the session.
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut n = 0;
+    let mut named = false;
     while !(view.source() == Some(Source::Capture { first: true }) && view.session().is_some())
         || n < 400
     {
         assert!(Instant::now() < deadline, "the capture plays");
         cycle(&mut publisher, &mut view, &mut row, n);
+        named |= view.session().is_some();
+        if named {
+            update(&mut view);
+        }
         n += 1;
     }
 
     ALLOCATIONS.store(0, Ordering::Relaxed);
     COUNTING.store(true, Ordering::Relaxed);
     let mut samples = 0;
+    let mut redraws = 0;
     for _ in 0..600 {
         samples += cycle(&mut publisher, &mut view, &mut row, n);
+        redraws += usize::from(update(&mut view));
         n += 1;
     }
     COUNTING.store(false, Ordering::Relaxed);
 
     assert!(samples >= 590, "one sample per replayed tick: {samples}");
+    // The file's temperatures rise a degree a second: ten seconds of replay change them about ten times.
+    assert!(
+        redraws >= 5,
+        "the tire widget follows the replay: {redraws} redraws"
+    );
     assert_eq!(
         view.source(),
         Some(Source::Capture { first: true }),
@@ -248,10 +277,64 @@ fn playing_a_capture_does_not_allocate_per_tick() {
     assert_eq!(
         ALLOCATIONS.load(Ordering::Relaxed),
         0,
-        "allocations across the data thread and view"
+        "allocations across the data thread, view, and tire widget"
     );
     drop(pipeline);
     let _ = std::fs::remove_dir_all(folder);
+}
+
+/// A minimal `.ibt` of session 0 at 60 Hz from `start` for `seconds`: session time and number, and surface
+/// temperatures that rise a degree a second.
+fn telemetry_file(sub_session: i64, track: i64, start: f64, seconds: f64) -> Vec<u8> {
+    use pitot_irsdk::layout::{DiskSubHeader, Header, SDK_VERSION, STATUS_CONNECTED};
+    let mut vars = vec![
+        VarHeader::new(VarType::Double, 0, 1, "SessionTime").expect("valid"),
+        VarHeader::new(VarType::Int, 8, 1, "SessionNum").expect("valid"),
+    ];
+    for (i, corner) in ["LF", "RF", "LR", "RR"].iter().enumerate() {
+        for (z, zone) in ["L", "M", "R"].iter().enumerate() {
+            let at = 12 + (i * 3 + z) as i32 * 4;
+            let name = format!("{corner}temp{zone}");
+            vars.push(VarHeader::new(VarType::Float, at, 1, &name).expect("valid"));
+        }
+    }
+    let record_len = 64;
+    let yaml = format!("WeekendInfo:\n TrackID: {track}\n SubSessionID: {sub_session}\n");
+    let table_at = Header::SIZE + DiskSubHeader::SIZE;
+    let info_at = table_at + vars.len() * VarHeader::SIZE;
+    let data_at = info_at + yaml.len() + 16;
+    let records = (seconds * 60.0) as usize;
+    let mut bytes = vec![0u8; data_at + records * record_len];
+    let mut header = Header::default();
+    header.ver = SDK_VERSION;
+    header.status = STATUS_CONNECTED;
+    header.tick_rate = 60;
+    header.session_info_len = (yaml.len() + 16) as i32;
+    header.session_info_offset = info_at as i32;
+    header.num_vars = vars.len() as i32;
+    header.var_header_offset = table_at as i32;
+    header.num_buf = 1;
+    header.buf_len = record_len as i32;
+    header.var_buf[0].buf_offset = data_at as i32;
+    header.write(&mut bytes).expect("header fits");
+    DiskSubHeader::default()
+        .write(&mut bytes)
+        .expect("sub-header fits");
+    for (n, var) in vars.iter().enumerate() {
+        var.write(&mut bytes[table_at + n * VarHeader::SIZE..])
+            .expect("fits");
+    }
+    bytes[info_at..info_at + yaml.len()].copy_from_slice(yaml.as_bytes());
+    for n in 0..records {
+        let row = &mut bytes[data_at + n * record_len..][..record_len];
+        let t = n as f64 / 60.0;
+        row[0..8].copy_from_slice(&(start + t).to_le_bytes());
+        for i in 0..12 {
+            let temp = 80.0 + t as f32;
+            row[12 + i * 4..16 + i * 4].copy_from_slice(&temp.to_le_bytes());
+        }
+    }
+    bytes
 }
 
 #[test]
@@ -1005,5 +1088,102 @@ fn pit_widget_does_not_allocate_per_update() {
     );
     assert!(redraws > 0, "the widget had something to draw");
     drop(widget);
+    drop(pipeline);
+}
+
+const FUEL_ROW: usize = 32;
+
+#[test]
+fn fuel_widget_does_not_allocate_per_update() {
+    use pitot_overlay::config::WidgetConfig;
+    use pitot_overlay::widgets::{FuelWidget, MAX_LAYERS, Redraw, Widget};
+
+    let _turn = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let pid = std::process::id();
+    let names = SdkNames::new(
+        &format!("Local\\PitotOverlayAllocFuelMap-{pid}"),
+        &format!("Local\\PitotOverlayAllocFuelEvent-{pid}"),
+    );
+    let config = PublisherConfig {
+        vars: vec![
+            VarHeader::new(VarType::Double, 0, 1, "SessionTime").expect("valid"),
+            VarHeader::new(VarType::Float, 8, 1, "FuelLevel").expect("valid"),
+            VarHeader::new(VarType::Int, 12, 1, "LapCompleted").expect("valid"),
+            VarHeader::new(VarType::Float, 16, 1, "LapDistPct").expect("valid"),
+            VarHeader::new(VarType::Int, 20, 1, "SessionLapsRemainEx").expect("valid"),
+            VarHeader::new(VarType::Bool, 24, 1, "IsOnTrack").expect("valid"),
+        ],
+        buf_len: FUEL_ROW,
+        num_buf: 3,
+        tick_rate: 60,
+        session_info_capacity: 4096,
+    };
+    let mut publisher = Publisher::create(&names, &config).expect("creates");
+    publisher.set_connected(true).expect("connects");
+    publisher
+        .set_session_info(
+            b"WeekendInfo:\n TrackID: 1\nDriverInfo:\n DriverCarIdx: 0\n DriverCarFuelMaxLtr: 100.000\n DriverCarMaxFuelPct: 0.500\n",
+        )
+        .expect("fits");
+    let reader_config = ReaderConfig {
+        retry_interval: Duration::from_millis(5),
+        idle_timeout: Duration::from_millis(50),
+    };
+    let (pipeline, mut view) =
+        Pipeline::start(names, reader_config, Vec::new(), None).expect("starts");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !view.is_connected() {
+        assert!(Instant::now() < deadline, "connects");
+        view.poll();
+        thread::sleep(Duration::from_millis(2));
+    }
+    let mut widget = FuelWidget::new(&WidgetConfig {
+        enabled: true,
+        monitor: None,
+        x: 0,
+        y: 0,
+        width: None,
+        height: None,
+        rate_hz: None,
+        opacity: 0.82,
+    });
+    let mut row = [0u8; FUEL_ROW];
+    // A lap every 20 updates at 1 L per lap, 80 laps to go with 48 L and a 50 L tank: the pit window and the
+    // estimates move every lap. Returns whether the widget redrew and whether the session info is in.
+    let mut cycle = |n: u32| -> (bool, bool) {
+        let lap = (n / 20) as i32;
+        row[0..8].copy_from_slice(&f64::from(n).to_le_bytes());
+        row[8..12].copy_from_slice(&(48.0 - n as f32 * 0.05).to_le_bytes());
+        row[12..16].copy_from_slice(&lap.to_le_bytes());
+        row[16..20].copy_from_slice(&((n % 20) as f32 / 20.0).to_le_bytes());
+        row[20..24].copy_from_slice(&(80 - lap).to_le_bytes());
+        row[24] = 1;
+        publisher.publish(&row).expect("publishes");
+        thread::sleep(Duration::from_millis(4));
+        view.poll();
+        view.drain_samples(|_| {});
+        let mut redraw = [Redraw::Nothing; MAX_LAYERS];
+        widget.update(&mut view, Instant::now(), &mut redraw);
+        (redraw[0] != Redraw::Nothing, view.session().is_some())
+    };
+    // Warm-up: the session info with the tank size, and two clean laps for the use per lap.
+    let mut session = false;
+    for n in 0..120 {
+        session = cycle(n).1;
+    }
+    assert!(session, "session info parsed");
+    ALLOCATIONS.store(0, Ordering::Relaxed);
+    COUNTING.store(true, Ordering::Relaxed);
+    let mut redraws = 0;
+    for n in 120..720 {
+        redraws += usize::from(cycle(n).0);
+    }
+    COUNTING.store(false, Ordering::Relaxed);
+    assert!(redraws > 300, "the fuel kept changing: {redraws} redraws");
+    assert_eq!(
+        ALLOCATIONS.load(Ordering::Relaxed),
+        0,
+        "allocations across the data thread, view, and fuel widget"
+    );
     drop(pipeline);
 }

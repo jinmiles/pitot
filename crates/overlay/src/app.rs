@@ -279,6 +279,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         config::capture_dirs(),
         recording,
     )?;
+    let documents = platform::documents_dir();
+    view.set_telemetry_folders(config::telemetry_dirs(&config.telemetry, documents.clone()));
     let timer = Timer::new()?;
     let mut reload_at: Option<Instant> = None;
     // Chosen from the tray menu: no widget is updated or drawn.
@@ -356,6 +358,12 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 match config::load_or_create(&path) {
                     Ok(fresh) if fresh == config => {}
                     Ok(fresh) => {
+                        if fresh.telemetry != config.telemetry {
+                            view.set_telemetry_folders(config::telemetry_dirs(
+                                &fresh.telemetry,
+                                documents.clone(),
+                            ));
+                        }
                         // Release GPU objects before their windows go away.
                         scene = None;
                         let moving = handles.take().is_some();
