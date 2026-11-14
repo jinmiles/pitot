@@ -47,3 +47,9 @@ opacity = 0.82
 
 [widgets.pit]
 enabled = false
+
+[widgets.sectors]
+enabled = false
+
+[widgets.wind]
+enabled = false

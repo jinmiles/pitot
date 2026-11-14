@@ -27,3 +27,9 @@ enabled = false
 
 [widgets.pit]
 enabled = false
+
+[widgets.sectors]
+enabled = false
+
+[widgets.wind]
+enabled = false
