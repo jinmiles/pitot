@@ -68,5 +68,6 @@ overlay's process has no async runtime and no UI framework. While open, the wind
 refresh to check whether anything needs drawing, and draws only when something changed.
 
 Measured on the lab PC (i7-9700, Parsec virtual display, release build, `pitot-bench collect --name
-pitot-control.exe`, 60 s while open and idle): see the pull request that added the window for the numbers. The
-binary is about 5 MB.
+pitot-control.exe`, 60 s while open and idle, the overlay running a replay): 7.0 ms/s CPU (0.087% of all
+cores), 22.4 MB private bytes. The window shows about 0.3 s after the process starts (0.4 s the first time).
+The binary is about 5 MB.

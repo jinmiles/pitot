@@ -2,7 +2,8 @@
 //! WebView, or garbage-collected runtimes.
 //!
 //! - [`pipeline`]: data and session threads, and the render thread's view of the latest telemetry.
-//! - [`platform`]: monitors, overlay windows, message loop, timers, and the tray icon (Windows).
+//! - [`platform`]: monitors, overlay windows, message loop, timers, the tray icon, and the link to the Pitot window
+//!   (`pitot-control`) (Windows).
 //! - [`render`]: D3D11, Direct2D, DirectWrite, and DirectComposition layers per widget (Windows).
 //! - [`app`]: the render thread's schedule and main loop (Windows).
 //! - [`widgets`]: the widget trait and widgets.
