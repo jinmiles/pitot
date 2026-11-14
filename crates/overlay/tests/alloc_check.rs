@@ -789,11 +789,12 @@ SplitTimeInfo:
 ";
 const STANDINGS_ROW: usize = 16 + 72 * 4 * 3;
 
-/// The standings in a live race: the order changes as cars pass each other and gaps are timed on every update.
+/// The standings and the relative in a live race: the order changes as cars pass each other and gaps are timed on
+/// every update.
 #[test]
-fn standings_widget_does_not_allocate_per_update() {
+fn standings_and_relative_do_not_allocate_per_update() {
     use pitot_overlay::config::WidgetConfig;
-    use pitot_overlay::widgets::StandingsWidget;
+    use pitot_overlay::widgets::{RelativeWidget, StandingsWidget};
 
     let _turn = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let pid = std::process::id();
@@ -835,7 +836,10 @@ fn standings_widget_does_not_allocate_per_update() {
         opacity: 0.8,
         shape: None,
     };
-    let mut widget = StandingsWidget::new(&widget_config);
+    let mut widgets = (
+        StandingsWidget::new(&widget_config),
+        RelativeWidget::new(&widget_config),
+    );
     let mut redraw = [Redraw::Nothing; MAX_LAYERS];
 
     let mut row = [0u8; STANDINGS_ROW];
@@ -848,7 +852,7 @@ fn standings_widget_does_not_allocate_per_update() {
     }
     // Three cars on slightly different 10 s laps, updated every half second of session time: they keep passing
     // each other and crossing the line.
-    let mut cycle = |n: u32, view: &mut View, widget: &mut StandingsWidget| {
+    let mut cycle = |n: u32, view: &mut View, widgets: &mut (StandingsWidget, RelativeWidget)| {
         let t = f64::from(n) * 0.5;
         row[0..8].copy_from_slice(&t.to_le_bytes());
         for (car, lap, offset) in [(0usize, 10.4f64, 0.6f64), (1, 10.0, 0.3), (2, 9.7, 0.0)] {
@@ -863,28 +867,29 @@ fn standings_widget_does_not_allocate_per_update() {
         thread::sleep(Duration::from_millis(4));
         view.poll();
         view.drain_samples(|_| {});
-        widget.update(view, Instant::now(), &mut redraw);
+        widgets.0.update(view, Instant::now(), &mut redraw);
+        widgets.1.update(view, Instant::now(), &mut redraw);
     };
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut n = 0;
     // Warm-up: the session info, per-car storage, and the first laps.
     while view.session().is_none() || n < 100 {
         assert!(Instant::now() < deadline, "session info parsed");
-        cycle(n, &mut view, &mut widget);
+        cycle(n, &mut view, &mut widgets);
         n += 1;
     }
 
     ALLOCATIONS.store(0, Ordering::Relaxed);
     COUNTING.store(true, Ordering::Relaxed);
     for _ in 0..400 {
-        cycle(n, &mut view, &mut widget);
+        cycle(n, &mut view, &mut widgets);
         n += 1;
     }
     COUNTING.store(false, Ordering::Relaxed);
     assert_eq!(
         ALLOCATIONS.load(Ordering::Relaxed),
         0,
-        "allocations across the pipeline and the standings widget"
+        "allocations across the pipeline, the standings, and the relative"
     );
     drop(pipeline);
 }

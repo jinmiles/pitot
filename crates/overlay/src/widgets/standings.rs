@@ -4,10 +4,11 @@
 //! before the player joined; telemetry adds what the results do not have yet (a lap just completed) and what they
 //! never have (tires, sector times). In a race, from the green flag, the order and the gaps are live: the results
 //! only change at the line, so the order follows each car's laps and lap distance, and the gaps are timed by a
-//! [`RaceClock`]. Each class shows a header and its leaders; the player's class also shows the cars around the
-//! player.
+//! [`RaceClock`] shared with the relative. Each class shows a header and its leaders; the player's class also shows
+//! the cars around the player.
 
 use std::fmt::Write as _;
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use pitot_irsdk::flags::session_state;
@@ -19,6 +20,7 @@ use crate::render::{Align, Canvas, Color, Rect};
 
 use super::text::FixedText;
 use super::timing::{Gap, RaceClock, SectorClock, SectorStarts};
+use super::trackclock::{SharedTrackClock, TrackClock};
 use super::{MAX_LAYERS, Redraw, Widget};
 
 const ROW_HEIGHT: f32 = 24.0;
@@ -394,7 +396,8 @@ pub struct StandingsWidget {
     result_of: Vec<Option<usize>>,
     clocks: Vec<SectorClock>,
     sectors: SectorStarts,
-    race: RaceClock,
+    /// Live race order and gaps, shared with the relative.
+    clock: SharedTrackClock,
     /// Class position at the start of the race, per car; 0 when unknown.
     start_positions: Vec<i32>,
     start_session: Option<i64>,
@@ -405,6 +408,11 @@ pub struct StandingsWidget {
 
 impl StandingsWidget {
     pub fn new(config: &WidgetConfig) -> Self {
+        Self::with_clock(config, TrackClock::shared())
+    }
+
+    /// A standings widget timing gaps with `clock`, which other widgets may observe too.
+    pub(crate) fn with_clock(config: &WidgetConfig, clock: SharedTrackClock) -> Self {
         let width = config.width.unwrap_or(760);
         let height = config.height.unwrap_or(560).max(ROW_HEIGHT as u32 * 2);
         let rows = (height as f32 / ROW_HEIGHT) as usize;
@@ -422,13 +430,27 @@ impl StandingsWidget {
             result_of: Vec::with_capacity(72),
             clocks: Vec::with_capacity(72),
             sectors: SectorStarts::default(),
-            race: RaceClock::default(),
+            clock,
             start_positions: Vec::with_capacity(72),
             start_session: None,
             ratings: Vec::with_capacity(72),
             places: Vec::with_capacity(72),
             changes: Vec::with_capacity(72),
         }
+    }
+
+    /// (car number, gap) of the car rows last filled.
+    #[cfg(test)]
+    pub(crate) fn filled_gaps(&self) -> Vec<(String, String)> {
+        self.next
+            .iter()
+            .filter_map(|r| match r {
+                Row::Car(car) => {
+                    Some((car.number.as_str().to_owned(), car.gap.as_str().to_owned()))
+                }
+                _ => None,
+            })
+            .collect()
     }
 
     /// Moves rows from `next` back to the spare pools and blanks every row.
@@ -442,7 +464,7 @@ impl StandingsWidget {
         }
     }
 
-    fn fill(&mut self, view: &View) {
+    pub(crate) fn fill(&mut self, view: &View) {
         self.recycle();
         let (snap, vars) = (view.snapshot(), view.vars());
         let Some(info) = view.session() else {
@@ -456,7 +478,6 @@ impl StandingsWidget {
             self.start_positions.resize(cars, 0);
             self.result_of.clear();
             self.result_of.resize(cars, None);
-            self.race.resize(cars);
             self.start_session = None;
         }
         let player = snap
@@ -474,36 +495,21 @@ impl StandingsWidget {
             .is_some_and(|t| t.eq_ignore_ascii_case("race"));
         let now = snap.f64(vars.session_time, 0).unwrap_or(0.0);
         let state = snap.i32(vars.session_state, 0);
-        if is_race && self.start_session != session_num {
-            self.race.reset();
-        }
 
-        // Race progress of every car, from before the green flag so the first gaps are ready at the start.
-        if is_race {
-            let checkered = matches!(
-                state,
-                Some(session_state::CHECKERED | session_state::COOL_DOWN)
-            );
-            let drivers = &info.driver_info.drivers;
-            self.race.observe(now, checkered, |car| {
-                let racing = drivers
-                    .get(car)
-                    .and_then(Option::as_ref)
-                    .is_some_and(|d| !d.is_pace_car && !d.is_spectator);
-                let in_world = snap.i32(vars.car_track_surface, car) != Some(NOT_IN_WORLD);
-                if !racing || !in_world {
-                    return None;
-                }
-                Some((
-                    snap.i32(vars.car_lap_completed, car)?,
-                    snap.f32(vars.car_lap_dist_pct, car)?,
-                ))
-            });
+        // Every car's progress, kept from before the green flag (and in every session, for the relative) so the
+        // first gaps are ready at the start. Only a race uses it here.
+        if let Ok(mut clock) = self.clock.try_borrow_mut() {
+            clock.observe(view);
         }
+        let shared = Rc::clone(&self.clock);
+        let Ok(clock) = shared.try_borrow() else {
+            return;
+        };
+        let race = clock.clock();
         let live = is_race
             && match state {
                 Some(session_state::RACING) => true,
-                Some(session_state::CHECKERED | session_state::COOL_DOWN) => self.race.is_live(),
+                Some(session_state::CHECKERED | session_state::COOL_DOWN) => race.is_live(),
                 _ => false,
             };
 
@@ -588,8 +594,7 @@ impl StandingsWidget {
                 (a, b) => a.or(b).unwrap_or(0),
             };
             let key = if live {
-                self.race
-                    .standing(car)
+                race.standing(car)
                     .map(|s| s.key())
                     .or_else(|| result_laps.map(|l| (f64::from(l), f64::NEG_INFINITY)))
                     .unwrap_or((f64::NEG_INFINITY, f64::NEG_INFINITY))
@@ -743,8 +748,7 @@ impl StandingsWidget {
                     info,
                     view,
                     is_race,
-                    race: live.then_some(&self.race),
-                    now,
+                    race: live.then_some(race),
                     leader,
                     ahead,
                     class_best: class.best,
@@ -867,7 +871,6 @@ struct RowContext<'a> {
     is_race: bool,
     /// Live race timing, from the green flag.
     race: Option<&'a RaceClock>,
-    now: f64,
     leader: Entry,
     ahead: Option<Entry>,
     class_best: f32,
@@ -956,7 +959,7 @@ fn write_car(row: &mut CarRow, entry: &Entry, cx: &RowContext<'_>) {
     row.gap.clear();
     row.interval.clear();
     if !row.leader {
-        let timed = |ahead: &Entry| cx.race.and_then(|r| r.gap(ahead.car, car, cx.now));
+        let timed = |ahead: &Entry| cx.race.and_then(|r| r.gap(ahead.car, car));
         let (gap, interval) = if cx.is_race {
             let gap = timed(&cx.leader).unwrap_or(Gap::Time(f64::from(entry.f2 - cx.leader.f2)));
             let interval = cx.ahead.map_or(Gap::Time(0.0), |a| {
@@ -1479,7 +1482,9 @@ impl Widget for StandingsWidget {
         self.clocks
             .iter_mut()
             .for_each(|c| *c = SectorClock::default());
-        self.race.reset();
+        if let Ok(mut clock) = self.clock.try_borrow_mut() {
+            clock.reset();
+        }
         self.start_session = None;
     }
 }

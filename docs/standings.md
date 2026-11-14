@@ -73,8 +73,10 @@ iRating change, interval, places gained, maker, and tires.
 
 ## Live race order and gaps
 
-In a race session the overlay follows every car's progress, `CarIdxLapCompleted` plus `CarIdxLapDistPct`, at each
-update (2 Hz by default) from before the green flag, so the first gaps are ready at the start.
+The overlay follows every car's progress, `CarIdxLapCompleted` plus `CarIdxLapDistPct`, at each update of the
+standings (2 Hz by default) or the relative (10 Hz), whichever comes first, in every session and from before the
+green flag, so the first gaps are ready at the start. The relative uses the same clock for its gaps on track
+([relative.md](relative.md)); the standings use it only in a race, so practice and qualifying are unchanged.
 
 - **Order**: under green (`SessionState` racing), each class is sorted by progress, furthest first; that is the
   order the results take at the line, without waiting for it. Before the green flag (gridding, pace laps) the
