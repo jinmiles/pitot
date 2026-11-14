@@ -8,14 +8,17 @@ use std::collections::HashMap;
 
 use windows::Win32::Foundation::{HMODULE, POINT, RECT};
 use windows::Win32::Graphics::Direct2D::Common::{
-    D2D_RECT_F, D2D_SIZE_U, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_PIXEL_FORMAT,
+    D2D_RECT_F, D2D_SIZE_U, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_FIGURE_BEGIN_HOLLOW,
+    D2D1_FIGURE_END_CLOSED, D2D1_FIGURE_END_OPEN, D2D1_PIXEL_FORMAT,
 };
 use windows::Win32::Graphics::Direct2D::{
     D2D1_ANTIALIAS_MODE_ALIASED, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_BITMAP_OPTIONS_TARGET,
-    D2D1_BITMAP_PROPERTIES1, D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_DRAW_TEXT_OPTIONS_CLIP,
-    D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ELLIPSE, D2D1_FACTORY_TYPE_SINGLE_THREADED,
-    D2D1CreateFactory, ID2D1Bitmap1, ID2D1Device, ID2D1DeviceContext, ID2D1Factory1,
-    ID2D1SolidColorBrush,
+    D2D1_BITMAP_PROPERTIES1, D2D1_CAP_STYLE_FLAT, D2D1_CAP_STYLE_ROUND, D2D1_DASH_STYLE_SOLID,
+    D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_DRAW_TEXT_OPTIONS_CLIP, D2D1_DRAW_TEXT_OPTIONS_NONE,
+    D2D1_ELLIPSE, D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_LINE_JOIN_ROUND,
+    D2D1_STROKE_STYLE_PROPERTIES1, D2D1_STROKE_TRANSFORM_TYPE_NORMAL, D2D1CreateFactory,
+    ID2D1Bitmap1, ID2D1Device, ID2D1DeviceContext, ID2D1Factory1, ID2D1SolidColorBrush,
+    ID2D1StrokeStyle1,
 };
 use windows::Win32::Graphics::Direct3D::{
     D3D_DRIVER_TYPE, D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP,
@@ -344,6 +347,10 @@ const MAX_CACHED_LAYOUTS: usize = 512;
 pub struct Renderer {
     _d3d: ID3D11Device,
     _d2d: ID2D1Device,
+    /// For path geometries, which belong to the factory rather than the device.
+    factory: ID2D1Factory1,
+    /// Round joins and caps, for polylines.
+    round: ID2D1StrokeStyle1,
     dcomp: IDCompositionDesktopDevice,
     brush: ID2D1SolidColorBrush,
     dwrite: IDWriteFactory,
@@ -407,9 +414,26 @@ impl Renderer {
                 .map_err(fail("CreateSolidColorBrush"))?;
             let formats = Formats::new(&dwrite)?;
             let atlas = build_atlas(&d2d, &dwrite, &formats)?;
+            let round = factory
+                .CreateStrokeStyle(
+                    &D2D1_STROKE_STYLE_PROPERTIES1 {
+                        startCap: D2D1_CAP_STYLE_ROUND,
+                        endCap: D2D1_CAP_STYLE_ROUND,
+                        dashCap: D2D1_CAP_STYLE_FLAT,
+                        lineJoin: D2D1_LINE_JOIN_ROUND,
+                        miterLimit: 10.0,
+                        dashStyle: D2D1_DASH_STYLE_SOLID,
+                        dashOffset: 0.0,
+                        transformType: D2D1_STROKE_TRANSFORM_TYPE_NORMAL,
+                    },
+                    None,
+                )
+                .map_err(fail("CreateStrokeStyle"))?;
             Ok(Self {
                 _d3d: d3d,
                 _d2d: d2d,
+                factory,
+                round,
                 dcomp,
                 brush,
                 dwrite,
@@ -591,6 +615,8 @@ impl Renderer {
                 let mut canvas = Canvas {
                     context: &context,
                     brush: &self.brush,
+                    factory: &self.factory,
+                    round: &self.round,
                     dwrite: &self.dwrite,
                     formats: &self.formats,
                     atlas: &self.atlas,
@@ -678,6 +704,8 @@ impl Layer {
 pub struct Canvas<'a> {
     context: &'a ID2D1DeviceContext,
     brush: &'a ID2D1SolidColorBrush,
+    factory: &'a ID2D1Factory1,
+    round: &'a ID2D1StrokeStyle1,
     dwrite: &'a IDWriteFactory,
     formats: &'a Formats,
     atlas: &'a [AtlasFace],
@@ -731,6 +759,57 @@ impl Canvas<'_> {
         unsafe {
             self.brush.SetColor(&color.d2d());
             self.context.DrawEllipse(&ellipse, self.brush, width, None);
+        }
+    }
+
+    /// Fills a circle around `center`.
+    pub fn fill_circle(&mut self, center: (f32, f32), radius: f32, color: Color) {
+        let ellipse = D2D1_ELLIPSE {
+            point: Vector2 {
+                X: center.0,
+                Y: center.1,
+            },
+            radiusX: radius,
+            radiusY: radius,
+        };
+        // SAFETY: drawing calls on a device context inside BeginDraw/EndDraw with a live brush.
+        unsafe {
+            self.brush.SetColor(&color.d2d());
+            self.context.FillEllipse(&ellipse, self.brush);
+        }
+    }
+
+    /// Strokes the line through `points` with round joins, back to the first point when `closed`. Builds a path
+    /// geometry on each call, so it suits layers drawn once, not every frame.
+    pub fn polyline(&mut self, points: &[[f32; 2]], closed: bool, width: f32, color: Color) {
+        let Some((first, rest)) = points.split_first() else {
+            return;
+        };
+        let point = |p: &[f32; 2]| Vector2 { X: p[0], Y: p[1] };
+        // SAFETY: factory and drawing calls inside BeginDraw/EndDraw; the geometry and its sink are owned here
+        // and the sink is closed before the geometry is drawn.
+        unsafe {
+            let Ok(geometry) = self.factory.CreatePathGeometry() else {
+                return;
+            };
+            let Ok(sink) = geometry.Open() else {
+                return;
+            };
+            sink.BeginFigure(point(first), D2D1_FIGURE_BEGIN_HOLLOW);
+            for p in rest {
+                sink.AddLine(point(p));
+            }
+            sink.EndFigure(if closed {
+                D2D1_FIGURE_END_CLOSED
+            } else {
+                D2D1_FIGURE_END_OPEN
+            });
+            if sink.Close().is_err() {
+                return;
+            }
+            self.brush.SetColor(&color.d2d());
+            self.context
+                .DrawGeometry(&geometry, self.brush, width, self.round);
         }
     }
 

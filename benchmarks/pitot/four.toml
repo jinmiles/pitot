@@ -53,3 +53,6 @@ enabled = false
 
 [widgets.tires]
 enabled = false
+
+[widgets.trackmap]
+enabled = false
