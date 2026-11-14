@@ -49,7 +49,7 @@ jobs:
         run: cargo test --workspace --locked
 
       - name: Build
-        run: cargo build --release --locked -p pitot-overlay -p pitot-bench
+        run: cargo build --release --locked -p pitot-overlay -p pitot-control -p pitot-bench
 
       - name: Package
         shell: bash

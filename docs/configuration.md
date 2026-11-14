@@ -9,9 +9,26 @@ the log, do not reload. A file that fails to parse or validate is
 reported with its line and column, and the previous configuration stays in use. The tray menu's
 *Reload configuration* forces a reload.
 
+## The Pitot window
+
+The [Pitot window](control-window.md) (`pitot-control.exe`, next to the overlay) turns the overlay and each
+widget on and off. It opens when the overlay starts, and a left click on the tray icon opens it later. Its close
+button closes only the window; the overlay keeps running in the tray.
+
+```toml
+[general]
+start_in_tray = false
+```
+
+- `start_in_tray`: `true` starts the overlay with only its tray icon, without opening the window. The benchmark
+  configurations set it, so measurements do not include the window.
+
+Its widget switches write the widget's `enabled` into this file, changing only that value, by the same rules as
+moving widgets below.
+
 ## Moving widgets
 
-Choose *Move widgets* in the tray menu to place widgets with the mouse. Every enabled widget shows, also without
+Choose *Move widgets* in the tray menu or the Pitot window to place widgets with the mouse. Every enabled widget shows, also without
 the sim, under a tinted handle. Drag a handle with the left button; the widget follows and stays on its monitor.
 Releasing the button saves the widget's `x` and `y` to `config.toml`. Only those two numbers change in the file,
 so comments and layout stay. A missing `x` or `y` goes on the line after the widget's `[widgets.<name>]` header,
@@ -19,7 +36,7 @@ and a missing table is added at the end. A widget written as an inline table wit
 this way; the log says so, and the widget keeps its new place until the file is reloaded or the overlay exits.
 
 Clicks outside the handles still reach the windows below. A right click on a handle opens the tray menu, and
-choosing *Move widgets* again ends moving. The overlay's own write to the file does not trigger a reload. A
+choosing *Move widgets* again (or turning it off in the Pitot window) ends moving. The overlay's own write to the file does not trigger a reload. A
 widget's monitor and size are set in the file.
 
 ## Recording and replays
@@ -75,8 +92,9 @@ next clean lap. The default `shape = "circle"` needs no outline and does not tou
 
 ## One instance
 
-Only one overlay runs per Windows session. Launching it again while it runs exits at once and leaves the running
-overlay, its windows, and its log untouched.
+Only one overlay runs per Windows session. Launching it again while it runs opens the Pitot window (or brings it
+to the front) and exits at once, leaving the running overlay and its log untouched. Only one Pitot window runs
+too; starting `pitot-control.exe` again brings the open one to the front.
 
 ## Log file
 
@@ -99,13 +117,14 @@ At every sim disconnect and at exit, the line also carries the data path's count
 | `dropped_samples` | Input samples lost because rendering fell a full ring (512 samples, about 8 s) behind |
 
 `missed` and `dropped_samples` are gaps in the input trace. Both are zero for a run without gaps. Release builds have no console window
-(quit from the tray icon); debug builds also print the log to the console.
+(quit from the tray icon or the Pitot window); debug builds also print the log to the console.
 
 ## Format
 
 ```toml
 [general]
 font = "Segoe UI"
+start_in_tray = false  # true: do not open the Pitot window at start
 
 [widgets.inputs]
 enabled = true

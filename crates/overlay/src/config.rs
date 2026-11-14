@@ -34,6 +34,11 @@ pub fn pit_file() -> Option<PathBuf> {
     config_dir().map(|dir| dir.join("pit.toml"))
 }
 
+/// Where the Pitot window (`pitot-control.exe`) opens next, kept when it closes, inside [`config_dir`].
+pub fn window_file() -> Option<PathBuf> {
+    config_dir().map(|dir| dir.join("window.toml"))
+}
+
 /// Where the overlay records sessions: `captures` inside [`config_dir`].
 pub fn recordings_dir() -> Option<PathBuf> {
     config_dir().map(|dir| dir.join("captures"))
@@ -74,10 +79,14 @@ pub const DEFAULT_TOML: &str = r#"# Pitot overlay configuration. Changes apply w
 #
 # Positions are in physical pixels from the top-left corner of the widget's monitor.
 # `monitor` counts monitors from the left (0 is the leftmost); leave it out to use the primary monitor.
-# *Move widgets* in the tray menu places widgets with the mouse and saves their x and y here.
+# *Move widgets* in the tray menu places widgets with the mouse and saves their x and y here. The Pitot window
+# turns widgets on and off and saves their `enabled` here.
 
+# The Pitot window (pitot-control.exe) opens when the overlay starts. With start_in_tray = true, only the tray
+# icon shows; clicking it opens the window.
 [general]
 font = "Segoe UI"
+start_in_tray = false
 
 # Records each session while you drive into %APPDATA%\Pitot\captures, so a replay of it (in the session or
 # from a saved .rpy file) can show the widgets. The oldest recordings are deleted once the folder holds more
@@ -200,12 +209,15 @@ pub struct Config {
 #[serde(default, deny_unknown_fields)]
 pub struct General {
     pub font: String,
+    /// Start without opening the Pitot window; the tray icon opens it.
+    pub start_in_tray: bool,
 }
 
 impl Default for General {
     fn default() -> Self {
         Self {
             font: "Segoe UI".to_owned(),
+            start_in_tray: false,
         }
     }
 }
@@ -375,7 +387,7 @@ pub enum ConfigError {
         widget: &'static str,
         field: &'static str,
     },
-    /// A widget's position cannot be written into the file without changing more than its position.
+    /// A widget's position or `enabled` cannot be written into the file without changing more than that.
     Unplaceable,
     /// A setting outside the widgets is outside its allowed range.
     OutOfRange {
@@ -393,7 +405,7 @@ impl fmt::Display for ConfigError {
                 "invalid configuration: widgets.{widget}.{field} is out of range"
             ),
             Self::Unplaceable => f.write_str(
-                "cannot save the position: write the widget as a [widgets.<name>] table with x and y",
+                "cannot change the file in place: write the widget as a [widgets.<name>] table",
             ),
             Self::OutOfRange { key } => write!(f, "invalid configuration: {key} is out of range"),
         }
@@ -515,10 +527,30 @@ pub fn load_or_create(path: &Path) -> Result<Config, ConfigError> {
 }
 
 /// Returns `text` with widget `name` placed at (`x`, `y`). Only the numbers of its `x` and `y` keys change, so
-/// comments and layout stay as they are. A missing key goes on the line after the widget's `[widgets.<name>]`
-/// header, and a missing table is added at the end. Fails when the widget is written in a form this cannot
-/// edit in place (an inline table or dotted keys) or when `text` does not parse.
+/// comments and layout stay as they are. See [`with_fields`] for missing keys and what cannot be edited.
 pub fn with_position(text: &str, name: &str, x: i32, y: i32) -> Result<String, ConfigError> {
+    let fields = [("x", x.to_string()), ("y", y.to_string())];
+    with_fields(text, name, &fields, |widget| (widget.x, widget.y) = (x, y))
+}
+
+/// Returns `text` with widget `name` turned on or off. Only the value of its `enabled` key changes. See
+/// [`with_fields`] for missing keys and what cannot be edited.
+pub fn with_enabled(text: &str, name: &str, enabled: bool) -> Result<String, ConfigError> {
+    let fields = [("enabled", enabled.to_string())];
+    with_fields(text, name, &fields, |widget| widget.enabled = enabled)
+}
+
+/// Returns `text` with the keys of widget `name` in `fields` set to their TOML values. Only those values change,
+/// so comments and layout stay as they are. A missing key goes on the line after the widget's `[widgets.<name>]`
+/// header, and a missing table is added at the end. `expect` makes the same change to the parsed configuration,
+/// and the edited text must parse to exactly that. Fails when the widget is written in a form this cannot edit
+/// in place (an inline table without the keys, or dotted keys) or when `text` does not parse.
+fn with_fields(
+    text: &str,
+    name: &str,
+    fields: &[(&str, String)],
+    expect: impl FnOnce(&mut WidgetConfig),
+) -> Result<String, ConfigError> {
     let before = Config::parse(text)?;
     let parse_error = |e: toml::de::Error| ConfigError::Parse(e.to_string());
     let document = toml::de::DeTable::parse(text).map_err(parse_error)?;
@@ -534,10 +566,10 @@ pub fn with_position(text: &str, name: &str, x: i32, y: i32) -> Result<String, C
                 return Err(ConfigError::Unplaceable);
             };
             let mut missing = String::new();
-            for (field, number) in [("x", x), ("y", y)] {
-                match table.get(field) {
-                    Some(old) => edits.push((old.span(), number.to_string())),
-                    None => missing.push_str(&format!("{field} = {number}\n")),
+            for (field, value) in fields {
+                match table.get(*field) {
+                    Some(old) => edits.push((old.span(), value.clone())),
+                    None => missing.push_str(&format!("{field} = {value}\n")),
                 }
             }
             if !missing.is_empty() {
@@ -563,10 +595,11 @@ pub fn with_position(text: &str, name: &str, x: i32, y: i32) -> Result<String, C
             } else {
                 "\n\n"
             };
-            edits.push((
-                text.len()..text.len(),
-                format!("{gap}[widgets.{name}]\nx = {x}\ny = {y}\n"),
-            ));
+            let mut table = format!("{gap}[widgets.{name}]\n");
+            for (field, value) in fields {
+                table.push_str(&format!("{field} = {value}\n"));
+            }
+            edits.push((text.len()..text.len(), table));
         }
     }
     edits.sort_by_key(|(range, _)| std::cmp::Reverse(range.start));
@@ -574,12 +607,11 @@ pub fn with_position(text: &str, name: &str, x: i32, y: i32) -> Result<String, C
     for (range, replacement) in edits {
         out.replace_range(range, &replacement);
     }
-    // The edit must place the widget and change nothing else.
+    // The edit must make the change and nothing else.
     let after = Config::parse(&out)?;
     let mut expected = before;
     if let Some(widget) = expected.widget_mut(name) {
-        widget.x = x;
-        widget.y = y;
+        expect(widget);
     }
     if after != expected {
         return Err(ConfigError::Unplaceable);
@@ -587,13 +619,26 @@ pub fn with_position(text: &str, name: &str, x: i32, y: i32) -> Result<String, C
     Ok(out)
 }
 
-/// Saves widget `name` at (`x`, `y`) in the file at `path` (see [`with_position`]). Writes a temporary file
-/// next to it first and moves it over the old one, so a failed write leaves the old file.
+/// Saves widget `name` at (`x`, `y`) in the file at `path` (see [`with_position`]).
 pub fn save_position(path: &Path, name: &str, x: i32, y: i32) -> Result<(), ConfigError> {
+    save_edit(path, |text| with_position(text, name, x, y))
+}
+
+/// Saves widget `name` turned on or off in the file at `path` (see [`with_enabled`]).
+pub fn save_enabled(path: &Path, name: &str, enabled: bool) -> Result<(), ConfigError> {
+    save_edit(path, |text| with_enabled(text, name, enabled))
+}
+
+/// Rewrites the file at `path` with `edit`. Writes a temporary file next to it first and moves it over the old
+/// one, so a failed write leaves the old file.
+fn save_edit(
+    path: &Path,
+    edit: impl FnOnce(&str) -> Result<String, ConfigError>,
+) -> Result<(), ConfigError> {
     let text = fs::read_to_string(path)?;
-    let placed = with_position(&text, name, x, y)?;
+    let edited = edit(&text)?;
     let temporary = path.with_extension("toml.tmp");
-    fs::write(&temporary, placed)?;
+    fs::write(&temporary, edited)?;
     fs::rename(&temporary, path)?;
     Ok(())
 }
@@ -652,6 +697,10 @@ mod tests {
             Config::parse(include_str!("../../../benchmarks/pitot/inputs.toml")).expect("inputs");
         assert_eq!(enabled(&inputs), 1);
         assert_eq!(inputs.widgets.inputs, defaults.inputs);
+        assert!(
+            four.general.start_in_tray && inputs.general.start_in_tray,
+            "measured without the Pitot window"
+        );
     }
 
     #[test]
@@ -799,6 +848,78 @@ mod tests {
             place("[widgets.fuel\n", "fuel"),
             Err(ConfigError::Parse(_))
         ));
+    }
+
+    #[test]
+    fn turning_a_widget_off_changes_only_its_value() {
+        let off = with_enabled(DEFAULT_TOML, "wind", false).expect("edited");
+        assert!(!Config::parse(&off).expect("parses").widgets.wind.enabled);
+        let changed: Vec<(&str, &str)> = DEFAULT_TOML
+            .lines()
+            .zip(off.lines())
+            .filter(|(a, b)| a != b)
+            .collect();
+        assert_eq!(changed, [("enabled = true", "enabled = false")]);
+        assert_eq!(DEFAULT_TOML.lines().count(), off.lines().count());
+        let on = with_enabled(&off, "wind", true).expect("edited");
+        assert_eq!(on, DEFAULT_TOML, "back on gives the same file");
+
+        let commented = "[widgets.fuel]\nenabled = true # for races\nx = 5\n";
+        assert_eq!(
+            with_enabled(commented, "fuel", false).expect("edited"),
+            "[widgets.fuel]\nenabled = false # for races\nx = 5\n"
+        );
+        let inline = "[widgets]\nfuel = { enabled = true, x = 1 }\n";
+        assert_eq!(
+            with_enabled(inline, "fuel", false).expect("edited"),
+            "[widgets]\nfuel = { enabled = false, x = 1 }\n"
+        );
+    }
+
+    #[test]
+    fn turning_a_widget_off_adds_missing_keys_and_tables() {
+        assert_eq!(
+            with_enabled("[widgets.fuel]\nx = 5\n", "fuel", false).expect("edited"),
+            "[widgets.fuel]\nenabled = false\nx = 5\n"
+        );
+        assert_eq!(
+            with_enabled("[general]\nstart_in_tray = true\n", "trackmap", false).expect("edited"),
+            "[general]\nstart_in_tray = true\n\n[widgets.trackmap]\nenabled = false\n"
+        );
+        assert!(matches!(
+            with_enabled("[widgets]\nfuel = { x = 1 }\n", "fuel", false),
+            Err(ConfigError::Unplaceable)
+        ));
+        assert!(matches!(
+            with_enabled("[widgets.fuel]\nx = 1\n", "radar", false),
+            Err(ConfigError::Parse(_))
+        ));
+    }
+
+    #[test]
+    fn saved_enabled_replaces_the_file() {
+        let dir = std::env::temp_dir().join(format!("pitot-enabled-{}", std::process::id()));
+        fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("config.toml");
+        fs::write(&path, DEFAULT_TOML).expect("write");
+        save_enabled(&path, "standings", false).expect("saved");
+        assert!(
+            !load_or_create(&path)
+                .expect("loads")
+                .widgets
+                .standings
+                .enabled
+        );
+        assert!(!path.with_extension("toml.tmp").exists());
+        fs::remove_dir_all(&dir).expect("cleans up");
+    }
+
+    #[test]
+    fn the_window_opens_at_start_unless_asked_not_to() {
+        assert!(!Config::default().general.start_in_tray);
+        let tray = Config::parse("[general]\nstart_in_tray = true\n").expect("parses");
+        assert!(tray.general.start_in_tray);
+        assert_eq!(tray.general.font, "Segoe UI", "other fields keep defaults");
     }
 
     #[test]

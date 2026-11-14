@@ -7,8 +7,9 @@ cargo run -p pitot-bench --release -- replay --irdt data/irdashies/ai-race-10min
 cargo run -p pitot-overlay --release
 ```
 
-The overlay waits for the sim's shared memory and connects when the replay starts. Quit from the tray icon's
-menu.
+The overlay waits for the sim's shared memory and connects when the replay starts. It opens the
+[Pitot window](control-window.md) when `pitot-control.exe` is next to it (`cargo build -p pitot-control` puts it
+there). Quit from the window or the tray icon's menu.
 
 ## Windows
 
@@ -20,17 +21,19 @@ menu.
   testing, so clicks reach the windows below, also those of other processes (answering `WM_NCHITTEST` with
   `HTTRANSPARENT` passes them only to windows of the same thread). The layer is set to full opacity once,
   which a layered window needs before it shows; DirectComposition still draws the content.
-- A tray icon owned by a hidden window opens its menu on a left or right click: *Move widgets* (checked while
-  moving), *Hide widgets* (checked while the widgets are hidden; hidden widgets are not updated or drawn),
-  *Reload configuration*, and *Quit Pitot*. Windows 11 shows new tray icons in the hidden-icons area next to the
-  clock until they are pinned.
+- A tray icon owned by a hidden window (class `PitotTray`, which the Pitot window finds to send it commands). A
+  left click opens the [Pitot window](control-window.md); a right click opens the menu: *Open Pitot*, *Move
+  widgets* (checked while moving), *Hide widgets* (checked while the widgets are hidden; hidden widgets are not
+  updated or drawn), *Reload configuration*, and *Quit Pitot*. Windows 11 shows new tray icons in the
+  hidden-icons area next to the clock until they are pinned.
 - While moving widgets, each widget gets a move handle: a small layered top-level window over it, tinted at
   28% opacity, that never takes the focus. Only the handles take the mouse, so clicks elsewhere still pass
   through. Dragging moves the handle and the widget's composition visuals (no redraw), and releasing the
   button saves the position ([configuration](configuration.md#moving-widgets)). The overlay windows themselves
   stay click-through. Outside move mode no handle exists.
 - `WM_CLOSE` to any of these windows quits like Quit, so tools that close apps the usual way (End task, the
-  benchmark runner) end the overlay cleanly and its exit line with the data counters is written.
+  benchmark runner) end the overlay cleanly and its exit line with the data counters is written. The Pitot
+  window, if open, closes with it.
 
 ## Rendering
 

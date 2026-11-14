@@ -6,9 +6,11 @@ use std::process::ExitCode;
 fn main() -> ExitCode {
     #[cfg(windows)]
     {
-        // Checked before logging starts, so a second launch leaves the running overlay's log alone.
+        // Checked before logging starts, so a second launch leaves the running overlay's log alone. It opens the
+        // Pitot window instead.
         let instance = pitot_overlay::platform::SingleInstance::acquire();
         if matches!(instance, Ok(None)) {
+            let _ = pitot_overlay::platform::open_control();
             return ExitCode::SUCCESS;
         }
         pitot_overlay::log::init();

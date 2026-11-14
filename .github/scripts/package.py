@@ -2,8 +2,8 @@
 
 Usage: python .github/scripts/package.py <out dir> [--tag vX.Y.Z]
 
-Run after `cargo build --release --locked -p pitot-overlay -p pitot-bench`. With `--tag`, the tag must match the
-workspace version. Writes one zip per binary and SHA256SUMS.txt into the out dir.
+Run after `cargo build --release --locked -p pitot-overlay -p pitot-control -p pitot-bench`. With `--tag`, the tag
+must match the workspace version. Writes one zip per package and SHA256SUMS.txt into the out dir.
 """
 
 import argparse
@@ -16,8 +16,12 @@ import zipfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 TARGET = "x86_64-pc-windows-msvc"
-BINARIES = ["pitot-overlay", "pitot-bench"]
+# Each zip and the binaries in it: the Pitot window ships next to the overlay, which starts it.
+PACKAGES = {"pitot-overlay": ["pitot-overlay", "pitot-control"], "pitot-bench": ["pitot-bench"]}
 LICENSE_PREFIXES = ("license", "licence", "copying", "notice", "unlicense")
+# License texts for crates whose package has no license file: `<crate>.txt` from the crate's repository, or the
+# canonical text of a license the crate offers.
+FALLBACK_LICENSES = ROOT / ".github" / "licenses"
 
 
 def metadata():
@@ -58,15 +62,29 @@ def license_files(package):
     )
 
 
+def fallback_license(package):
+    """For a crate published without a license file: its repository's license text kept in FALLBACK_LICENSES, or
+    the Apache-2.0 text when the crate offers Apache-2.0 among its licenses. Returns (file, note) or None."""
+    own = FALLBACK_LICENSES / f"{package['name']}.txt"
+    if own.is_file():
+        return own, "Its package has no license file; this is the license file of its repository."
+    offered = package.get("license") or ""
+    choices = [c.strip() for c in offered.replace("/", " OR ").split(" OR ")]
+    if "Apache-2.0" in choices:
+        note = "Its package has no license file; it is used under Apache-2.0, one of the licenses it offers."
+        return FALLBACK_LICENSES / "Apache-2.0.txt", note
+    return None
+
+
 def readme_notices():
     text = (ROOT / "README.md").read_text(encoding="utf-8")
     return text[text.index("## Third-Party Notices") :].strip()
 
 
-def licenses_text(binary, packages):
+def licenses_text(binaries, packages):
     rule = "=" * 78
     lines = [
-        f"Third-party licenses for {binary}",
+        f"Third-party licenses for {' and '.join(binaries)}",
         "",
         "The Rust standard library is compiled in as well (MIT OR Apache-2.0, https://github.com/rust-lang/rust).",
         "",
@@ -77,7 +95,7 @@ def licenses_text(binary, packages):
         readme_notices(),
         "",
         rule,
-        "Rust crates compiled into the binary",
+        "Rust crates compiled into the binaries",
         rule,
         "",
     ]
@@ -86,12 +104,17 @@ def licenses_text(binary, packages):
     first_seen = {}
     for p in packages:
         files = license_files(p)
+        note = None
+        if p.get("license") and not files and (fallback := fallback_license(p)):
+            files, note = [fallback[0]], fallback[1]
         if not p.get("license") or not files:
             missing.append(f"{p['name']} {p['version']}")
             continue
         lines += ["", rule, f"{p['name']} {p['version']} ({p['license']})"]
         if p.get("repository"):
             lines.append(p["repository"])
+        if note:
+            lines.append(note)
         lines.append(rule)
         for f in files:
             text = f.read_text(encoding="utf-8", errors="replace").strip()
@@ -131,17 +154,24 @@ def main():
     release = pathlib.Path(meta["target_directory"]) / "release"
     args.out.mkdir(parents=True, exist_ok=True)
     sums = []
-    for binary in BINARIES:
-        exe = release / f"{binary}.exe"
-        if not exe.is_file():
-            sys.exit(f"{exe} is missing; build the release binaries first")
-        packages = linked_packages(meta, binary)
-        archive = args.out / f"{binary}-{version}-windows-x64.zip"
+    for name, binaries in PACKAGES.items():
+        exes = [release / f"{binary}.exe" for binary in binaries]
+        for exe in exes:
+            if not exe.is_file():
+                sys.exit(f"{exe} is missing; build the release binaries first")
+        linked = {}
+        for binary in binaries:
+            for package in linked_packages(meta, binary):
+                linked[package["id"]] = package
+        packages = sorted(linked.values(), key=lambda p: (p["name"], p["version"]))
+        archive = args.out / f"{name}-{version}-windows-x64.zip"
         with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as z:
-            z.write(exe, exe.name)
-            z.writestr("THIRD-PARTY-LICENSES.txt", licenses_text(binary, packages))
+            for exe in exes:
+                z.write(exe, exe.name)
+            z.writestr("THIRD-PARTY-LICENSES.txt", licenses_text(binaries, packages))
         sums.append(f"{sha256(archive)}  {archive.name}")
-        print(f"{archive.name}: {exe.stat().st_size} byte binary, {len(packages)} crates")
+        sizes = ", ".join(f"{exe.name} {exe.stat().st_size} bytes" for exe in exes)
+        print(f"{archive.name}: {sizes}, {len(packages)} crates")
     (args.out / "SHA256SUMS.txt").write_text("\n".join(sums) + "\n", encoding="utf-8")
 
 

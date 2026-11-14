@@ -45,7 +45,8 @@ jobs:
           cargo test -p pitot-irsdk --features alloc-check --test alloc_check
           cargo test -p pitot-overlay --features alloc-check --test alloc_check
 
-      # pitot-bench must not depend on pitot-overlay; pitot-irsdk depends on neither.
+      # pitot-bench must not depend on pitot-overlay; pitot-irsdk depends on neither. Only the Pitot window
+      # (pitot-control) uses the GPUI framework; the overlay process stays free of it.
       - name: Dependency direction
         shell: bash
         run: |
@@ -62,5 +63,6 @@ jobs:
             done
             echo "$pkg: ok"
           }
-          check pitot-bench pitot-overlay
-          check pitot-irsdk pitot-bench pitot-overlay
+          check pitot-bench pitot-overlay pitot-control gpui
+          check pitot-irsdk pitot-bench pitot-overlay pitot-control gpui
+          check pitot-overlay pitot-control gpui

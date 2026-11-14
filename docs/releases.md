@@ -18,7 +18,7 @@ is pushed. Nothing is built on a developer machine.
 The workflow then:
 
 - checks that the tagged commit is on `main` and that the tag matches the workspace version,
-- runs the tests, and builds `pitot-overlay` and `pitot-bench` in release mode,
+- runs the tests, and builds `pitot-overlay`, `pitot-control`, and `pitot-bench` in release mode,
 - packages them (below) and publishes a GitHub release named `Pitot X.Y.Z` with the packages, short notes on
   running the binaries, and the pull requests merged since the previous release. Versions before 1.0 are marked
   as pre-releases.
@@ -27,12 +27,12 @@ The workflow then:
 
 | File | Contents |
 |---|---|
-| `pitot-overlay-X.Y.Z-windows-x64.zip` | `pitot-overlay.exe` and `THIRD-PARTY-LICENSES.txt` |
+| `pitot-overlay-X.Y.Z-windows-x64.zip` | `pitot-overlay.exe`, `pitot-control.exe` (the [Pitot window](control-window.md), which the overlay starts from its own folder), and `THIRD-PARTY-LICENSES.txt` |
 | `pitot-bench-X.Y.Z-windows-x64.zip` | `pitot-bench.exe` and `THIRD-PARTY-LICENSES.txt` |
 | `SHA256SUMS.txt` | SHA-256 of each zip |
 
-`THIRD-PARTY-LICENSES.txt` lists what is compiled into that binary: the code ported from other projects (the
-Third-Party Notices section of `README.md`) and every Rust crate linked in, with its license files.
+`THIRD-PARTY-LICENSES.txt` lists what is compiled into the zip's binaries: the code ported from other projects
+(the Third-Party Notices section of `README.md`) and every Rust crate linked in, with its license files.
 `.github/scripts/package.py` finds the crates with `cargo metadata` for the Windows target: the binary's normal
 dependencies, without proc macros and the crates only they use, since those run at build time and are not in the
 binary. Each crate's license files are the ones at the top of its package (`LICENSE*`, `COPYING*`, `NOTICE*`,

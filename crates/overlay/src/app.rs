@@ -15,8 +15,8 @@ use tracing::{debug, info, warn};
 use crate::config::{self, Config, WidgetConfig};
 use crate::pipeline::{Display, Pipeline, RecordingConfig, Source, View};
 use crate::platform::{
-    self, DirectoryWatch, Monitor, MoveHandle, OverlayWindow, ScreenRect, Timer, Tray, TrayCommand,
-    Wake, WidgetMove,
+    self, CONTROL_EXE, ControlEvent, DirectoryWatch, Monitor, MoveHandle, OverlayWindow,
+    ScreenRect, Timer, Tray, TrayCommand, Wake, WidgetMove,
 };
 use crate::render::{Canvas, Layer, RenderError, Renderer, WindowTarget};
 use crate::widgets::{
@@ -267,6 +267,16 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     let mut layout = Layout::build(&config, &monitors)?;
     let tray = Tray::create()?;
+    // A Pitot window open from before learns that the overlay runs now.
+    platform::notify_control(ControlEvent::State {
+        hidden: false,
+        moving: false,
+    });
+    if !config.general.start_in_tray
+        && let Err(e) = platform::open_control()
+    {
+        warn!("cannot open the Pitot window ({CONTROL_EXE} next to the overlay): {e}");
+    }
     let mut renderer = Some(Renderer::new()?);
     let mut scene = match renderer.as_mut() {
         Some(device) => Some(Scene::build(device, &layout)?),
@@ -301,31 +311,32 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         if !platform::pump_messages() {
             break;
         }
-        match platform::take_tray_command() {
-            Some(TrayCommand::Reload) => reload_at = Some(Instant::now()),
-            Some(TrayCommand::ToggleHidden) => {
-                hidden = !hidden;
-                tray.set_hidden(hidden);
-                info!(hidden, "widgets hidden from the tray menu");
-                layout.slots.iter_mut().for_each(|s| s.stale = true);
-            }
-            Some(TrayCommand::ToggleMove) => {
-                handles = match handles.take() {
-                    Some(_) => None,
-                    None => Some(move_handles(&layout.slots)),
-                };
-                tray.set_moving(handles.is_some());
-                if handles.is_some() && hidden {
-                    hidden = false;
-                    tray.set_hidden(false);
+        while let Some(command) = platform::take_tray_command() {
+            match command {
+                TrayCommand::Reload => reload_at = Some(Instant::now()),
+                TrayCommand::SetHidden(on) if on != hidden => {
+                    hidden = on;
+                    tray.set_hidden(hidden);
+                    info!(hidden, "widgets hidden or shown");
+                    layout.slots.iter_mut().for_each(|s| s.stale = true);
                 }
-                info!(
-                    moving = handles.is_some(),
-                    "moving widgets from the tray menu"
-                );
-                layout.slots.iter_mut().for_each(|s| s.stale = true);
+                TrayCommand::SetMoving(on) if on != handles.is_some() => {
+                    handles = on.then(|| move_handles(&layout.slots));
+                    tray.set_moving(on);
+                    if on && hidden {
+                        hidden = false;
+                        tray.set_hidden(false);
+                    }
+                    info!(moving = on, "moving widgets started or ended");
+                    layout.slots.iter_mut().for_each(|s| s.stale = true);
+                }
+                TrayCommand::SetHidden(_) | TrayCommand::SetMoving(_) => {}
             }
-            None => {}
+            // Also when nothing changed, so the window's switches settle on the overlay's state.
+            platform::notify_control(ControlEvent::State {
+                hidden,
+                moving: handles.is_some(),
+            });
         }
         platform::take_moves(&mut moves);
         for moved in moves.drain(..) {
@@ -382,6 +393,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                             handles = Some(move_handles(&layout.slots));
                         }
                         info!("configuration reloaded");
+                        platform::notify_control(ControlEvent::ConfigChanged);
                     }
                     Err(e) => warn!("keeping the previous configuration: {e}"),
                 }
@@ -461,6 +473,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     log_counters(&view, "data counters at exit");
+    // Quitting Pitot closes its window too.
+    platform::notify_control(ControlEvent::Close);
     drop(pipeline);
     Ok(())
 }
