@@ -1,7 +1,8 @@
 //! Track map: every car as a dot at its lap distance, around a circle (the default) or along the track's outline.
 //!
 //! The circle needs nothing but lap distances: start/finish at 12 o'clock, clockwise in driving order, cars on pit
-//! road on a smaller ring inside, and a tick at each sector start. It shows from the first moment of a session.
+//! road as rings on a smaller ring inside (labeled `PIT`), and a tick at each sector start. It shows from the first
+//! moment of a session.
 //!
 //! The outline (`shape = "outline"`) comes from the player's own driving: one clean lap integrated from the car's velocity and heading
 //! (see `outline`), saved per track in the tracks folder so later sessions have it at once. It is drawn once into
@@ -43,6 +44,8 @@ const MARGIN: f32 = 14.0;
 const TURN_STEP: usize = 5;
 /// North up unless a turn draws the track this much larger.
 const NORTH_UP_PREFERENCE: f32 = 1.03;
+/// The pit ring's label.
+const TEXT_SIZE: f32 = 11.0;
 
 const BACKGROUND: u32 = 0x10_1418;
 const ROAD: u32 = 0x6A_727E;
@@ -54,7 +57,7 @@ const PLAYER: u32 = 0xFF_B347;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Kind {
     Car,
-    /// On pit road: dimmed.
+    /// On pit road: a ring in the class color.
     Pit,
     Player,
     /// Where the player would rejoin after a stop made now.
@@ -517,7 +520,22 @@ impl TrackMapWidget {
         let c = (center[0], center[1]);
         canvas.circle(c, radius, road + 3.0, Color::rgb(ROAD_EDGE, 0.9));
         canvas.circle(c, radius, road, Color::rgb(ROAD, 1.0));
-        canvas.circle(c, self.pit_radius(), 1.5, Color::rgb(DIM, 0.35));
+        let pit = self.pit_radius();
+        canvas.circle(c, pit, 1.5, Color::rgb(DIM, 0.35));
+        // The inner ring's label, inside it at 6 o'clock, away from the line where pit road usually runs.
+        let label = TEXT_SIZE + 4.0;
+        canvas.text(
+            "PIT",
+            Rect::new(
+                center[0] - 30.0,
+                center[1] + pit - self.dot_radius() - 4.0 - label,
+                60.0,
+                label,
+            ),
+            TEXT_SIZE,
+            Align::Center,
+            Color::rgb(DIM, 0.8),
+        );
         let across = |canvas: &mut Canvas<'_>, pct: f32, half: f32, width: f32, color: Color| {
             let a = circle_point(center, radius - half, pct);
             let b = circle_point(center, radius + half, pct);
@@ -573,14 +591,14 @@ impl TrackMapWidget {
 
     fn draw_dots(&self, canvas: &mut Canvas<'_>) {
         let r = self.dot_radius();
-        for dot in self
-            .dots
-            .iter()
-            .filter(|d| matches!(d.kind, Kind::Car | Kind::Pit))
-        {
-            let alpha = if dot.kind == Kind::Pit { 0.35 } else { 1.0 };
-            canvas.fill_circle((dot.x, dot.y), r + 1.2, Color::rgb(ROAD_EDGE, 0.8 * alpha));
-            canvas.fill_circle((dot.x, dot.y), r, Color::rgb(dot.color, alpha));
+        for dot in self.dots.iter().filter(|d| d.kind == Kind::Car) {
+            canvas.fill_circle((dot.x, dot.y), r + 1.2, Color::rgb(ROAD_EDGE, 0.8));
+            canvas.fill_circle((dot.x, dot.y), r, Color::rgb(dot.color, 1.0));
+        }
+        // Cars on pit road: hollow, so they read as cars in the lane, not as markers.
+        for dot in self.dots.iter().filter(|d| d.kind == Kind::Pit) {
+            canvas.circle((dot.x, dot.y), r - 1.0, 4.0, Color::rgb(ROAD_EDGE, 0.8));
+            canvas.circle((dot.x, dot.y), r - 1.0, 2.0, Color::rgb(dot.color, 1.0));
         }
         for dot in self.dots.iter().filter(|d| d.kind == Kind::Exit) {
             canvas.circle((dot.x, dot.y), r + 2.0, 4.5, Color::rgb(ROAD_EDGE, 0.8));
