@@ -418,3 +418,100 @@ fn wind_widget_does_not_allocate_per_update() {
     );
     drop(pipeline);
 }
+
+const FUEL_ROW: usize = 32;
+
+#[test]
+fn fuel_widget_does_not_allocate_per_update() {
+    use pitot_overlay::config::WidgetConfig;
+    use pitot_overlay::widgets::{FuelWidget, MAX_LAYERS, Redraw, Widget};
+
+    let _turn = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let pid = std::process::id();
+    let names = SdkNames::new(
+        &format!("Local\\PitotOverlayAllocFuelMap-{pid}"),
+        &format!("Local\\PitotOverlayAllocFuelEvent-{pid}"),
+    );
+    let config = PublisherConfig {
+        vars: vec![
+            VarHeader::new(VarType::Double, 0, 1, "SessionTime").expect("valid"),
+            VarHeader::new(VarType::Float, 8, 1, "FuelLevel").expect("valid"),
+            VarHeader::new(VarType::Int, 12, 1, "LapCompleted").expect("valid"),
+            VarHeader::new(VarType::Float, 16, 1, "LapDistPct").expect("valid"),
+            VarHeader::new(VarType::Int, 20, 1, "SessionLapsRemainEx").expect("valid"),
+            VarHeader::new(VarType::Bool, 24, 1, "IsOnTrack").expect("valid"),
+        ],
+        buf_len: FUEL_ROW,
+        num_buf: 3,
+        tick_rate: 60,
+        session_info_capacity: 4096,
+    };
+    let mut publisher = Publisher::create(&names, &config).expect("creates");
+    publisher.set_connected(true).expect("connects");
+    publisher
+        .set_session_info(
+            b"WeekendInfo:\n TrackID: 1\nDriverInfo:\n DriverCarIdx: 0\n DriverCarFuelMaxLtr: 100.000\n DriverCarMaxFuelPct: 0.500\n",
+        )
+        .expect("fits");
+    let reader_config = ReaderConfig {
+        retry_interval: Duration::from_millis(5),
+        idle_timeout: Duration::from_millis(50),
+    };
+    let (pipeline, mut view) =
+        Pipeline::start(names, reader_config, Vec::new(), None).expect("starts");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !view.is_connected() {
+        assert!(Instant::now() < deadline, "connects");
+        view.poll();
+        thread::sleep(Duration::from_millis(2));
+    }
+    let mut widget = FuelWidget::new(&WidgetConfig {
+        enabled: true,
+        monitor: None,
+        x: 0,
+        y: 0,
+        width: None,
+        height: None,
+        rate_hz: None,
+        opacity: 0.82,
+    });
+    let mut row = [0u8; FUEL_ROW];
+    // A lap every 20 updates at 1 L per lap, 80 laps to go with 48 L and a 50 L tank: the pit window and the
+    // estimates move every lap. Returns whether the widget redrew and whether the session info is in.
+    let mut cycle = |n: u32| -> (bool, bool) {
+        let lap = (n / 20) as i32;
+        row[0..8].copy_from_slice(&f64::from(n).to_le_bytes());
+        row[8..12].copy_from_slice(&(48.0 - n as f32 * 0.05).to_le_bytes());
+        row[12..16].copy_from_slice(&lap.to_le_bytes());
+        row[16..20].copy_from_slice(&((n % 20) as f32 / 20.0).to_le_bytes());
+        row[20..24].copy_from_slice(&(80 - lap).to_le_bytes());
+        row[24] = 1;
+        publisher.publish(&row).expect("publishes");
+        thread::sleep(Duration::from_millis(4));
+        view.poll();
+        view.drain_samples(|_| {});
+        let mut redraw = [Redraw::Nothing; MAX_LAYERS];
+        widget.update(&mut view, Instant::now(), &mut redraw);
+        (redraw[0] != Redraw::Nothing, view.session().is_some())
+    };
+    // Warm-up: the session info with the tank size, and two clean laps for the use per lap.
+    let mut session = false;
+    for n in 0..120 {
+        session = cycle(n).1;
+    }
+    assert!(session, "session info parsed");
+    ALLOCATIONS.store(0, Ordering::Relaxed);
+    COUNTING.store(true, Ordering::Relaxed);
+    let mut redraws = 0;
+    for n in 120..720 {
+        redraws += usize::from(cycle(n).0);
+    }
+    COUNTING.store(false, Ordering::Relaxed);
+    assert!(redraws > 300, "the fuel kept changing: {redraws} redraws");
+    assert_eq!(
+        ALLOCATIONS.load(Ordering::Relaxed),
+        0,
+        "allocations across the data thread, view, and fuel widget"
+    );
+    drop(pipeline);
+}
