@@ -406,31 +406,44 @@ impl TiresWidget {
         let block = self.corner_rect(c);
         canvas.fill_background(block, Color::rgb(BLOCK, self.opacity));
         let cell_w = block.w / ZONES as f32;
-        let row_h = block.h / 3.0;
+        let lines = if block.h >= THREE_LINES_BLOCK { 3.0 } else { 2.0 };
+        let row_h = block.h / lines;
         let replay = self.shown.mode == Mode::Replay;
         // Undated values may be from the garage or a stop before the overlay started.
         let strength = if self.shown.dated { 0.85 } else { 0.35 };
         let ink = if self.shown.dated { BLOCK } else { WHITE };
+        // A line shows its three numbers only when each has room, so a narrow block leaves the line out whole rather
+        // than some of its numbers; the swatches' colors still show the temperatures.
+        let room = Rect::new(0.0, 0.0, cell_w, row_h);
+        let fit = |texts: &[FixedText; ZONES]| texts.iter().all(|t| canvas.fits(t.as_str(), room, 14.0));
+        let (temps, wear) = (fit(&corner.temps), fit(&corner.wear));
         for z in 0..ZONES {
             let cell = Rect::new(block.x + z as f32 * cell_w, block.y, cell_w, row_h);
             let swatch = Rect::new(cell.x + 1.0, cell.y + 1.0, cell.w - 2.0, cell.h - 2.0);
             canvas.fill(swatch, Color::rgb(corner.temp_colors[z], strength));
-            canvas.text(
-                corner.temps[z].as_str(),
-                cell,
-                14.0,
-                Align::Center,
-                Color::rgb(ink, 1.0),
-            );
+            if temps {
+                canvas.text(
+                    corner.temps[z].as_str(),
+                    cell,
+                    14.0,
+                    Align::Center,
+                    Color::rgb(ink, 1.0),
+                );
+            }
             let cell = Rect::new(cell.x, block.y + row_h, cell_w, row_h);
             let alpha = if self.shown.dated { 1.0 } else { 0.55 };
-            canvas.text(
-                corner.wear[z].as_str(),
-                cell,
-                14.0,
-                Align::Center,
-                Color::rgb(corner.wear_colors[z], alpha),
-            );
+            if wear {
+                canvas.text(
+                    corner.wear[z].as_str(),
+                    cell,
+                    14.0,
+                    Align::Center,
+                    Color::rgb(corner.wear_colors[z], alpha),
+                );
+            }
+        }
+        if lines < 3.0 {
+            return;
         }
         let distance = Rect::new(block.x, block.y + 2.0 * row_h, block.w * 0.6, row_h);
         canvas.text(
@@ -467,7 +480,9 @@ impl TiresWidget {
                 Color::rgb(WHITE, 1.0),
             );
         }
-        if !s.sets.as_str().is_empty() {
+        // A narrow header shows the compound and where the values are from, without the sets and the pit lap.
+        let full = w >= FULL_HEADER_WIDTH;
+        if full && !s.sets.as_str().is_empty() {
             let label = Rect::new(w * 0.40, 0.0, 30.0, HEADER_HEIGHT);
             canvas.text("Sets", label, 12.0, Align::Left, dim);
             canvas.text(
@@ -490,6 +505,9 @@ impl TiresWidget {
                 Color::rgb(CAUTION, 1.0),
             );
         } else if s.dated {
+            if !full {
+                return;
+            }
             let number = Rect::new(right.x + right.w - 26.0, 0.0, 26.0, HEADER_HEIGHT);
             canvas.text(
                 s.taken.as_str(),
@@ -515,8 +533,13 @@ impl TiresWidget {
 const HEADER_HEIGHT: f32 = 22.0;
 const PAD: f32 = 8.0;
 const GAP: f32 = 6.0;
-/// Three temperatures across each tire block, and its three lines.
-const MIN_SIZE: (u32, u32) = (200, 150);
+/// Each tire block's temperatures and wear; a temperature without room is left out and its color shows.
+const MIN_SIZE: (u32, u32) = (140, 110);
+/// From this width the header has room for the tire sets and the pit lap beside the compound. A large text size
+/// makes the widget narrower in widget pixels.
+const FULL_HEADER_WIDTH: f32 = 200.0;
+/// From this height a tire block shows its third line, the distance or the pressure.
+const THREE_LINES_BLOCK: f32 = 54.0;
 
 const WHITE: u32 = 0xF0_F2F5;
 const DIM: u32 = 0xA0_A6AE;

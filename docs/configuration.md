@@ -59,6 +59,62 @@ missing `[general]` table is added at the end). The overlay's reload of that wri
 shows and does nothing. A value from the slider holds over the file's in a reload for two seconds after the
 slider last moved, so the reload of one save cannot undo a newer value.
 
+## Text size
+
+The size of the widgets' text, for every widget at once. The Pitot window's *Text size* slider sets it; it can also
+be edited here.
+
+```toml
+# text_size sets the widgets' text in percent, from 70 to 150, with the rows, columns, and spacing around it; the
+# widgets keep their width and height, so larger text fits fewer rows. The Pitot window's slider saves it here.
+[general]
+text_size = 100
+```
+
+- `text_size`: a whole number from 70 to 150. Left out, it is 100, which draws every widget exactly as before the
+  setting existed. The slider moves in steps of 5; the file takes any whole number in the range. Below 70 the
+  smallest labels (11 px) would fall under 8 px; at 150 a widget at its default size still shows its main rows
+  and columns (below).
+- Text and what is laid out from it change together: font sizes, row heights, column widths, padding, badges and
+  boxes, and the margins and strokes drawn at a fixed number of pixels. A widget is laid out in widget pixels,
+  `text_size / 100` screen pixels each: at 150 the default 460 x 300 relative is laid out as a 307 x 200 one and
+  drawn half again as large, in the same 460 x 300 box.
+- The box does not change: `x`, `y`, `width`, and `height` stay, so the widgets keep their places and do not cover
+  each other. Larger text fits fewer rows and columns; smaller text fits more.
+- Shapes sized from the box still fill it: the wind dial, the track map's circle, outline, road, and car dots, the
+  tire blocks, and the input trace. The input trace draws no text and does not change at all: its trace, pedal
+  bars, and steering wheel follow its box at any text size, and the trace keeps 2 px per sample.
+- The status line has no size in the default file: its box is made of its two lines and grows and shrinks with
+  them. Resized in *Move widgets*, it gets a box of its own like the others.
+- What does not fit is left out whole, not overlapped or cut through. Each widget leaves out rows at the bottom and
+  its less important columns first when its box is narrow in widget pixels:
+
+| Widget | Left out in a narrow or short box (sizes in widget pixels) | At 150 in its default box |
+|---|---|---|
+| `status` | (its box is made of its text, see above) | grows to 450 x 81 |
+| `inputs` | (no text) | unchanged |
+| `relative` | below 400 wide, the iRating and license boxes (the name keeps their room); below 380, the footer's time of day; cars a pair at a time by height | one car on each side, no iRating or license |
+| `standings` | the optional columns by width (sectors first, as before), rows by height | 15 rows, the main columns |
+| `fuel` | below 380 wide, the fourth column (pit sign, fuel at the end); below 120 tall, the last lap's line | three columns, the average's line |
+| `pit` | below 380 wide, the rejoin place and gap; below 300, the pit lap; in the head line, the full stop below 350 and the refueling speed below 230; cars by height | stint, stop, stood, fuel |
+| `sectors` | below 340 wide, the car behind; the neighbours' car numbers in the header when a column is under 64; the last sectors by height | four columns |
+| `wind` | the dial shrinks beside the text column | a small dial |
+| `tires` | below 200 wide, the sets and pit lap in the header; in a block under 54 tall, the distance (or pressure) line; a line of temperatures or wear whose numbers do not all fit (the temperature swatches' colors stay) | temperatures, no wear numbers |
+| `trackmap` | (shapes follow the box) | the same map, a larger `PIT` label |
+
+- At a text size other than 100, two rules catch what a widget's own layout does not: a text that would reach past
+  the widget's edge is not drawn, and a number wider than its box is not drawn rather than shown with digits
+  missing. A long name is still cut at the end of its column, as at 100. A widget's box smaller than its smallest
+  size in widget pixels (a box made small at a smaller text size) lays the widget out at its smallest, and what
+  reaches past the box's edge is cut there.
+- A change lays every widget out again in its box, keeping what it follows of the session (fuel use, lap times,
+  gaps), and makes the text formats and glyph atlas again at the new size: about 3 ms, and 7 to 14 ms with the
+  redraw of every widget, on the lab PC. Windows, layers, and the GPU device stay. While the value does not change,
+  nothing more is made or drawn.
+
+While the slider moves, the window sends each value to the overlay, which lays the widgets out at it at once;
+releasing the slider saves it here in place, as the background opacity slider does (above).
+
 ## Moving and resizing widgets
 
 Choose *Move widgets* in the tray menu or the Pitot window to place and size widgets with the mouse. Every enabled
@@ -68,7 +124,7 @@ corner.
 - **Move**: drag the inside of a handle with the left button; the widget follows and stays on its monitor.
 - **Resize**: drag an edge (6 px wide) or a corner (16 px along each edge, the grip among them); the cursor shows
   which. The widget takes the new size as it is dragged. It stays on its monitor and gets no smaller than its
-  smallest size (below). The opposite edges stay where they are.
+  smallest size (below) at the current [text size](#text-size). The opposite edges stay where they are.
 
 Releasing the button saves what changed to `config.toml`: `x` and `y` after a move, `width` and `height` after a
 resize, and all four when a left or top edge moved. Only those numbers change in the file, so comments and layout
@@ -78,19 +134,20 @@ widget keeps its new place and size until the file is reloaded or the overlay ex
 writes nothing.
 
 Resizing is the same as editing `width` and `height` in the file: the widget's box changes, not its text. Text and
-shapes keep their pixel size, and each widget lays out within the new box:
+shapes keep their pixel size, and each widget lays out within the new box. The smallest sizes are at text size 100;
+at another text size they are in widget pixels, so a drag stops at the smallest size times `text_size / 100`:
 
 | Widget | Smallest | In a larger box |
 |---|---|---|
 | `status` | 160 x 54 | the second line has more room; the rest stays empty |
 | `inputs` | 240 x 60 | a wider trace shows a longer history (2 px per sample, 60 samples a second); a taller one, a taller trace and a wheel up to 72 px |
-| `relative` | 400 x 167 | more cars, a pair at a time: one on each side of the player per 67 px of height (rows of 33⅓ px); a wider box widens the names |
+| `relative` | 300 x 167 | more cars, a pair at a time: one on each side of the player per 67 px of height (rows of 33⅓ px); a wider box widens the names, and from 400 px shows the iRating and license boxes |
 | `standings` | 400 x 96 | more rows (24 px each): more cars around the player, then more leaders per class. A shorter box shows fewer cars around the player first, then fewer leaders, then only the player's class, so the player stays in view; a wider one gets back the columns dropped for room |
-| `fuel` | 380 x 120 | the four columns and six lines spread out; below the default height the text is a size smaller |
-| `pit` | 380 x 110 | more cars (22 px rows); a wider box widens the names |
-| `sectors` | 340 x 120 | wider value columns; rows grow to 24 px, then the rest stays empty. Below 16 px a row, the last sectors are left out |
-| `wind` | 160 x 140 | a larger dial; the text column keeps its width |
-| `tires` | 200 x 150 | larger tire blocks |
+| `fuel` | 270 x 90 | the columns and lines spread out: four columns from 380 px, the last lap's line from 120 px; below the default height the text is a size smaller |
+| `pit` | 260 x 110 | more cars (22 px rows); a wider box widens the names, and shows the pit lap from 300 px and where a car rejoins from 380 px |
+| `sectors` | 260 x 120 | wider value columns, the car behind from 340 px; rows grow to 24 px, then the rest stays empty. Below 16 px a row, the last sectors are left out |
+| `wind` | 130 x 110 | a larger dial; the text column keeps its width |
+| `tires` | 140 x 110 | larger tire blocks: their third line from 54 px a block, the sets and pit lap in the header from 200 px |
 | `trackmap` | 200 x 150 | a larger map, with the same dots and road (a box smaller than the default thins them) |
 
 A size below the smallest in the file is raised to it too. While a widget is resized, its composition surfaces are
@@ -187,6 +244,7 @@ At every sim disconnect and at exit, the line also carries the data path's count
 font = "Segoe UI"
 start_in_tray = false  # true: do not open the Pitot window at start
 background_opacity = 82  # every widget's background, 0 (none) to 100 (opaque); 82 is each widget's opacity
+text_size = 100  # every widget's text and the rows and columns around it, 70 to 150 percent
 
 [widgets.inputs]
 enabled = true
@@ -211,6 +269,7 @@ The pit widget keeps what it measures, the refueling speed by car and the pit la
 | Field | Range |
 |---|---|
 | `background_opacity` | `[general]` only: 0 to 100, a whole number |
+| `text_size` | `[general]` only: 70 to 150, a whole number |
 | `rate_hz` | 0.1 to 120 |
 | `opacity` | 0 to 1 |
 | `width`, `height` | 16 to 8192 |
@@ -221,4 +280,5 @@ when Windows renumbers displays.
 
 A configuration change rebuilds the overlay windows, widgets, and composition layers. The GPU device, the
 connection to the sim, and the data pipeline keep running, so reloading does not grow memory. A change of
-`background_opacity` alone only redraws the widgets.
+`background_opacity` alone only redraws the widgets, and a change of `text_size` (with or without
+`background_opacity`) lays the widgets out again in their windows and layers and makes the text again.

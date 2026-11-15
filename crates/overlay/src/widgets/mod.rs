@@ -398,6 +398,54 @@ mod tests {
         assert!(make_widget("radar", &cx, &set).is_none());
     }
 
+    /// At either end of `[general] text_size`, a widget at its default size is laid out in its box as it stands:
+    /// the box in widget pixels is never below the widget's smallest size, so nothing is cut at its edge. Larger
+    /// text leaves out rows and columns instead.
+    #[test]
+    fn default_boxes_lay_out_at_every_text_size() {
+        let mut set = VarSet::new();
+        Vars::register(&mut set);
+        for name in widget_var_names() {
+            set.add(name);
+        }
+        let shared = Shared::with_pit_store(None);
+        for spec in SPECS {
+            let config = spec.defaults();
+            let cx = Build {
+                config: &config,
+                shared: &shared,
+            };
+            let mut widget = make_widget(spec.name, &cx, &set).expect("made");
+            let (Some(width), Some(height)) = (spec.width, spec.height) else {
+                // A box made of its text (the status line) grows with it.
+                continue;
+            };
+            if !widget.scales_with_text() {
+                continue;
+            }
+            for percent in [config::MIN_TEXT_SIZE, 85, 115, 130, config::MAX_TEXT_SIZE] {
+                let scale = config::text_scale(percent);
+                let inside = |side: u32| (side as f32 / scale).ceil() as u32;
+                let (w, h) = (inside(width), inside(height));
+                let (min_w, min_h) = widget.min_size();
+                assert!(
+                    w >= min_w && h >= min_h,
+                    "{} at {percent}%: {w}x{h} is below its smallest, {min_w}x{min_h}",
+                    spec.name
+                );
+                widget.resize(w, h);
+                assert_eq!(widget.size(), (w, h), "{} at {percent}%", spec.name);
+                for layer in widget.layers() {
+                    assert!(
+                        layer.x as u32 + layer.width <= w && layer.y as u32 + layer.height <= h,
+                        "{} at {percent}%: {layer:?}",
+                        spec.name
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn a_resized_widget_is_the_widget_made_at_that_size() {
         let mut set = VarSet::new();

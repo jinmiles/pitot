@@ -1096,6 +1096,23 @@ impl Canvas<'_> {
         }
     }
 
+    /// Whether `text` at `size` fits the width of `rect` (both in widget pixels), for text the glyph atlas draws:
+    /// numbers and units. Other text is not measured and counts as fitting.
+    pub fn fits(&self, text: &str, rect: Rect, size: f32) -> bool {
+        let (index, _) = Formats::index(size, Align::Left);
+        match self.atlas.get(index) {
+            Some(face) if face.covers(text) => {
+                let width: f32 = text
+                    .chars()
+                    .filter_map(|c| face.glyph(c))
+                    .map(|g| g.advance)
+                    .sum();
+                width <= self.layer_rect(rect).w + 0.5
+            }
+            _ => true,
+        }
+    }
+
     /// Whether `rect`, in widget pixels, lies within the layer. A pixel of slack covers the layer's size in widget
     /// pixels, which is rarely whole.
     fn inside(&self, rect: Rect) -> bool {

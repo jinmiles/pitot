@@ -285,8 +285,14 @@ impl FuelWidget {
     }
 }
 
-/// Four columns of values, and six lines that keep their text a size below the default's.
-const MIN_SIZE: (u32, u32) = (380, 120);
+/// Three columns of values and four lines, once the pit sign, the fuel at the end, and the last lap's line are left
+/// out.
+const MIN_SIZE: (u32, u32) = (270, 90);
+/// From this width the fourth column shows: the pit sign and the fuel at the end. A large text size makes the
+/// widget narrower in widget pixels.
+const FOUR_COLUMNS_WIDTH: f32 = 380.0;
+/// From this height the last lap's estimate shows below the average's.
+const SIX_LINES_HEIGHT: f32 = 120.0;
 
 const WHITE: u32 = 0xF0_F2F5;
 const DIM: u32 = 0xA0_A6AE;
@@ -387,9 +393,12 @@ impl Widget for FuelWidget {
         );
         let dim = Color::rgb(DIM, 1.0);
         let white = Color::rgb(WHITE, 1.0);
-        // Six lines: labels and values of the current state, then the average's and the last lap's.
-        let line = h / 6.0;
-        let column = (w - 24.0) / 4.0;
+        // Six lines: labels and values of the current state, then the average's and the last lap's. A short widget
+        // leaves out the last lap's, and a narrow one the fourth column.
+        let six = h >= SIX_LINES_HEIGHT;
+        let four = w >= FOUR_COLUMNS_WIDTH;
+        let line = h / if six { 6.0 } else { 4.0 };
+        let column = (w - 24.0) / if four { 4.0 } else { 3.0 };
         let label = (line * 0.5).clamp(10.0, 13.0);
         let value = (line * 0.8).clamp(14.0, 24.0);
         let cell = |col: f32, row: f32| Rect::new(12.0 + col * column, row * line, column, line);
@@ -424,27 +433,13 @@ impl Widget for FuelWidget {
             window_ink,
         );
         // The pit sign, lit when the fuel does not last to the end.
-        let sign = Rect::new(
-            12.0 + 3.0 * column + column * 0.2,
-            line * 0.4,
-            column * 0.6,
-            line * 1.2,
-        );
-        let (frame, ink) = if l.pit {
-            (Color::rgb(SHORT, 1.0), Color::rgb(SHORT, 1.0))
-        } else {
-            (Color::rgb(DIM, 0.35), Color::rgb(DIM, 0.35))
-        };
-        let (x0, y0, x1, y1) = (sign.x, sign.y, sign.x + sign.w, sign.y + sign.h);
-        canvas.line((x0, y0), (x1, y0), 1.5, frame);
-        canvas.line((x0, y1), (x1, y1), 1.5, frame);
-        canvas.line((x0, y0), (x0, y1), 1.5, frame);
-        canvas.line((x1, y0), (x1, y1), 1.5, frame);
-        canvas.text("PIT", sign, label + 2.0, Align::Center, ink);
-
+        if four {
+            self.draw_sign(canvas, column, line, label);
+        }
         for (col, name) in ["Average", "Laps Remain", "Refuel", "Fuel at End"]
             .iter()
             .enumerate()
+            .take(if four { 4 } else { 3 })
         {
             canvas.text(
                 name,
@@ -458,21 +453,27 @@ impl Widget for FuelWidget {
                 },
             );
         }
-        canvas.text(
-            "Last",
-            cell(0.0, 4.0),
-            label,
-            Align::Left,
-            Color::rgb(LAST, 1.0),
-        );
-        for (row, estimate, color) in [(3.0, &l.average, AVERAGE), (5.0, &l.last, LAST)] {
+        if six {
+            canvas.text(
+                "Last",
+                cell(0.0, 4.0),
+                label,
+                Align::Left,
+                Color::rgb(LAST, 1.0),
+            );
+        }
+        let estimates = [(3.0, &l.average, AVERAGE), (5.0, &l.last, LAST)];
+        for &(row, estimate, color) in estimates.iter().take(if six { 2 } else { 1 }) {
             let at_end = if estimate.short { SHORT } else { color };
             for (col, text, ink) in [
                 (0.0, &estimate.per_lap, color),
                 (1.0, &estimate.laps_left, color),
                 (2.0, &estimate.refuel, color),
                 (3.0, &estimate.at_end, at_end),
-            ] {
+            ]
+            .into_iter()
+            .take(if four { 4 } else { 3 })
+            {
                 canvas.text(
                     text.as_str(),
                     cell(col, row),
@@ -486,6 +487,29 @@ impl Widget for FuelWidget {
 
     fn reset(&mut self) {
         self.tracker = FuelTracker::default();
+    }
+}
+
+impl FuelWidget {
+    /// The pit sign in the fourth column, lit when the fuel does not last to the end.
+    fn draw_sign(&self, canvas: &mut Canvas<'_>, column: f32, line: f32, label: f32) {
+        let sign = Rect::new(
+            12.0 + 3.0 * column + column * 0.2,
+            line * 0.4,
+            column * 0.6,
+            line * 1.2,
+        );
+        let (frame, ink) = if self.lines.pit {
+            (Color::rgb(SHORT, 1.0), Color::rgb(SHORT, 1.0))
+        } else {
+            (Color::rgb(DIM, 0.35), Color::rgb(DIM, 0.35))
+        };
+        let (x0, y0, x1, y1) = (sign.x, sign.y, sign.x + sign.w, sign.y + sign.h);
+        canvas.line((x0, y0), (x1, y0), 1.5, frame);
+        canvas.line((x0, y1), (x1, y1), 1.5, frame);
+        canvas.line((x0, y0), (x0, y1), 1.5, frame);
+        canvas.line((x1, y0), (x1, y1), 1.5, frame);
+        canvas.text("PIT", sign, label + 2.0, Align::Center, ink);
     }
 }
 

@@ -1117,6 +1117,73 @@ mod tests {
         assert_eq!(previews.text_size(&with(120)), 120);
     }
 
+    /// A widget with a smallest size, for the box rules.
+    struct Boxed {
+        size: (u32, u32),
+        min: (u32, u32),
+        resized: usize,
+    }
+
+    impl Widget for Boxed {
+        fn size(&self) -> (u32, u32) {
+            self.size
+        }
+
+        fn min_size(&self) -> (u32, u32) {
+            self.min
+        }
+
+        fn resize(&mut self, width: u32, height: u32) {
+            self.size = (width.max(self.min.0), height.max(self.min.1));
+            self.resized += 1;
+        }
+
+        fn interval(&self) -> Duration {
+            Duration::from_secs(1)
+        }
+
+        fn update(&mut self, _: &mut View, _: Instant, _: &mut [Redraw; MAX_LAYERS]) {}
+
+        fn draw(&self, _: usize, _: &mut Canvas<'_>) {}
+    }
+
+    fn boxed(size: (u32, u32)) -> Boxed {
+        Boxed {
+            size,
+            min: (300, 167),
+            resized: 0,
+        }
+    }
+
+    #[test]
+    fn a_text_size_keeps_the_box_and_lays_the_widget_out_inside() {
+        // At the default size nothing changes: the widget keeps the size it was made at.
+        let mut widget = boxed((460, 300));
+        assert_eq!(fit(&mut widget, false, (460, 300), 1.0, false), (460, 300));
+        assert_eq!(widget.resized, 0);
+        // Larger text: the same box, fewer widget pixels; smaller text: more.
+        assert_eq!(fit(&mut widget, false, (460, 300), 1.5, false), (460, 300));
+        assert_eq!(widget.size, (307, 200));
+        assert_eq!(fit(&mut widget, false, (460, 300), 0.7, false), (460, 300));
+        assert_eq!(widget.size, (658, 429));
+        // Back at the default, the widget fills its box again.
+        assert_eq!(fit(&mut widget, false, (460, 300), 1.0, false), (460, 300));
+        assert_eq!(widget.size, (460, 300));
+        // A box too small for the widget at a large text size stays; the widget lays out at its smallest and what
+        // does not fit is left out.
+        let mut widget = boxed((300, 167));
+        assert_eq!(fit(&mut widget, false, (300, 200), 1.5, false), (300, 200));
+        assert_eq!(widget.size, (300, 167));
+        // A drag to that size grows the box to the smallest that reads at the text size.
+        assert_eq!(fit(&mut widget, false, (300, 200), 1.5, true), (450, 251));
+        // A box made of text grows with it.
+        let mut status = boxed((300, 54));
+        assert_eq!(fit(&mut status, true, (300, 54), 1.5, false), (450, 81));
+        assert_eq!(fit(&mut status, true, (450, 81), 0.7, false), (210, 38));
+        assert_eq!(status.size, (300, 54), "its own size stays");
+        assert_eq!(status.resized, 0);
+    }
+
     #[test]
     fn boxes_in_widget_pixels_cover_the_screen_box() {
         // Rounded up, so a widget's background reaches the layer's last pixel.
