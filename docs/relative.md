@@ -27,8 +27,8 @@ left over; text keeps its size.
   `CarScreenName`; no logos), and the gap. The player's name is orange.
 - **Badges**: `PIT` while the car is on pit road (the row is dimmed), `OUT` on its out lap (from leaving pit road
   until it completes a lap), and a black `F` when `CarIdxSessionFlags` has the black flag.
-- **Header**: water temperature (`WaterTemp`), track temperature (`TrackTempCrew`), the player's incidents
-  (`PlayerCarMyIncidentCount`), and the local time.
+- **Header**: track temperature (`TrackTempCrew`) to one decimal (`31.4`), the player's incidents
+  (`PlayerCarMyIncidentCount`), and the local time. Water and oil temperatures are not shown.
 - **Footer**: the player's lap, the time of day in the sim (`SessionTimeOfDay`), and the session type with its
   elapsed time over its length.
 - **Excluded**: the pace car, spectators, and cars not in the world (`CarIdxTrackSurface` of -1).

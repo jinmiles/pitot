@@ -1,5 +1,5 @@
-//! Relative: the cars nearest on track ahead of and behind the player, with time gaps, between a header (water and
-//! track temperature, incidents, clock) and a footer (lap, time of day in the sim, session time).
+//! Relative: the cars nearest on track ahead of and behind the player, with time gaps, between a header (track
+//! temperature, incidents, clock) and a footer (lap, time of day in the sim, session time).
 //!
 //! Order on track comes from lap distance, normalized to half a lap either way so cars across the start line are
 //! placed correctly. The time gap is measured: for a car ahead, the time since it was where the player is now;
@@ -162,7 +162,6 @@ impl Row {
 /// The lines above and below the cars.
 #[derive(Debug, Clone, PartialEq)]
 struct Frame {
-    water: FixedText,
     track: FixedText,
     incidents: FixedText,
     clock: FixedText,
@@ -175,7 +174,6 @@ struct Frame {
 impl Frame {
     fn new() -> Self {
         Self {
-            water: FixedText::new(8),
             track: FixedText::new(8),
             incidents: FixedText::new(8),
             clock: FixedText::new(8),
@@ -283,7 +281,6 @@ impl RelativeWidget {
         let (snap, vars) = (view.snapshot(), view.vars());
         let f = &mut self.next_frame;
         for text in [
-            &mut f.water,
             &mut f.track,
             &mut f.incidents,
             &mut f.clock,
@@ -294,11 +291,8 @@ impl RelativeWidget {
         ] {
             text.clear();
         }
-        if let Some(t) = snap.f32(vars.water_temp, 0) {
-            let _ = write!(f.water, "{t:.0}");
-        }
         if let Some(t) = snap.f32(vars.track_temp, 0) {
-            let _ = write!(f.track, "{t:.0}");
+            let _ = write!(f.track, "{t:.1}");
         }
         if let Some(n) = snap.i32(vars.incidents, 0) {
             let _ = write!(f.incidents, "{n}");
@@ -510,18 +504,18 @@ impl RelativeWidget {
         let cell = |x: f32, width: f32| Rect::new(x, y, width, row_h);
         if top {
             let mut x = 10.0;
-            let mut pair = |canvas: &mut Canvas<'_>, label: &str, value: &str, unit: &str| {
+            let mut pair = |canvas: &mut Canvas<'_>, label: &str, value: &str, unit: &str, width: f32| {
                 if value.is_empty() {
                     return;
                 }
                 canvas.text(label, cell(x, 40.0), size * 0.85, Align::Left, dim);
-                canvas.text(value, cell(x + 40.0, 26.0), size, Align::Right, white);
-                canvas.text(unit, cell(x + 67.0, 20.0), size * 0.85, Align::Left, dim);
-                x += 96.0;
+                canvas.text(value, cell(x + 40.0, width), size, Align::Right, white);
+                canvas.text(unit, cell(x + 41.0 + width, 20.0), size * 0.85, Align::Left, dim);
+                x += 70.0 + width;
             };
-            pair(canvas, "Water", f.water.as_str(), "\u{b0}C");
-            pair(canvas, "Track", f.track.as_str(), "\u{b0}C");
-            pair(canvas, "Inc", f.incidents.as_str(), "x");
+            // Wide enough for a temperature with one decimal (`58.3`) at the largest text size.
+            pair(canvas, "Track", f.track.as_str(), "\u{b0}C", 36.0);
+            pair(canvas, "Inc", f.incidents.as_str(), "x", 26.0);
             canvas.text(
                 f.clock.as_str(),
                 cell(w - 70.0, 60.0),
@@ -725,8 +719,7 @@ impl Widget for RelativeWidget {
     fn update(&mut self, view: &mut View, _now: Instant, redraw: &mut [Redraw; MAX_LAYERS]) {
         self.fill(view);
         // Slots: the header, the cars, the footer. Only the span that changed is drawn again.
-        let header = self.next_frame.water != self.frame.water
-            || self.next_frame.track != self.frame.track
+        let header = self.next_frame.track != self.frame.track
             || self.next_frame.incidents != self.frame.incidents
             || self.next_frame.clock != self.frame.clock;
         let footer = self.next_frame != self.frame && {
