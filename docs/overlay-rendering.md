@@ -53,6 +53,16 @@ menu.
 - The device commits only when something was drawn or a visibility changed.
 - Widgets draw through `Canvas` (rectangles, lines, text) and never touch COM directly. All rendering `unsafe` is
   in the `render` module and all windowing `unsafe` in `platform`, each block with a `// SAFETY:` comment.
+- `[general] text_size` ([configuration](configuration.md#text-size)) sets a text scale, `text_size / 100`. The
+  text formats and the glyph atlas are made at `TEXT_SIZES` times the scale, and a widget that scales with the text
+  (`Widget::scales_with_text`, every widget but the input trace) is given its box divided by the scale through
+  `Widget::resize` and draws in those widget pixels: the canvas maps each coordinate to layer pixels, so a whole
+  widget pixel lands on a whole layer pixel and edges sharp at the default stay sharp, and a one pixel line keeps a
+  pixel. Text sizes are asked for in widget pixels and pick the same of `TEXT_SIZES` as before. At a scale other
+  than 1, text whose box reaches past the layer is not drawn, and a number from the atlas wider than its box is not
+  drawn rather than drawn with glyphs missing; at 1 nothing of this runs, so the default draws exactly as before.
+  A change of the scale resizes every widget, makes the formats and atlas again, empties the layout cache, and
+  redraws; nothing is made per frame while it stays.
 - Backgrounds (a widget's panel, a band behind its content) are drawn with `Canvas::fill_background`, which
   scales the color's own alpha by `[general] background_opacity` ([configuration](configuration.md#background-opacity));
   everything else uses `Canvas::fill` and stays as it is. A change of the value redraws every widget once.
@@ -115,11 +125,16 @@ Each widget type implements `Register` next to its `Widget` implementation:
   `cx.shared`.
 
 Its `Widget` implementation gives, besides drawing, its smallest size (`min_size`) and `resize(width, height)`,
-which *Move widgets* calls while the widget is resized. A resized widget must be the widget made at that size:
-the same `size()` and `layers()`, with what it follows of the session kept. Text and shapes keep their pixel
-size; the widget lays out within the box (more rows, a longer history). `resize` may allocate (buffers for more
-rows), so updates and draws at the new size do not. The usual pattern is a constructor that makes the widget
-empty and calls `resize` with the configured size.
+which *Move widgets* calls while the widget is resized and a change of the text size calls for every widget. A
+resized widget must be the widget made at that size: the same `size()` and `layers()`, with what it follows of the
+session kept. Text and shapes keep their pixel size; the widget lays out within the box (more rows, a longer
+history). `resize` may allocate (buffers for more rows), so updates and draws at the new size do not. The usual
+pattern is a constructor that makes the widget empty and calls `resize` with the configured size.
+
+Sizes are in widget pixels, which are screen pixels at the default text size. At the largest text size (150) a
+widget at its default size gets its box divided by 1.5, so its smallest size must be at most that (a test checks
+it), and a narrow or short box leaves out its less important columns and rows rather than overlapping them. A
+widget without text says `false` from `scales_with_text` and keeps screen pixels.
 
 ### Shared trackers
 
@@ -201,14 +216,15 @@ not `docs/configuration.md` or the benchmark configurations. `list.rs` and `docs
 What checks the new widget without more code:
 
 - `cargo test -p pitot-overlay`: names and labels are unique, rates are in range, every widget is made from its
-  defaults, a resized widget equals the widget made at that size (and keeps its layers inside it), `docs/widgets.md`
+  defaults, a resized widget equals the widget made at that size (and keeps its layers inside it), its default
+  size lays out at every text size without being raised past its smallest, `docs/widgets.md`
   has its row in the list's order, the default file and the defaults agree, and the benchmark configurations still
   turn on exactly the four reference widgets.
 - `cargo test -p pitot-overlay --features alloc-check --test alloc_check`:
   `every_widget_and_the_histories_do_not_allocate_per_update` makes every widget of the list and updates them
   through a light race of three cars, counting allocations; with a render device it draws them too, at their
-  default size, their smallest, and twice the default. A widget whose work needs other data adds its own test
-  there.
+  default size, their smallest, twice the default, and at the largest and smallest text sizes. A widget whose work
+  needs other data adds its own test there.
 
 A widget on by default joins the benchmark's measured set unless `benchmarks/pitot/four.toml` and `inputs.toml`
 turn it off; the benchmark test fails until both do (then copy them to the `*.local.toml` files with `monitor` set).

@@ -5,7 +5,9 @@ the average of recent clean laps (blue) and one from the last clean lap (yellow)
 fuel lasts, fuel to add to finish (Refuel), and fuel left at the end (negative, in red, when it does not last). A
 `PIT` sign lights when, at the average, the fuel does not last to the end. Values are liters with two decimals;
 `--.--` means not known yet. Updates 30 times per second by default (`rate_hz = 30.0`); it draws only when a value
-changes.
+changes. A box narrower than 380 px leaves out the fourth column (the pit sign and the fuel at the end), and one
+lower than 120 px the last lap's line; at a [text size](configuration.md#text-size) of 150 the default box is
+280 x 100 widget pixels and shows three columns and the average's line.
 
 - **Use per lap**: the average of the last five clean laps. A lap counts when it was driven in full under
   green-flag running, without visiting pit road and without fuel being added (any rise of more than 0.05 L).

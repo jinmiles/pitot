@@ -182,8 +182,8 @@ const COLUMN: f32 = 64.0;
 /// Where the speed's number ends in the text column: two digits at the speed's size fit before it.
 const SPEED_END: f32 = 30.0;
 const PAD: f32 = 8.0;
-/// The text column's lines apart, and a dial beside it.
-const MIN_SIZE: (u32, u32) = (160, 140);
+/// The text column's lines apart, and a small dial beside it: a default-sized widget at the largest text size.
+const MIN_SIZE: (u32, u32) = (130, 110);
 
 impl Register for WindWidget {
     type Vars = WindVars;

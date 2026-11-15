@@ -26,7 +26,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::core::{PCWSTR, w};
 
 use super::{PlatformError, error, instance, last_error};
-use crate::config::MAX_BACKGROUND_OPACITY;
+use crate::config::{MAX_BACKGROUND_OPACITY, MAX_TEXT_SIZE, MIN_TEXT_SIZE};
 
 /// The message both sides use; window classes keep it from reaching anything else.
 pub(super) const LINK_MESSAGE: u32 = WM_APP + 2;
@@ -54,6 +54,11 @@ pub enum OverlayCommand {
     BackgroundPreview(u8),
     /// The window wrote `[general] background_opacity` into `config.toml`, which now holds this percent.
     BackgroundSaved(u8),
+    /// Lay the widgets out at this `[general] text_size` (a percent from 70 to 150), while the window's slider
+    /// moves. It holds over the file's value until [`OverlayCommand::TextSizeSaved`].
+    TextSizePreview(u8),
+    /// The window wrote `[general] text_size` into `config.toml`, which now holds this percent.
+    TextSizeSaved(u8),
 }
 
 impl OverlayCommand {
@@ -65,12 +70,16 @@ impl OverlayCommand {
             Self::Quit => (4, 0),
             Self::BackgroundPreview(percent) => (5, isize::from(percent)),
             Self::BackgroundSaved(percent) => (6, isize::from(percent)),
+            Self::TextSizePreview(percent) => (7, isize::from(percent)),
+            Self::TextSizeSaved(percent) => (8, isize::from(percent)),
         }
     }
 
     pub(super) fn decode(command: usize, value: isize) -> Option<Self> {
-        // Any value is read as a percent from 0 to 100.
+        // Any value is read as a percent in the setting's range.
         let percent = || value.clamp(0, isize::from(MAX_BACKGROUND_OPACITY)) as u8;
+        let text_size =
+            || value.clamp(isize::from(MIN_TEXT_SIZE), isize::from(MAX_TEXT_SIZE)) as u8;
         match command {
             1 => Some(Self::Hello),
             2 => Some(Self::SetHidden(value != 0)),
@@ -78,6 +87,8 @@ impl OverlayCommand {
             4 => Some(Self::Quit),
             5 => Some(Self::BackgroundPreview(percent())),
             6 => Some(Self::BackgroundSaved(percent())),
+            7 => Some(Self::TextSizePreview(text_size())),
+            8 => Some(Self::TextSizeSaved(text_size())),
             _ => None,
         }
     }
@@ -437,6 +448,9 @@ mod tests {
             OverlayCommand::BackgroundPreview(0),
             OverlayCommand::BackgroundPreview(100),
             OverlayCommand::BackgroundSaved(37),
+            OverlayCommand::TextSizePreview(70),
+            OverlayCommand::TextSizePreview(150),
+            OverlayCommand::TextSizeSaved(115),
         ] {
             let (c, v) = command.encode();
             assert_eq!(OverlayCommand::decode(c, v), Some(command));
@@ -449,6 +463,14 @@ mod tests {
         assert_eq!(
             OverlayCommand::decode(6, -5),
             Some(OverlayCommand::BackgroundSaved(0))
+        );
+        assert_eq!(
+            OverlayCommand::decode(7, 1000),
+            Some(OverlayCommand::TextSizePreview(150))
+        );
+        assert_eq!(
+            OverlayCommand::decode(8, 0),
+            Some(OverlayCommand::TextSizeSaved(70))
         );
         for event in [
             ControlEvent::State {

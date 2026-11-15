@@ -88,10 +88,13 @@ pub const DEFAULT_TOML: &str = r#"# Pitot overlay configuration. Changes apply w
 # it opens the window.
 # background_opacity sets how opaque the widgets' backgrounds are, from 0 (none) to 100 (opaque); text and
 # graphs stay as they are. At 82 each widget uses its own opacity below. The Pitot window's slider saves it here.
+# text_size sets the widgets' text in percent, from 70 to 150, with the rows, columns, and spacing around it; the
+# widgets keep their width and height, so larger text fits fewer rows. The Pitot window's slider saves it here.
 [general]
 font = "Segoe UI"
 start_in_tray = false
 background_opacity = 82
+text_size = 100
 
 # Records each session while you drive into %APPDATA%\Pitot\captures, so a replay of it (in the session or
 # from a saved .rpy file) can show the widgets. The oldest recordings are deleted once the folder holds more
@@ -218,6 +221,8 @@ pub struct General {
     pub start_in_tray: bool,
     /// How opaque the widgets' backgrounds are, in percent: see [`background_alpha`].
     pub background_opacity: u8,
+    /// The widgets' text size in percent, from [`MIN_TEXT_SIZE`] to [`MAX_TEXT_SIZE`]: see [`text_scale`].
+    pub text_size: u8,
 }
 
 impl Default for General {
@@ -226,8 +231,29 @@ impl Default for General {
             font: "Segoe UI".to_owned(),
             start_in_tray: false,
             background_opacity: DEFAULT_BACKGROUND_OPACITY,
+            text_size: DEFAULT_TEXT_SIZE,
         }
     }
+}
+
+/// `[general] text_size` when the file leaves it out: every widget as it was before the setting existed.
+pub const DEFAULT_TEXT_SIZE: u8 = 100;
+
+/// The smallest `[general] text_size`: below it the smallest labels (11 px) fall under 8 px.
+pub const MIN_TEXT_SIZE: u8 = 70;
+
+/// The largest `[general] text_size`: half again the default, where a default-sized widget still shows its main
+/// rows and columns.
+pub const MAX_TEXT_SIZE: u8 = 150;
+
+/// The steps the Pitot window's text size slider moves in. The file takes any whole percent in range.
+pub const TEXT_SIZE_STEP: u8 = 5;
+
+/// How much larger the widgets' text, and the rows and spacing laid out around it, are drawn at
+/// `[general] text_size` = `percent`: 1 at [`DEFAULT_TEXT_SIZE`]. Percents outside the range count as its ends.
+pub fn text_scale(percent: u8) -> f32 {
+    let percent = percent.clamp(MIN_TEXT_SIZE, MAX_TEXT_SIZE);
+    f32::from(percent) / f32::from(DEFAULT_TEXT_SIZE)
 }
 
 /// `[general] background_opacity` when the file leaves it out: every widget's background at its own `opacity`.
@@ -579,8 +605,8 @@ pub enum ConfigError {
         widget: &'static str,
         field: &'static str,
     },
-    /// A widget's position or `enabled`, or the background opacity, cannot be written into the file without changing
-    /// more than that.
+    /// A widget's position or `enabled`, the background opacity, or the text size cannot be written into the file
+    /// without changing more than that.
     Unplaceable,
     /// A setting outside the widgets is outside its allowed range.
     OutOfRange {
@@ -661,6 +687,11 @@ impl Config {
         if self.general.background_opacity > MAX_BACKGROUND_OPACITY {
             return Err(ConfigError::OutOfRange {
                 key: "general.background_opacity",
+            });
+        }
+        if !(MIN_TEXT_SIZE..=MAX_TEXT_SIZE).contains(&self.general.text_size) {
+            return Err(ConfigError::OutOfRange {
+                key: "general.text_size",
             });
         }
         if !(0.1..=10_000.0).contains(&self.recording.max_gb) {
@@ -756,6 +787,17 @@ pub fn with_background_opacity(text: &str, percent: u8) -> Result<String, Config
     let fields = [("background_opacity", percent.to_string())];
     with_fields(text, &["general"], &fields, |config| {
         config.general.background_opacity = percent;
+    })
+}
+
+/// Returns `text` with `[general] text_size` set to `percent`, brought into its range. Only that value changes; a
+/// missing key goes on the line after the `[general]` header, and a missing table is added at the end. See
+/// [`with_fields`] for what cannot be edited.
+pub fn with_text_size(text: &str, percent: u8) -> Result<String, ConfigError> {
+    let percent = percent.clamp(MIN_TEXT_SIZE, MAX_TEXT_SIZE);
+    let fields = [("text_size", percent.to_string())];
+    with_fields(text, &["general"], &fields, |config| {
+        config.general.text_size = percent;
     })
 }
 
@@ -865,6 +907,11 @@ pub fn save_enabled(path: &Path, name: &str, enabled: bool) -> Result<(), Config
 /// Saves `[general] background_opacity` in the file at `path` (see [`with_background_opacity`]).
 pub fn save_background_opacity(path: &Path, percent: u8) -> Result<(), ConfigError> {
     save_edit(path, |text| with_background_opacity(text, percent))
+}
+
+/// Saves `[general] text_size` in the file at `path` (see [`with_text_size`]).
+pub fn save_text_size(path: &Path, percent: u8) -> Result<(), ConfigError> {
+    save_edit(path, |text| with_text_size(text, percent))
 }
 
 /// Rewrites the file at `path` with `edit`. Writes a temporary file next to it first and moves it over the old
@@ -1060,6 +1107,7 @@ mod tests {
                 general.background_opacity, DEFAULT_BACKGROUND_OPACITY,
                 "default backgrounds"
             );
+            assert_eq!(general.text_size, DEFAULT_TEXT_SIZE, "default text");
         }
     }
 
@@ -1498,6 +1546,135 @@ mod tests {
             with_background_opacity("[general\n", 10),
             Err(ConfigError::Parse(_))
         ));
+    }
+
+    #[test]
+    fn text_size_defaults_to_the_widgets_own_and_is_checked() {
+        assert_eq!(Config::default().general.text_size, DEFAULT_TEXT_SIZE);
+        assert_eq!(DEFAULT_TEXT_SIZE, 100);
+        assert_eq!(
+            Config::parse("[general]\nfont = \"Arial\"\n")
+                .expect("parses")
+                .general
+                .text_size,
+            100,
+            "left out"
+        );
+        for ok in [70u8, 75, 103, 150] {
+            let config = Config::parse(&format!("[general]\ntext_size = {ok}\n")).expect("parses");
+            assert_eq!(config.general.text_size, ok);
+            assert_eq!(
+                config.general.background_opacity, 82,
+                "{ok}: others keep defaults"
+            );
+        }
+        for out in ["69", "151", "0", "255"] {
+            assert!(
+                matches!(
+                    Config::parse(&format!("[general]\ntext_size = {out}\n")),
+                    Err(ConfigError::OutOfRange {
+                        key: "general.text_size"
+                    })
+                ),
+                "{out}"
+            );
+        }
+        // A percent is a whole number.
+        for bad in ["-1", "99.5", "\"100\"", "300"] {
+            assert!(
+                Config::parse(&format!("[general]\ntext_size = {bad}\n")).is_err(),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn text_scale_is_one_at_the_default_and_clamped() {
+        assert_eq!(text_scale(DEFAULT_TEXT_SIZE), 1.0);
+        assert_eq!(text_scale(MIN_TEXT_SIZE), 0.7);
+        assert_eq!(text_scale(MAX_TEXT_SIZE), 1.5);
+        assert_eq!(text_scale(125), 1.25);
+        assert_eq!(text_scale(10), 0.7, "below the range");
+        assert_eq!(text_scale(250), 1.5, "above the range");
+        // The slider's steps land on the range's ends.
+        assert_eq!((MAX_TEXT_SIZE - MIN_TEXT_SIZE) % TEXT_SIZE_STEP, 0);
+        assert_eq!((DEFAULT_TEXT_SIZE - MIN_TEXT_SIZE) % TEXT_SIZE_STEP, 0);
+    }
+
+    #[test]
+    fn saving_text_size_changes_only_its_value() {
+        let edited = with_text_size(DEFAULT_TOML, 130).expect("edited");
+        assert_eq!(
+            Config::parse(&edited).expect("parses").general.text_size,
+            130
+        );
+        let changed: Vec<(&str, &str)> = DEFAULT_TOML
+            .lines()
+            .zip(edited.lines())
+            .filter(|(a, b)| a != b)
+            .collect();
+        assert_eq!(changed, [("text_size = 100", "text_size = 130")]);
+        assert_eq!(DEFAULT_TOML.lines().count(), edited.lines().count());
+        assert_eq!(
+            with_text_size(&edited, 100).expect("edited"),
+            DEFAULT_TOML,
+            "back to the default gives the same file"
+        );
+        // Out of range saves the nearest end.
+        assert_eq!(
+            with_text_size("[general]\ntext_size = 90 # mine\n", 200).expect("edited"),
+            "[general]\ntext_size = 150 # mine\n"
+        );
+        assert_eq!(
+            with_text_size("[general]\ntext_size = 90\n", 3).expect("edited"),
+            "[general]\ntext_size = 70\n"
+        );
+        // A file from before the setting: the key goes under the header, or the table at the end.
+        assert_eq!(
+            with_text_size("# mine\n[general]\nbackground_opacity = 40\n", 120).expect("edited"),
+            "# mine\n[general]\ntext_size = 120\nbackground_opacity = 40\n"
+        );
+        assert_eq!(
+            with_text_size("[widgets.fuel]\nx = 1\n", 85).expect("edited"),
+            "[widgets.fuel]\nx = 1\n\n[general]\ntext_size = 85\n"
+        );
+        assert_eq!(
+            with_text_size("", 85).expect("edited"),
+            "[general]\ntext_size = 85\n"
+        );
+        // The background opacity's save leaves the text size, and the other way round.
+        let both = with_background_opacity(&edited, 30).expect("edited");
+        let config = Config::parse(&both).expect("parses");
+        assert_eq!(
+            (config.general.background_opacity, config.general.text_size),
+            (30, 130)
+        );
+        assert!(matches!(
+            with_text_size("general = { font = \"Arial\" }\n", 110),
+            Err(ConfigError::Unplaceable)
+        ));
+        assert!(matches!(
+            with_text_size("[general\n", 110),
+            Err(ConfigError::Parse(_))
+        ));
+    }
+
+    #[test]
+    fn saved_text_size_replaces_the_file() {
+        let dir = std::env::temp_dir().join(format!("pitot-text-size-{}", std::process::id()));
+        fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("config.toml");
+        fs::write(&path, DEFAULT_TOML).expect("write");
+        save_text_size(&path, 140).expect("saved");
+        let config = load_or_create(&path).expect("loads");
+        assert_eq!(config.general.text_size, 140);
+        assert_eq!(
+            widget(&config, "relative").width,
+            Some(460),
+            "the widgets' boxes stay"
+        );
+        assert!(!path.with_extension("toml.tmp").exists());
+        fs::remove_dir_all(&dir).expect("cleans up");
     }
 
     #[test]

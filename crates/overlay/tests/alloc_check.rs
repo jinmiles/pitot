@@ -1,6 +1,6 @@
 //! The data thread and the render thread's view do not allocate per tick, live or while a capture plays during
-//! a replay, and widgets do not allocate per update or draw, also after being resized. Run with
-//! `--features alloc-check`.
+//! a replay, and widgets do not allocate per update or draw, also after being resized or laid out at another text
+//! size. Run with `--features alloc-check`.
 #![cfg(all(windows, feature = "alloc-check"))]
 
 use std::alloc::{GlobalAlloc, Layout, System};
@@ -13,7 +13,7 @@ use pitot_irsdk::capture::test_capture::{Item, build};
 use pitot_irsdk::layout::{VarHeader, VarType};
 use pitot_irsdk::live::{ReaderConfig, SdkNames};
 use pitot_irsdk::publish::{Publisher, PublisherConfig};
-use pitot_overlay::config::Config;
+use pitot_overlay::config::{self, Config};
 use pitot_overlay::pipeline::{Pipeline, RecordingConfig, Source, View};
 use pitot_overlay::platform::{OverlayWindow, ScreenRect};
 use pitot_overlay::render::{Layer, Renderer, WindowTarget};
@@ -1414,7 +1414,7 @@ fn every_widget_and_the_histories_do_not_allocate_per_update() {
     impl Drawing {
         fn new(widgets: &AllWidgets) -> Option<Self> {
             let unavailable = |e: &dyn std::fmt::Display| eprintln!("widgets not drawn: {e}");
-            let renderer = Renderer::new().inspect_err(|e| unavailable(e)).ok()?;
+            let renderer = Renderer::new(1.0).inspect_err(|e| unavailable(e)).ok()?;
             // No size and never committed: nothing shows.
             let window = OverlayWindow::create(ScreenRect::default())
                 .inspect_err(|e| unavailable(e))
@@ -1452,12 +1452,32 @@ fn every_widget_and_the_histories_do_not_allocate_per_update() {
             }
         }
 
+        /// The text at `scale`, as the Pitot window's slider sets it, with each layer of a widget that scales with
+        /// the text sized to its box on screen: its size in widget pixels at the scale.
+        fn set_text_scale(&mut self, widgets: &AllWidgets, scale: f32) {
+            self.renderer.set_text_scale(scale).expect("text made");
+            for (layers, widget) in self.layers.iter_mut().zip(widgets.widgets()) {
+                let scale = if widget.scales_with_text() {
+                    scale
+                } else {
+                    1.0
+                };
+                let side = |v: u32| (v as f32 * scale).round() as u32;
+                for (layer, spec) in layers.iter_mut().zip(widget.layers()) {
+                    self.renderer
+                        .resize_layer(layer, side(spec.width), side(spec.height))
+                        .expect("resized");
+                }
+            }
+        }
+
         /// Every layer of every widget, whole.
         fn draw(&mut self, widgets: &AllWidgets) {
             for (layers, widget) in self.layers.iter().zip(widgets.widgets()) {
+                let scaled = widget.scales_with_text();
                 for (index, layer) in layers.iter().enumerate() {
                     self.renderer
-                        .draw(layer, None, |canvas| widget.draw(index, canvas))
+                        .draw(layer, None, scaled, |canvas| widget.draw(index, canvas))
                         .expect("drawn");
                 }
             }
@@ -1615,6 +1635,36 @@ fn every_widget_and_the_histories_do_not_allocate_per_update() {
             ALLOCATIONS.load(Ordering::Relaxed),
             0,
             "allocations at the {name} size"
+        );
+    }
+
+    // At either end of `[general] text_size`, as the slider sets it: the widgets laid out in their boxes as made, in
+    // widget pixels, with the text and the atlas made at the new size. After a short warm-up (new text layouts at
+    // the new size), neither updates nor draws allocate.
+    for percent in [config::MAX_TEXT_SIZE, config::MIN_TEXT_SIZE] {
+        let scale = config::text_scale(percent);
+        let inside = |side: u32| (side as f32 / scale).ceil() as u32;
+        widgets.resize(|_, made| (inside(made.0), inside(made.1)));
+        if let Some(drawing) = drawing.as_mut() {
+            drawing.set_text_scale(&widgets, scale);
+        }
+        for _ in 0..40 {
+            n += 1;
+            cycle(n, &mut view, &mut widgets);
+            draw(&mut drawing, &widgets);
+        }
+        ALLOCATIONS.store(0, Ordering::Relaxed);
+        COUNTING.store(true, Ordering::Relaxed);
+        for _ in 0..200 {
+            n += 1;
+            cycle(n, &mut view, &mut widgets);
+            draw(&mut drawing, &widgets);
+        }
+        COUNTING.store(false, Ordering::Relaxed);
+        assert_eq!(
+            ALLOCATIONS.load(Ordering::Relaxed),
+            0,
+            "allocations at a text size of {percent}%"
         );
     }
     drop(pipeline);

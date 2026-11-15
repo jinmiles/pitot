@@ -35,8 +35,14 @@ const FRAME_TEXT: f32 = 14.0;
 const ROW_TEXT: f32 = 15.0;
 /// Height of the badges and the rating and license boxes in a row.
 const BADGE_HEIGHT: f32 = 56.0 / 3.0;
-/// One car on each side of the player, and room for the name between the left and right columns.
-const MIN_SIZE: (u32, u32) = (400, 167);
+/// One car on each side of the player, and room for the name between the left and right columns once the rating
+/// and license boxes are left out.
+const MIN_SIZE: (u32, u32) = (300, 167);
+/// From this width the rows show the rating and license boxes; narrower, the name keeps their room. A large text
+/// size makes the widget narrower in widget pixels.
+const BOXES_WIDTH: f32 = 400.0;
+/// From this width the footer shows the time of day, which a narrower one has no room for beside the session.
+const TIME_OF_DAY_WIDTH: f32 = 380.0;
 /// Lap time used when neither the session nor the class gives one.
 const FALLBACK_LAP: f32 = 90.0;
 
@@ -526,13 +532,15 @@ impl RelativeWidget {
         } else {
             canvas.text("Lap", cell(10.0, 30.0), size * 0.85, Align::Left, dim);
             canvas.text(f.lap.as_str(), cell(40.0, 30.0), size, Align::Left, white);
-            canvas.text(
-                f.time_of_day.as_str(),
-                cell(w / 2.0 - 60.0, 60.0),
-                size,
-                Align::Right,
-                white,
-            );
+            if w >= TIME_OF_DAY_WIDTH {
+                canvas.text(
+                    f.time_of_day.as_str(),
+                    cell(w / 2.0 - 60.0, 60.0),
+                    size,
+                    Align::Right,
+                    white,
+                );
+            }
             canvas.text(
                 f.session.as_str(),
                 cell(w - 220.0, 90.0),
@@ -546,6 +554,53 @@ impl RelativeWidget {
                 size,
                 Align::Right,
                 white,
+            );
+        }
+    }
+
+    /// A row's iRating box at `rating_x` and license box at `license_x`.
+    fn draw_boxes(
+        &self,
+        canvas: &mut Canvas<'_>,
+        row: &Row,
+        (rating_x, license_x): (f32, f32),
+        y: f32,
+        alpha: f32,
+    ) {
+        let row_h = self.row_height();
+        let small = ROW_TEXT * 0.78;
+        let badge_y = y + (row_h - BADGE_HEIGHT) / 2.0;
+        let cell = |x: f32, width: f32| Rect::new(x, y, width, row_h);
+        canvas.fill(
+            Rect::new(rating_x + 2.0, badge_y, 40.0, BADGE_HEIGHT),
+            Color::rgb(0xE8_EAED, 0.9 * alpha),
+        );
+        canvas.text(
+            row.rating.as_str(),
+            cell(rating_x + 2.0, 40.0),
+            small,
+            Align::Center,
+            Color::rgb(BACKGROUND, alpha),
+        );
+        if !row.license_class.as_str().is_empty() {
+            canvas.fill(
+                Rect::new(license_x, badge_y, 40.0, BADGE_HEIGHT),
+                Color::rgb(row.license_color, 0.9 * alpha),
+            );
+            let ink = Color::rgb(0xFF_FFFF, alpha);
+            canvas.text(
+                row.license_class.as_str(),
+                cell(license_x + 3.0, 12.0),
+                small,
+                Align::Left,
+                ink,
+            );
+            canvas.text(
+                row.license_rating.as_str(),
+                cell(license_x + 14.0, 24.0),
+                small,
+                Align::Left,
+                ink,
             );
         }
     }
@@ -583,11 +638,13 @@ impl RelativeWidget {
             Align::Right,
             Color::rgb(row.class_color, alpha),
         );
-        // Right side, from the edge: gap, maker, iRating, license, then the badges.
+        // Right side, from the edge: gap, maker, iRating, license, then the badges. A narrow widget leaves out the
+        // iRating and the license.
         let gap_x = w - 58.0;
         let maker_x = gap_x - 18.0;
         let rating_x = maker_x - 44.0;
         let license_x = rating_x - 44.0;
+        let boxes = w >= BOXES_WIDTH;
         canvas.text(
             row.gap.as_str(),
             cell(gap_x, 52.0),
@@ -602,39 +659,10 @@ impl RelativeWidget {
             Align::Center,
             dim,
         );
-        canvas.fill(
-            Rect::new(rating_x + 2.0, badge_y, 40.0, BADGE_HEIGHT),
-            Color::rgb(0xE8_EAED, 0.9 * alpha),
-        );
-        canvas.text(
-            row.rating.as_str(),
-            cell(rating_x + 2.0, 40.0),
-            small,
-            Align::Center,
-            Color::rgb(BACKGROUND, alpha),
-        );
-        if !row.license_class.as_str().is_empty() {
-            canvas.fill(
-                Rect::new(license_x, badge_y, 40.0, BADGE_HEIGHT),
-                Color::rgb(row.license_color, 0.9 * alpha),
-            );
-            let ink = Color::rgb(0xFF_FFFF, alpha);
-            canvas.text(
-                row.license_class.as_str(),
-                cell(license_x + 3.0, 12.0),
-                small,
-                Align::Left,
-                ink,
-            );
-            canvas.text(
-                row.license_rating.as_str(),
-                cell(license_x + 14.0, 24.0),
-                small,
-                Align::Left,
-                ink,
-            );
+        if boxes {
+            self.draw_boxes(canvas, row, (rating_x, license_x), y, alpha);
         }
-        let mut badge_x = license_x - 4.0;
+        let mut badge_x = if boxes { license_x } else { maker_x } - 4.0;
         let mut badge =
             |canvas: &mut Canvas<'_>, label: &str, fill: u32, ink: u32, border: Option<u32>| {
                 let width = 12.0 + 8.0 * label.chars().count() as f32;

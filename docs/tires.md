@@ -12,6 +12,11 @@ The header shows the compound on the car (`PlayerTireCompound`, named and colore
 `DriverTires` as in the standings) and, when the session limits dry tire sets (`PlayerCarDryTireSetLimit` above 0),
 the sets used over the limit (`TireSetsUsed`, `1/4`).
 
+In a small box, or at a large [text size](configuration.md#text-size): a header narrower than 200 px leaves out the
+sets and the pit lap, a tire block lower than 54 px leaves out its third line (distance or pressure), and a line
+whose three numbers do not all fit their columns is left out while the temperature swatches keep their colors. At
+150 the default box is 147 x 114 widget pixels: the temperatures show, the wear numbers do not.
+
 ## Values from the last stop
 
 The sim updates wear and carcass temperatures in live telemetry only while the car is in its pit stall. In a home

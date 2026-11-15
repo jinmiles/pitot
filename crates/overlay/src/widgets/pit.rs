@@ -31,8 +31,17 @@ const MAX_ROWS: usize = 64;
 const HEAD_ROWS: usize = 2;
 /// Row height the default size is laid out for.
 const ROW_HEIGHT: u32 = 22;
-/// The head line, the columns with room for a short name, and three cars.
-const MIN_SIZE: (u32, u32) = (380, 110);
+/// The head line, the columns with room for a short name once the rejoin and pit lap columns are left out, and three
+/// cars.
+const MIN_SIZE: (u32, u32) = (260, 110);
+/// From this width the rows show where a car would rejoin (place and gap); narrower, the name keeps the room. A large
+/// text size makes the widget narrower in widget pixels.
+const REJOIN_WIDTH: f32 = 380.0;
+/// From this width the rows show the lap a car would pit on.
+const PIT_LAP_WIDTH: f32 = 300.0;
+/// From these widths the head line shows the refueling speed and the full stop's time.
+const REFUEL_WIDTH: f32 = 230.0;
+const FULL_STOP_WIDTH: f32 = 350.0;
 
 /// One car's current stint, followed with the player's fuel per lap.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -172,9 +181,10 @@ struct Columns {
     stop: f32,
     stood: f32,
     fuel: f32,
-    pit: f32,
-    place: f32,
-    gap: f32,
+    /// Left out of a narrow widget, as are the rejoin columns before it.
+    pit: Option<f32>,
+    place: Option<f32>,
+    gap: Option<f32>,
 }
 
 /// What the next stops are estimated from, for one update.
@@ -476,10 +486,13 @@ impl PitWidget {
     }
 
     fn columns(&self) -> Columns {
-        let gap = self.width as f32 - 50.0;
-        let place = gap - 24.0;
-        let pit = place - 30.0;
-        let fuel = pit - 32.0;
+        // From the right edge: the rejoin gap and place, the pit lap, then the fuel, stood, stop, and stint. Each
+        // value ends 4 px before what follows it, or before the edge.
+        let w = self.width as f32;
+        let gap = (w >= REJOIN_WIDTH).then_some(w - 50.0);
+        let place = gap.map(|gap| gap - 24.0);
+        let pit = (w >= PIT_LAP_WIDTH).then(|| place.map_or(w - 32.0, |place| place - 30.0));
+        let fuel = pit.map_or(w - 34.0, |pit| pit - 32.0);
         let stood = fuel - 38.0;
         let stop = stood - 38.0;
         let stint = stop - 30.0;
@@ -511,36 +524,43 @@ impl PitWidget {
             white,
         );
         canvas.text("s", cell(106.0, 10.0, 0.0), label, Align::Left, dim);
-        canvas.text("Refuel", cell(124.0, 44.0, 0.0), label, Align::Left, dim);
-        // Dim until measured at a stop of the player's: the default is from another car.
-        let rate = if h.rate_measured { white } else { dim };
-        canvas.text(
-            h.rate.as_str(),
-            cell(166.0, 32.0, 0.0),
-            size,
-            Align::Right,
-            rate,
-        );
-        canvas.text("L/s", cell(200.0, 24.0, 0.0), label, Align::Left, dim);
-        canvas.text("Full stop", cell(238.0, 60.0, 0.0), label, Align::Left, dim);
-        canvas.text(
-            h.full.as_str(),
-            cell(296.0, 36.0, 0.0),
-            size,
-            Align::Right,
-            white,
-        );
-        canvas.text("s", cell(334.0, 10.0, 0.0), label, Align::Left, dim);
+        let w = self.width as f32;
+        if w >= REFUEL_WIDTH {
+            canvas.text("Refuel", cell(124.0, 44.0, 0.0), label, Align::Left, dim);
+            // Dim until measured at a stop of the player's: the default is from another car.
+            let rate = if h.rate_measured { white } else { dim };
+            canvas.text(
+                h.rate.as_str(),
+                cell(166.0, 32.0, 0.0),
+                size,
+                Align::Right,
+                rate,
+            );
+            canvas.text("L/s", cell(200.0, 24.0, 0.0), label, Align::Left, dim);
+        }
+        if w >= FULL_STOP_WIDTH {
+            canvas.text("Full stop", cell(238.0, 60.0, 0.0), label, Align::Left, dim);
+            canvas.text(
+                h.full.as_str(),
+                cell(296.0, 36.0, 0.0),
+                size,
+                Align::Right,
+                white,
+            );
+            canvas.text("s", cell(334.0, 10.0, 0.0), label, Align::Left, dim);
+        }
         let c = self.columns();
         for (x, width, name) in [
-            (c.stint, 28.0, "Stint"),
-            (c.stop, 36.0, "Stop"),
-            (c.stood, 36.0, "Stood"),
-            (c.fuel, 30.0, "Fuel"),
+            (Some(c.stint), 28.0, "Stint"),
+            (Some(c.stop), 36.0, "Stop"),
+            (Some(c.stood), 36.0, "Stood"),
+            (Some(c.fuel), 30.0, "Fuel"),
             (c.pit, 28.0, "Pit"),
             (c.place, 70.0, "Rejoin"),
         ] {
-            canvas.text(name, cell(x, width, 1.0), label, Align::Right, dim);
+            if let Some(x) = x {
+                canvas.text(name, cell(x, width, 1.0), label, Align::Right, dim);
+            }
         }
     }
 
@@ -588,15 +608,17 @@ impl PitWidget {
             Color::rgb(FUEL, alpha)
         };
         for (x, width, value, color) in [
-            (c.stint, 28.0, &row.stint, dim),
-            (c.stop, 36.0, &row.stop, stop_color),
-            (c.stood, 36.0, &row.stood, text),
-            (c.fuel, 30.0, &row.fuel, fuel_color),
+            (Some(c.stint), 28.0, &row.stint, dim),
+            (Some(c.stop), 36.0, &row.stop, stop_color),
+            (Some(c.stood), 36.0, &row.stood, text),
+            (Some(c.fuel), 30.0, &row.fuel, fuel_color),
             (c.pit, 28.0, &row.pit, text),
             (c.place, 22.0, &row.rejoin_place, text),
             (c.gap, 46.0, &row.rejoin_gap, text),
         ] {
-            canvas.text(value.as_str(), cell(x, width), size, Align::Right, color);
+            if let Some(x) = x {
+                canvas.text(value.as_str(), cell(x, width), size, Align::Right, color);
+            }
         }
     }
 }

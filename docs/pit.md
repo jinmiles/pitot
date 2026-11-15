@@ -16,6 +16,11 @@ default; the standing time is measured to about one update.
 Pit and Rejoin are blank outside races, until the player's fuel use and the lane loss are known, while the car is
 on pit road, and when its fuel lasts to the end.
 
+A box narrower than 380 px leaves out Rejoin, and one narrower than 300 px Pit too, so the names keep room; the
+line above leaves out the full stop below 350 px and the refueling speed below 230 px. At a
+[text size](configuration.md#text-size) of 150 the default box is 267 x 187 widget pixels: Stint, Stop, Stood, and
+Fuel.
+
 The sim does not publish other cars' fuel or what their crews do. It does publish where every car is
 (`CarIdxLapDistPct`), whether it is on pit road (`CarIdxOnPitRoad`), and whether it is in its pit stall
 (`CarIdxTrackSurface`). Everything here follows from those.

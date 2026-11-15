@@ -3,7 +3,9 @@
 Shows the three cars nearest on track ahead of the player, the player, and the three nearest behind, at 10 Hz by
 default. A taller widget shows more cars, the same number on each side: rows are 33⅓ px, so the default 300 px
 holds the header, seven cars, and the footer, and every 67 px more adds a car on each side. Rows share the height
-left over; text keeps its size.
+left over; text keeps its size. A box narrower than 400 px leaves out the iRating and license boxes, so the name
+keeps their room, and one narrower than 380 px leaves the time of day out of the footer. Sizes are in widget pixels:
+at a [text size](configuration.md#text-size) of 150 the default box is 307 x 200 of them, one car on each side.
 
 - **Order**: cars are placed by lap distance, normalized to half a lap either way, so cars across the start line
   land on the correct side.

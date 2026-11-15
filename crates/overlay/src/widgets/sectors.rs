@@ -26,8 +26,13 @@ const MAX_ROW_HEIGHT: f32 = 24.0;
 const MIN_ROW_HEIGHT: f32 = 16.0;
 const TEXT_SIZE: f32 = 13.0;
 const LABEL_SIZE: f32 = 11.0;
-/// Five value columns, and the header with six sectors' rows at their smallest.
-const MIN_SIZE: (u32, u32) = (340, 120);
+/// Four value columns (without the car behind), and the header with six sectors' rows at their smallest.
+const MIN_SIZE: (u32, u32) = (260, 120);
+/// From this width the fifth column shows, the car behind. A large text size makes the widget narrower in widget
+/// pixels.
+const FIVE_COLUMNS_WIDTH: f32 = 340.0;
+/// The narrowest value column whose header has room for the car's number beside its name.
+const NUMBERS_COLUMN: f32 = 64.0;
 /// `CarIdxTrackSurface` value for a car that is not in the world.
 const NOT_IN_WORLD: i32 = -1;
 /// How far apart in time two passes of a sector may be to count as next to each other, while the player has no
@@ -253,15 +258,19 @@ struct Columns {
     number: f32,
     first: f32,
     width: f32,
+    /// Value columns shown: five, or four without the car behind in a narrow widget.
+    count: usize,
 }
 
 impl Columns {
     fn for_width(w: f32) -> Self {
         let first = 30.0;
+        let count = if w >= FIVE_COLUMNS_WIDTH { 5 } else { 4 };
         Self {
             number: 6.0,
             first,
-            width: ((w - first - 6.0) / 5.0).max(0.0),
+            width: ((w - first - 6.0) / count as f32).max(0.0),
+            count,
         }
     }
 
@@ -556,9 +565,17 @@ impl Widget for SectorsWidget {
         label(canvas, 1, "Best", Align::Right);
         label(canvas, 2, "Class", Align::Right);
         label(canvas, 3, "Ahead", Align::Left);
-        label(canvas, 4, "Behind", Align::Left);
-        label(canvas, 3, self.header.ahead.as_str(), Align::Right);
-        label(canvas, 4, self.header.behind.as_str(), Align::Right);
+        let behind = cols.count > 4;
+        if behind {
+            label(canvas, 4, "Behind", Align::Left);
+        }
+        // The cars' numbers beside the names, where a column has room for both.
+        if cols.width >= NUMBERS_COLUMN {
+            label(canvas, 3, self.header.ahead.as_str(), Align::Right);
+            if behind {
+                label(canvas, 4, self.header.behind.as_str(), Align::Right);
+            }
+        }
         canvas.fill(
             Rect::new(0.0, HEADER_HEIGHT - 1.0, w, 1.0),
             Color::rgb(DIM, 0.3),
@@ -613,7 +630,7 @@ impl Widget for SectorsWidget {
                     Color::rgb(WHITE, alpha),
                 );
             }
-            for (k, gap) in [(3, &row.ahead), (4, &row.behind)] {
+            for (k, gap) in [(3, &row.ahead), (4, &row.behind)].into_iter().take(cols.count - 3) {
                 let color = match gap.sign {
                     -1 => GREEN,
                     1 => RED,

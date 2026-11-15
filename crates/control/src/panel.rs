@@ -1,5 +1,5 @@
-//! What the window shows and what clicks do: the overlay's switches, the background opacity slider, one switch
-//! per widget, and Quit.
+//! What the window shows and what clicks do: the overlay's switches, the background opacity and text size
+//! sliders, one switch per widget, and Quit.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -16,7 +16,7 @@ use pitot_overlay::platform::{self, ControlEvent, ControlLink, OverlayCommand};
 use crate::model::{self, Overlay};
 use crate::style;
 
-/// How the background opacity slider is being moved.
+/// How a slider is being moved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Adjusting {
     /// Dragged with the left button.
@@ -25,17 +25,94 @@ enum Adjusting {
     Keys,
 }
 
+/// A setting of the Appearance section, each with its own slider.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Setting {
+    /// `[general] background_opacity`.
+    Opacity,
+    /// `[general] text_size`.
+    TextSize,
+}
+
+impl Setting {
+    const ALL: [Self; 2] = [Self::Opacity, Self::TextSize];
+
+    fn range(self) -> model::Range {
+        match self {
+            Self::Opacity => model::OPACITY,
+            Self::TextSize => model::TEXT_SIZE,
+        }
+    }
+
+    fn id(self) -> &'static str {
+        match self {
+            Self::Opacity => "background-opacity",
+            Self::TextSize => "text-size",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Opacity => "Background opacity",
+            Self::TextSize => "Text size",
+        }
+    }
+
+    fn detail(self) -> &'static str {
+        match self {
+            Self::Opacity => "Widget backgrounds only; text and graphs stay as they are",
+            Self::TextSize => "Widgets keep their size, so larger text fits fewer rows",
+        }
+    }
+
+    fn in_config(self, config: &config::Config) -> u8 {
+        match self {
+            Self::Opacity => config.general.background_opacity,
+            Self::TextSize => config.general.text_size,
+        }
+    }
+
+    /// Shows `value` on the widgets without saving it.
+    fn preview(self, value: u8) -> OverlayCommand {
+        match self {
+            Self::Opacity => OverlayCommand::BackgroundPreview(value),
+            Self::TextSize => OverlayCommand::TextSizePreview(value),
+        }
+    }
+
+    /// Tells the overlay what the file holds.
+    fn saved(self, value: u8) -> OverlayCommand {
+        match self {
+            Self::Opacity => OverlayCommand::BackgroundSaved(value),
+            Self::TextSize => OverlayCommand::TextSizeSaved(value),
+        }
+    }
+
+    /// Writes `value` into the file at `path`, in place.
+    fn save(self, path: &std::path::Path, value: u8) -> Result<(), config::ConfigError> {
+        match self {
+            Self::Opacity => config::save_background_opacity(path, value),
+            Self::TextSize => config::save_text_size(path, value),
+        }
+    }
+}
+
+/// A percent slider: its value as shown, how it moves, and where its track is.
+struct Slider {
+    value: u8,
+    /// While it moves, how; the file still holds the value from before.
+    adjusting: Option<Adjusting>,
+    /// The track where it was last laid out, to turn the pointer's position into a value.
+    track: Rc<Cell<Bounds<Pixels>>>,
+    focus: FocusHandle,
+}
+
 pub struct Panel {
     overlay: Overlay,
     /// Per widget of [`model::widgets`], whether it is enabled in `config.toml`.
     enabled: Vec<bool>,
-    /// `[general] background_opacity` as the slider shows it, in percent.
-    opacity: u8,
-    /// While the slider moves, how; the file still holds the value from before.
-    adjusting: Option<Adjusting>,
-    /// The slider's track where it was last laid out, to turn the pointer's position into a percent.
-    track: Rc<Cell<Bounds<Pixels>>>,
-    slider_focus: FocusHandle,
+    /// The sliders of [`Setting::ALL`], in its order.
+    sliders: [Slider; 2],
     /// The last problem, such as a configuration file that does not parse.
     note: Option<SharedString>,
     _activation: Subscription,
@@ -53,7 +130,9 @@ impl Panel {
                 cx.notify();
             } else {
                 // The button may come up in another window, or a held key with another window focused.
-                panel.finish_opacity(cx);
+                for setting in Setting::ALL {
+                    panel.finish(setting, cx);
+                }
             }
         });
         let overlay = if platform::send_to_overlay(OverlayCommand::Hello) {
@@ -65,13 +144,18 @@ impl Panel {
         } else {
             Overlay::NotRunning
         };
-        let mut panel = Self {
-            overlay,
-            enabled: model::enabled(&config::Config::default()),
-            opacity: config::DEFAULT_BACKGROUND_OPACITY,
+        let defaults = config::Config::default();
+        let slider = |setting: Setting, cx: &mut Context<Self>| Slider {
+            value: setting.in_config(&defaults),
             adjusting: None,
             track: Rc::new(Cell::new(Bounds::default())),
-            slider_focus: cx.focus_handle(),
+            focus: cx.focus_handle(),
+        };
+        let sliders = Setting::ALL.map(|setting| slider(setting, cx));
+        let mut panel = Self {
+            overlay,
+            enabled: model::enabled(&defaults),
+            sliders,
             note: None,
             _activation: activation,
         };
@@ -88,8 +172,11 @@ impl Panel {
             Ok(config) => {
                 self.enabled = model::enabled(&config);
                 // A moving slider keeps its own value until it is saved.
-                if self.adjusting.is_none() {
-                    self.opacity = config.general.background_opacity;
+                for setting in Setting::ALL {
+                    let slider = self.slider_mut(setting);
+                    if slider.adjusting.is_none() {
+                        slider.value = setting.in_config(&config);
+                    }
                 }
                 self.note = None;
             }
@@ -157,65 +244,83 @@ impl Panel {
         cx.notify();
     }
 
-    /// Shows `percent` on the slider and on the widgets, without saving it.
-    fn preview_opacity(&mut self, percent: u8, cx: &mut Context<Self>) {
-        if percent == self.opacity {
+    fn slider(&self, setting: Setting) -> &Slider {
+        &self.sliders[setting as usize]
+    }
+
+    fn slider_mut(&mut self, setting: Setting) -> &mut Slider {
+        &mut self.sliders[setting as usize]
+    }
+
+    /// Shows `value` on the slider and on the widgets, without saving it.
+    fn preview(&mut self, setting: Setting, value: u8, cx: &mut Context<Self>) {
+        let slider = self.slider_mut(setting);
+        if value == slider.value {
             return;
         }
-        self.opacity = percent;
+        slider.value = value;
         // Without an overlay there is nothing to show it on; the value is saved when the slider stops.
-        let _ = platform::send_to_overlay(OverlayCommand::BackgroundPreview(percent));
+        let _ = platform::send_to_overlay(setting.preview(value));
         cx.notify();
     }
 
-    fn start_drag(&mut self, x: Pixels, window: &mut Window, cx: &mut Context<Self>) {
-        window.focus(&self.slider_focus);
-        self.adjusting = Some(Adjusting::Mouse);
-        self.drag_to(x, cx);
+    fn start_drag(
+        &mut self,
+        setting: Setting,
+        x: Pixels,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let slider = self.slider_mut(setting);
+        window.focus(&slider.focus);
+        slider.adjusting = Some(Adjusting::Mouse);
+        self.drag_to(setting, x, cx);
         cx.notify();
     }
 
-    fn drag_to(&mut self, x: Pixels, cx: &mut Context<Self>) {
-        let track = self.track.get();
-        let percent = model::percent_at(
+    fn drag_to(&mut self, setting: Setting, x: Pixels, cx: &mut Context<Self>) {
+        let track = self.slider(setting).track.get();
+        let value = setting.range().value_at(
             f32::from(x),
             f32::from(track.origin.x),
             f32::from(track.size.width),
         );
-        if let Some(percent) = percent {
-            self.preview_opacity(percent, cx);
+        if let Some(value) = value {
+            self.preview(setting, value, cx);
         }
     }
 
-    fn step_opacity(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
+    fn step(&mut self, setting: Setting, event: &KeyDownEvent, cx: &mut Context<Self>) {
         let keys = &event.keystroke;
-        let Some(percent) = model::step_percent(self.opacity, &keys.key, keys.modifiers.shift)
+        let slider = self.slider_mut(setting);
+        let Some(value) = setting
+            .range()
+            .step(slider.value, &keys.key, keys.modifiers.shift)
         else {
             return;
         };
-        self.adjusting.get_or_insert(Adjusting::Keys);
-        self.preview_opacity(percent, cx);
+        slider.adjusting.get_or_insert(Adjusting::Keys);
+        self.preview(setting, value, cx);
         cx.stop_propagation();
     }
 
-    /// Ends a move of the slider: saves its value into `config.toml` and tells the overlay what the file now holds.
-    fn finish_opacity(&mut self, cx: &mut Context<Self>) {
-        if self.adjusting.take().is_none() {
+    /// Ends a move of a slider: saves its value into `config.toml` and tells the overlay what the file now holds.
+    fn finish(&mut self, setting: Setting, cx: &mut Context<Self>) {
+        let slider = self.slider_mut(setting);
+        if slider.adjusting.take().is_none() {
             return;
         }
-        let percent = self.opacity;
+        let value = slider.value;
         let saved = config::config_file()
             .ok_or_else(|| "No APPDATA folder: the configuration cannot be found.".to_owned())
-            .and_then(|path| {
-                config::save_background_opacity(&path, percent).map_err(|e| e.to_string())
-            });
+            .and_then(|path| setting.save(&path, value).map_err(|e| e.to_string()));
         // The file's value, which is the old one if the save failed.
         self.load_config();
         if let Err(e) = saved {
             self.note = Some(e.into());
         }
         // Also without a saved value, so the overlay goes back to what the file holds.
-        let _ = platform::send_to_overlay(OverlayCommand::BackgroundSaved(self.opacity));
+        let _ = platform::send_to_overlay(setting.saved(self.slider(setting).value));
         cx.notify();
     }
 
@@ -280,18 +385,19 @@ impl Panel {
         }
     }
 
-    /// *Background opacity*: its percent, and a slider that previews on the widgets while it moves and saves when it
-    /// stops. A click or drag sets it; with the focus, the arrow keys (Shift for 10), Page Up and Page Down, Home
-    /// and End step it.
-    fn opacity_row(&self, window: &Window, cx: &mut Context<Self>) -> Div {
-        let fraction = f32::from(self.opacity) / f32::from(config::MAX_BACKGROUND_OPACITY);
-        let focused = self.slider_focus.is_focused(window);
+    /// A setting's row: its label and percent, a line of detail, and a slider that previews on the widgets while it
+    /// moves and saves when it stops. A click or drag sets it; with the focus, the arrow keys (Shift for a page),
+    /// Page Up and Page Down, Home and End step it.
+    fn slider_row(&self, setting: Setting, window: &Window, cx: &mut Context<Self>) -> Div {
+        let state = self.slider(setting);
+        let fraction = setting.range().fraction(state.value);
+        let focused = state.focus.is_focused(window);
         let knob = style::slider_knob();
-        let track = Rc::clone(&self.track);
+        let track = Rc::clone(&state.track);
         let panel = cx.entity();
         let slider = div()
-            .id("background-opacity")
-            .track_focus(&self.slider_focus)
+            .id(setting.id())
+            .track_focus(&state.focus)
             .w_full()
             .py(px(10.0))
             // The knob stays inside the row at both ends.
@@ -299,16 +405,16 @@ impl Panel {
             .cursor_pointer()
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|panel, event: &MouseDownEvent, window, cx| {
-                    panel.start_drag(event.position.x, window, cx);
+                cx.listener(move |panel, event: &MouseDownEvent, window, cx| {
+                    panel.start_drag(setting, event.position.x, window, cx);
                 }),
             )
-            .on_key_down(cx.listener(|panel, event: &KeyDownEvent, _, cx| {
-                panel.step_opacity(event, cx);
+            .on_key_down(cx.listener(move |panel, event: &KeyDownEvent, _, cx| {
+                panel.step(setting, event, cx);
             }))
-            .on_key_up(cx.listener(|panel, _: &KeyUpEvent, _, cx| {
-                if panel.adjusting == Some(Adjusting::Keys) {
-                    panel.finish_opacity(cx);
+            .on_key_up(cx.listener(move |panel, _: &KeyUpEvent, _, cx| {
+                if panel.slider(setting).adjusting == Some(Adjusting::Keys) {
+                    panel.finish(setting, cx);
                 }
             }))
             .child(
@@ -342,7 +448,7 @@ impl Panel {
                     .child(
                         canvas(
                             move |bounds, _, _| track.set(bounds),
-                            move |_, _, window, _| follow_drag(&panel, window),
+                            move |_, _, window, _| follow_drag(&panel, setting, window),
                         )
                         .absolute()
                         .size_full(),
@@ -359,18 +465,18 @@ impl Panel {
                     .flex()
                     .items_center()
                     .justify_between()
-                    .child("Background opacity")
+                    .child(setting.label())
                     .child(
                         div()
                             .text_color(style::text_dim())
-                            .child(format!("{}%", self.opacity)),
+                            .child(format!("{}%", state.value)),
                     ),
             )
             .child(
                 div()
                     .text_size(style::small_size())
                     .text_color(style::text_dim())
-                    .child("Widget backgrounds only; text and graphs stay as they are"),
+                    .child(setting.detail()),
             )
             .child(slider)
     }
@@ -400,7 +506,7 @@ impl Panel {
 impl Render for Panel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let overlay_rows = self.overlay_rows(cx);
-        let opacity_row = self.opacity_row(window, cx);
+        let slider_rows = Setting::ALL.map(|setting| self.slider_row(setting, window, cx));
         let widget_rows = self.widget_rows(cx);
         let quit = div()
             .id("quit")
@@ -432,7 +538,7 @@ impl Render for Panel {
             .child(section("Overlay"))
             .children(overlay_rows)
             .child(section("Appearance"))
-            .child(opacity_row)
+            .children(slider_rows)
             .child(section("Widgets"))
             .children(widget_rows)
             .when_some(self.note.clone(), |panel, note| {
@@ -456,11 +562,13 @@ impl Render for Panel {
     }
 }
 
-/// While the slider is dragged, follows the pointer anywhere (the window has the mouse captured until the button
-/// comes up) and saves when the button comes up. Registered for the next frame, as the window's own listeners are.
-fn follow_drag(panel: &Entity<Panel>, window: &mut Window) {
-    let dragging =
-        |panel: &Entity<Panel>, cx: &App| panel.read(cx).adjusting == Some(Adjusting::Mouse);
+/// While `setting`'s slider is dragged, follows the pointer anywhere (the window has the mouse captured until the
+/// button comes up) and saves when the button comes up. Registered for the next frame, as the window's own
+/// listeners are.
+fn follow_drag(panel: &Entity<Panel>, setting: Setting, window: &mut Window) {
+    let dragging = move |panel: &Entity<Panel>, cx: &App| {
+        panel.read(cx).slider(setting).adjusting == Some(Adjusting::Mouse)
+    };
     let moves = panel.clone();
     window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
         if phase != DispatchPhase::Bubble || !dragging(&moves, cx) {
@@ -468,10 +576,10 @@ fn follow_drag(panel: &Entity<Panel>, window: &mut Window) {
         }
         moves.update(cx, |panel, cx| {
             if event.pressed_button == Some(MouseButton::Left) {
-                panel.drag_to(event.position.x, cx);
+                panel.drag_to(setting, event.position.x, cx);
             } else {
                 // The button came up where the window did not see it.
-                panel.finish_opacity(cx);
+                panel.finish(setting, cx);
             }
         });
     });
@@ -479,7 +587,7 @@ fn follow_drag(panel: &Entity<Panel>, window: &mut Window) {
     window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
         if phase == DispatchPhase::Bubble && event.button == MouseButton::Left && dragging(&ups, cx)
         {
-            ups.update(cx, |panel, cx| panel.finish_opacity(cx));
+            ups.update(cx, |panel, cx| panel.finish(setting, cx));
         }
     });
 }

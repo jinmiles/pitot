@@ -20,6 +20,13 @@ own executable again with `--window`.
   Page Down by 10%, Home and End to 0% and 100%; each key's release saves. Without a running overlay the slider
   only saves, and the overlay starts with that value. When the window loses the focus mid-move, the value is
   saved then.
+
+  *Text size* below it is the same kind of slider, from 70% to 150% in steps of 5 with its percent shown, for the
+  text of every widget at once, with the rows, columns, and spacing laid out from it; the widgets keep their
+  size, so larger text fits fewer rows (see [Text size](configuration.md#text-size)). While it moves, the widgets
+  are laid out at each step at once; releasing it saves `[general] text_size` in place. With the focus, the arrow
+  keys move it a step (Shift: two), Page Up and Page Down two steps, Home and End to 70% and 150%; a value between
+  steps written in the file by hand moves to the next step in the key's direction.
 - **Widgets**: one switch per widget, for every widget of the overlay's [list](widgets.md) in its order, with
   the label the list gives it (the window reads the list from `pitot-overlay`, so a new widget needs no change
   here). A switch writes that widget's `enabled` into `%APPDATA%\Pitot\config.toml`
@@ -60,9 +67,10 @@ spends nothing on it per tick or frame.
 
 - The overlay's tray icon belongs to a hidden top-level window of class `PitotTray`. The Pitot window finds it by
   class and posts it a message (`WM_APP + 2`) with a command and a value in its parameters: hello (answer with
-  the state), hide or show the widgets, start or end moving, quit, the background opacity while the slider moves
-  (a percent), and the background opacity the window just saved. The overlay handles it on its message-loop
-  thread between frames, as it handles the tray menu.
+  the state), hide or show the widgets, start or end moving, quit, the background opacity or text size while its
+  slider moves (a percent), and the background opacity or text size the window just saved. A percent out of a
+  setting's range is brought into it. The overlay handles it on its message-loop thread between frames, as it
+  handles the tray menu.
 - The Pitot window owns a message-only window of class `PitotControlLink` on a thread of its own. The overlay
   posts it the state (widgets hidden, moving) after every change and after a hello, a note after each
   configuration reload, a request to come to the front, and a close when the overlay quits.
@@ -73,6 +81,11 @@ spends nothing on it per tick or frame.
   so the overlay's reload of that write changes nothing. A slider value holds over the file's in a reload for
   two seconds after it last moved: the reload of an earlier save cannot undo a newer value, and a window that
   closed mid-move does not hold it for ever.
+- The text size slider works the same way (at most 17 messages for a drag across the track). For each new value
+  the overlay lays every widget out again in its box through `Widget::resize`, which keeps what the widget follows
+  of the session, makes the text formats and the glyph atlas again, and redraws every widget once: 7 to 14 ms in
+  all on the lab PC, of which about 3 ms is the text. Cheap enough to follow the slider at every step, so the
+  slider previews as it moves rather than only on release.
 - Each process is single-instance through a named mutex (`Local\PitotOverlay`, `Local\PitotControl`).
 
 The message-handling code of both ends is in `crates/overlay/src/platform/link.rs`, so the window's crate has no
@@ -82,7 +95,8 @@ The message-handling code of both ends is in `crates/overlay/src/platform/link.r
 
 The overlay's own work is unchanged: messages from the window arrive only when the user acts, and the overlay
 answers with one posted message. Moving the background opacity slider redraws every shown widget once per new
-value, as showing hidden widgets does; nothing is drawn while it does not move. The benchmark configurations set `start_in_tray = true`, so measurements of the
+value, as showing hidden widgets does, and moving the text size slider also lays the widgets out and makes the
+text again (above); nothing is drawn or made while a slider does not move. The benchmark configurations set `start_in_tray = true`, so measurements of the
 overlay do not include the window, which would otherwise run as a child process of the overlay.
 
 The window is built with [GPUI](https://www.gpui.rs/) (Apache-2.0), the UI framework of the Zed editor, which
