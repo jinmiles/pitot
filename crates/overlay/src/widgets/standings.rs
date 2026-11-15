@@ -203,8 +203,8 @@ impl HeaderRow {
             sof: FixedText::new(12),
             cars: FixedText::new(8),
             laps: FixedText::new(16),
-            air: FixedText::new(12),
-            track: FixedText::new(12),
+            air: FixedText::new(16),
+            track: FixedText::new(16),
             time: FixedText::new(24),
         }
     }
@@ -843,10 +843,10 @@ fn write_header(
     let mut buf = [0u8; 4];
     header.session.set(letter.encode_utf8(&mut buf));
     if let Some(air) = snap.f32(vars.air_temp, 0) {
-        let _ = write!(header.air, "Air {air:.0}\u{b0}C");
+        let _ = write!(header.air, "Air {air:.1}\u{b0}C");
     }
     if let Some(track) = snap.f32(vars.track_temp, 0) {
-        let _ = write!(header.track, "Track {track:.0}\u{b0}C");
+        let _ = write!(header.track, "Track {track:.1}\u{b0}C");
     }
     write_clock(&mut header.time, elapsed);
     let total = session
@@ -1182,8 +1182,9 @@ impl StandingsWidget {
         segment(canvas, header.cars.as_str(), 52.0, dim);
         segment(canvas, header.laps.as_str(), 84.0, white);
         if header.first {
-            segment(canvas, header.air.as_str(), 72.0, dim);
-            segment(canvas, header.track.as_str(), 86.0, dim);
+            // Room for one decimal and a minus sign (`Air -12.4°C`) before the next item.
+            segment(canvas, header.air.as_str(), 84.0, dim);
+            segment(canvas, header.track.as_str(), 98.0, dim);
             segment(canvas, header.time.as_str(), 140.0, white);
         }
     }
@@ -1758,7 +1759,8 @@ SplitTimeInfo:
         assert_eq!(header.cars.as_str(), "2/2");
         assert!(header.first);
         assert_eq!(header.session.as_str(), "P");
-        assert_eq!(header.air.as_str(), "Air 32\u{b0}C");
+        assert_eq!(header.air.as_str(), "Air 31.6\u{b0}C");
+        assert_eq!(header.track.as_str(), "Track 26.2\u{b0}C");
         assert_eq!(header.time.as_str(), "16:40/1h");
         assert!(
             header.sof.as_str().starts_with("SOF 1."),
