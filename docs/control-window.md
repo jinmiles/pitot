@@ -72,14 +72,19 @@ own: the overlay's process never starts GPUI, its executors, or its windows. Whi
 display's refresh to check whether anything needs drawing, and draws only when something changed.
 
 The overlay and the window are one executable, so the overlay's process maps the window's code without running
-it. Two things of it would still happen at the overlay's start, and neither costs anything measurable:
+it. Compared with the overlay's own executable in 0.1.3, measured on the lab PC:
 
 - DLLs: the system DLLs that only GPUI imports (`comctl32.dll` for `TaskDialogIndirect`, `dwmapi.dll`, and
   `icuuc.dll`, which also loads `icu.dll`) are delay-loaded (`crates/app/build.rs`), so they load on first use,
-  in the window's process. The overlay's process loads the same 49 modules as the overlay's own executable did
-  before (0.1.3); without the delay-loading it loaded those four more.
+  in the window's process. The overlay's process loads the same 49 modules as before; without the
+  delay-loading it loaded those four more and started about 1.4 ms later.
 - Static initializers: GPUI registers its built-in actions at process start (a few pointers in a list). Nothing
-  starts a thread: the overlay's process has the same threads as before.
+  starts a thread: the overlay's process has the same 7 threads as before, and reaches its first log line in
+  the same 14 ms after the process is created.
+- Memory: 0.15 MiB more private bytes from the start, the size of the window code's writable data, which
+  Windows commits when it maps the executable. Thread-local storage grows by 0.3 KB per thread.
+- CPU: the same within noise, 31.23 ms/s before and 31.41 ms/s after (means of six alternating 60 s runs of
+  the four reference widgets in a replay; the differences of the pairs ranged from -0.32 to +1.04 ms/s).
 
 GPUI's Windows manifest is in the executable: per-monitor DPI awareness (v2), which the overlay also sets at start,
 and version 6 of the common controls, which the overlay does not use.
