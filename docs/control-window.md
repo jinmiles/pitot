@@ -82,7 +82,9 @@ it. Compared with the overlay's own executable in 0.1.3, measured on the lab PC:
   starts a thread: the overlay's process has the same 7 threads as before, and reaches its first log line in
   the same 14 ms after the process is created.
 - Memory: 0.15 MiB more private bytes from the start, the size of the window code's writable data, which
-  Windows commits when it maps the executable. Thread-local storage grows by 0.3 KB per thread.
+  Windows commits when it maps the executable. Nearly all of it (128 KB) is one lookup table of the OpenEXR
+  decoder, which GPUI links in through the `image` crate's default formats; GPUI 0.2.2 offers no way to leave
+  them out. Thread-local storage grows by 0.3 KB per thread.
 - CPU: the same within noise, 31.23 ms/s before and 31.41 ms/s after (means of six alternating 60 s runs of
   the four reference widgets in a replay; the differences of the pairs ranged from -0.32 to +1.04 ms/s).
 
