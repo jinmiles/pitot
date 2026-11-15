@@ -1,5 +1,6 @@
 //! The data thread and the render thread's view do not allocate per tick, live or while a capture plays during
-//! a replay. Run with `--features alloc-check`.
+//! a replay, and widgets do not allocate per update or draw, also after being resized. Run with
+//! `--features alloc-check`.
 #![cfg(all(windows, feature = "alloc-check"))]
 
 use std::alloc::{GlobalAlloc, Layout, System};
@@ -14,6 +15,8 @@ use pitot_irsdk::live::{ReaderConfig, SdkNames};
 use pitot_irsdk::publish::{Publisher, PublisherConfig};
 use pitot_overlay::config::Config;
 use pitot_overlay::pipeline::{Pipeline, RecordingConfig, Source, View};
+use pitot_overlay::platform::{OverlayWindow, ScreenRect};
+use pitot_overlay::render::{Layer, Renderer, WindowTarget};
 use pitot_overlay::widgets::{MAX_LAYERS, Redraw, TiresWidget, Widget};
 
 /// Counts allocations on every thread while switched on: the data thread is internal to the pipeline.
@@ -1399,6 +1402,68 @@ const EVERY_ROW: usize = 32 + 72 * 4 * 4 + 72;
 fn every_widget_and_the_histories_do_not_allocate_per_update() {
     use pitot_overlay::widgets::AllWidgets;
 
+    /// Each widget's layers on a render device, so the check draws them too. `None` without a device (no GPU and
+    /// no software rasterizer, or no desktop composition), when only updates are checked.
+    struct Drawing {
+        renderer: Renderer,
+        layers: Vec<Vec<Layer>>,
+        _target: WindowTarget,
+        _window: OverlayWindow,
+    }
+
+    impl Drawing {
+        fn new(widgets: &AllWidgets) -> Option<Self> {
+            let unavailable = |e: &dyn std::fmt::Display| eprintln!("widgets not drawn: {e}");
+            let renderer = Renderer::new().inspect_err(|e| unavailable(e)).ok()?;
+            // No size and never committed: nothing shows.
+            let window = OverlayWindow::create(ScreenRect::default())
+                .inspect_err(|e| unavailable(e))
+                .ok()?;
+            let target = renderer
+                .attach(&window)
+                .inspect_err(|e| unavailable(e))
+                .ok()?;
+            let mut layers = Vec::new();
+            for widget in widgets.widgets() {
+                let mut own = Vec::new();
+                for spec in widget.layers().into_iter().take(MAX_LAYERS) {
+                    let layer =
+                        renderer.layer(&target, 0, 0, spec.width, spec.height, spec.scrolling);
+                    own.push(layer.inspect_err(|e| unavailable(e)).ok()?);
+                }
+                layers.push(own);
+            }
+            Some(Self {
+                renderer,
+                layers,
+                _target: target,
+                _window: window,
+            })
+        }
+
+        /// New surfaces at the widgets' sizes, as *Move widgets* makes them.
+        fn resize(&mut self, widgets: &AllWidgets) {
+            for (layers, widget) in self.layers.iter_mut().zip(widgets.widgets()) {
+                for (layer, spec) in layers.iter_mut().zip(widget.layers()) {
+                    self.renderer
+                        .resize_layer(layer, spec.width, spec.height)
+                        .expect("resized");
+                }
+            }
+        }
+
+        /// Every layer of every widget, whole.
+        fn draw(&mut self, widgets: &AllWidgets) {
+            for (layers, widget) in self.layers.iter().zip(widgets.widgets()) {
+                for (index, layer) in layers.iter().enumerate() {
+                    self.renderer
+                        .draw(layer, None, |canvas| widget.draw(index, canvas))
+                        .expect("drawn");
+                }
+            }
+        }
+    }
+
     let _turn = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let pid = std::process::id();
     let names = SdkNames::new(
@@ -1445,6 +1510,7 @@ fn every_widget_and_the_histories_do_not_allocate_per_update() {
     }
     let mut widgets = AllWidgets::new(&view);
     assert!(widgets.len() >= 10, "every widget is made");
+    let mut drawing = Drawing::new(&widgets);
 
     let mut row = [0u8; EVERY_ROW];
     fn put(row: &mut [u8; EVERY_ROW], at: usize, bytes: [u8; 4]) {
@@ -1484,11 +1550,17 @@ fn every_widget_and_the_histories_do_not_allocate_per_update() {
         view.drain_samples(|_| {});
         widgets.update(view, Instant::now(), 1)
     };
+    let draw = |drawing: &mut Option<Drawing>, widgets: &AllWidgets| {
+        if let Some(drawing) = drawing.as_mut() {
+            drawing.draw(widgets);
+        }
+    };
     let mut n = 0;
     // Warm-up: the session info, per-car storage, and the first laps of every car.
     while view.session().is_none() || n < 200 {
         assert!(Instant::now() < deadline, "session info parsed");
         cycle(n, &mut view, &mut widgets);
+        draw(&mut drawing, &widgets);
         n += 1;
     }
     let (_, laps_before) = cycle(n, &mut view, &mut widgets);
@@ -1499,6 +1571,7 @@ fn every_widget_and_the_histories_do_not_allocate_per_update() {
     for _ in 0..400 {
         n += 1;
         held = cycle(n, &mut view, &mut widgets);
+        draw(&mut drawing, &widgets);
     }
     COUNTING.store(false, Ordering::Relaxed);
     assert!(held.0 > 200, "gap samples taken: {}", held.0);
@@ -1512,5 +1585,37 @@ fn every_widget_and_the_histories_do_not_allocate_per_update() {
         0,
         "allocations across the pipeline, every widget, and the histories"
     );
+
+    // Resized as in *Move widgets*, to their smallest size and to twice the size they were made with: after a
+    // short warm-up at the new size (new text layouts for the new boxes), neither updates nor draws allocate.
+    type Pick = fn((u32, u32), (u32, u32)) -> (u32, u32);
+    let sizes: [(&str, Pick); 2] = [
+        ("smallest", |min, _| min),
+        ("twice", |_, made| (made.0 * 2, made.1 * 2)),
+    ];
+    for (name, pick) in sizes {
+        widgets.resize(pick);
+        if let Some(drawing) = drawing.as_mut() {
+            drawing.resize(&widgets);
+        }
+        for _ in 0..40 {
+            n += 1;
+            cycle(n, &mut view, &mut widgets);
+            draw(&mut drawing, &widgets);
+        }
+        ALLOCATIONS.store(0, Ordering::Relaxed);
+        COUNTING.store(true, Ordering::Relaxed);
+        for _ in 0..200 {
+            n += 1;
+            cycle(n, &mut view, &mut widgets);
+            draw(&mut drawing, &widgets);
+        }
+        COUNTING.store(false, Ordering::Relaxed);
+        assert_eq!(
+            ALLOCATIONS.load(Ordering::Relaxed),
+            0,
+            "allocations at the {name} size"
+        );
+    }
     drop(pipeline);
 }

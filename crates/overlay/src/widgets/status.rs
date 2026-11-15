@@ -11,10 +11,14 @@ use super::{Build, MAX_LAYERS, Redraw, Register, Widget};
 
 const WIDTH: u32 = 300;
 const HEIGHT: u32 = 54;
+/// The two lines, and room for the first words of the second.
+const MIN_SIZE: (u32, u32) = (160, HEIGHT);
 
 /// Shows that the overlay runs and what it receives.
 #[derive(Debug)]
 pub struct StatusWidget {
+    width: u32,
+    height: u32,
     line: String,
     next: String,
     display: Display,
@@ -31,6 +35,8 @@ impl StatusWidget {
     /// `opacity` is the background opacity, 0 to 1.
     pub fn new(opacity: f32) -> Self {
         Self {
+            width: WIDTH,
+            height: HEIGHT,
             line: String::with_capacity(96),
             next: String::with_capacity(96),
             display: Display::Disconnected,
@@ -44,13 +50,28 @@ impl Register for StatusWidget {
     type Options = NoOptions;
 
     fn build(cx: &Build<'_>, _: ()) -> Self {
-        Self::new(cx.config.opacity)
+        let mut widget = Self::new(cx.config.opacity);
+        let config = cx.config;
+        widget.resize(
+            config.width.unwrap_or(WIDTH),
+            config.height.unwrap_or(HEIGHT),
+        );
+        widget
     }
 }
 
 impl Widget for StatusWidget {
     fn size(&self) -> (u32, u32) {
-        (WIDTH, HEIGHT)
+        (self.width, self.height)
+    }
+
+    fn min_size(&self) -> (u32, u32) {
+        MIN_SIZE
+    }
+
+    fn resize(&mut self, width: u32, height: u32) {
+        self.width = width.max(MIN_SIZE.0);
+        self.height = height.max(MIN_SIZE.1);
     }
 
     fn interval(&self) -> Duration {
@@ -86,7 +107,7 @@ impl Widget for StatusWidget {
     }
 
     fn draw(&self, _layer: usize, canvas: &mut Canvas<'_>) {
-        let (w, h) = (WIDTH as f32, HEIGHT as f32);
+        let (w, h) = (self.width as f32, self.height as f32);
         canvas.fill_background(
             Rect::new(0.0, 0.0, w, h),
             Color::rgb(0x10_1418, self.opacity),

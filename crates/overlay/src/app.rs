@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use pitot_irsdk::live::{ReaderConfig, SdkNames, VarSet};
 use tracing::{debug, info, warn};
 
-use crate::config::{self, Config, WidgetConfig};
+use crate::config::{self, Config};
 use crate::pipeline::{Display, Pipeline, RecordingConfig, Source, View};
 use crate::platform::{
     self, ControlEvent, DirectoryWatch, Monitor, MoveHandle, OverlayWindow, ScreenRect, Timer,
@@ -135,10 +135,13 @@ struct Slot {
     /// The widget's name in the configuration.
     name: &'static str,
     widget: Box<dyn Widget>,
-    /// The widget's box on screen, in pixels: its size at the default text size, which other text sizes keep.
+    /// The widget's box on screen, in pixels. The text size leaves it as it is, except for a box made of text.
     size: (u32, u32),
     /// Whether the widget is laid out and drawn at the layout's text scale (see [`Widget::scales_with_text`]).
     scaled: bool,
+    /// The box is the widget's own size in widget pixels and grows with the text: its table gives no size (the
+    /// status line) and it was not resized.
+    text_box: bool,
     /// Index into `Layout::windows`.
     window: usize,
     /// Screen position of the window's (the monitor's) top-left corner.
@@ -150,6 +153,10 @@ struct Slot {
     next_due: Instant,
     /// The widget must be fully redrawn, after creation, a rebuild, or a reset.
     stale: bool,
+    /// The widget took a new size in *Move widgets*: its layers need new surfaces.
+    reshape: bool,
+    /// The drag in progress changed the widget's size, which is saved when the drag ends.
+    resized: bool,
 }
 
 /// Windows and widgets built from one configuration.
@@ -168,65 +175,55 @@ fn widget_pixels(size: u32, scale: f32) -> u32 {
     (size as f32 / scale).ceil().max(1.0) as u32
 }
 
-/// A widget made for a text scale.
-struct Made {
-    widget: Box<dyn Widget>,
-    /// Its box on screen, in pixels.
-    size: (u32, u32),
-    /// Whether it is laid out and drawn at the text scale.
-    scaled: bool,
+/// `size` widget pixels on screen at text scale `scale`, to the nearest pixel.
+fn screen_pixels(size: u32, scale: f32) -> u32 {
+    (size as f32 * scale).round().max(1.0) as u32
 }
 
-/// Makes widget `name` laid out at text scale `scale`.
-///
-/// A widget is first made as configured, which gives its box: its size at the default text size. A widget that
-/// scales with the text is then made again with that box in widget pixels. A widget whose table gives no size (the
-/// status line) has a box made of its text, which grows with the text.
-fn make_scaled(
-    name: &str,
-    config: &WidgetConfig,
-    shared: &Shared,
-    vars: &VarSet,
+/// Lays `widget` out at text scale `scale` and returns its box on screen. A box made of text (`text_box`) is the
+/// widget's own size at the scale. Any other box is `size`: the widget takes it in widget pixels through
+/// [`Widget::resize`], which keeps what it follows of the session. With `raise`, as for a configured or dragged
+/// size, the box grows to where the widget raised its size; a new text size leaves the box as it is and the
+/// widget's content that no longer fits is left out.
+fn fit(
+    widget: &mut dyn Widget,
+    text_box: bool,
+    size: (u32, u32),
     scale: f32,
-) -> Option<Made> {
-    let widget = widgets::make_widget(name, &Build { config, shared }, vars)?;
-    let size = widget.size();
-    let scaled = widget.scales_with_text();
-    if !scaled || scale == 1.0 {
-        return Some(Made {
-            widget,
-            size,
-            scaled,
-        });
+    raise: bool,
+) -> (u32, u32) {
+    if text_box {
+        let (w, h) = widget.size();
+        return (screen_pixels(w, scale), screen_pixels(h, scale));
     }
-    let mut in_widget_pixels = config.clone();
-    in_widget_pixels.width = config.width.map(|_| widget_pixels(size.0, scale));
-    in_widget_pixels.height = config.height.map(|_| widget_pixels(size.1, scale));
-    let widget = widgets::make_widget(
-        name,
-        &Build {
-            config: &in_widget_pixels,
-            shared,
-        },
-        vars,
-    )?;
+    let wanted = (widget_pixels(size.0, scale), widget_pixels(size.1, scale));
+    if widget.size() != wanted {
+        widget.resize(wanted.0, wanted.1);
+    }
     let (w, h) = widget.size();
-    let on_screen = |configured: Option<u32>, at_default: u32, own: u32| {
-        if configured.is_some() {
-            at_default
+    let raised = |side: u32, wanted: u32, got: u32| {
+        if raise && got > wanted {
+            screen_pixels(got, scale)
         } else {
-            (own as f32 * scale).round() as u32
+            side
         }
     };
-    let size = (
-        on_screen(config.width, size.0, w),
-        on_screen(config.height, size.1, h),
-    );
-    Some(Made {
-        widget,
-        size,
-        scaled,
-    })
+    (raised(size.0, wanted.0, w), raised(size.1, wanted.1, h))
+}
+
+impl Slot {
+    /// Screen pixels per widget pixel for this widget in a layout at text scale `scale`.
+    fn scale(&self, scale: f32) -> f32 {
+        if self.scaled { scale } else { 1.0 }
+    }
+
+    /// The smallest box on screen a drag may give the widget: its smallest size, at the text scale.
+    fn min_box(&self, scale: f32) -> (u32, u32) {
+        let (w, h) = self.widget.min_size();
+        let scale = self.scale(scale);
+        let up = |v: u32| (v as f32 * scale).ceil() as u32;
+        (up(w), up(h))
+    }
 }
 
 impl Layout {
@@ -250,14 +247,25 @@ impl Layout {
             if !widget_config.enabled {
                 continue;
             }
-            let Some(Made {
-                widget,
-                size,
-                scaled,
-            }) = make_scaled(name, widget_config, &shared, vars, scale)
-            else {
+            let cx = Build {
+                config: widget_config,
+                shared: &shared,
+            };
+            let Some(mut widget) = widgets::make_widget(name, &cx, vars) else {
                 continue;
             };
+            // Made as configured, a widget has its box: the configured size raised to its smallest.
+            let scaled = widget.scales_with_text();
+            let text_box =
+                scaled && widget_config.width.is_none() && widget_config.height.is_none();
+            let made = widget.size();
+            let size = fit(
+                widget.as_mut(),
+                text_box,
+                made,
+                if scaled { scale } else { 1.0 },
+                false,
+            );
             let monitor = widget_config
                 .monitor
                 .and_then(|i| order.get(i).copied())
@@ -278,6 +286,7 @@ impl Layout {
                 widget,
                 size,
                 scaled,
+                text_box,
                 window,
                 origin: (monitors[monitor].rect.x, monitors[monitor].rect.y),
                 x: widget_config.x,
@@ -285,6 +294,8 @@ impl Layout {
                 interval,
                 next_due: now,
                 stale: true,
+                reshape: false,
+                resized: false,
             });
         }
         Ok(Self {
@@ -295,26 +306,15 @@ impl Layout {
         })
     }
 
-    /// Makes the widgets again laid out at text scale `scale`, in the same windows, with the same shared trackers.
-    /// What each widget followed of the session on its own starts over. Allocates.
-    fn rescale(&mut self, config: &Config, vars: &VarSet, scale: f32) {
+    /// Lays the widgets out again at text scale `scale`, each in its box: see [`fit`]. The widgets keep what they
+    /// follow of the session; their layers take new sizes where a box changed (a box made of text). Allocates.
+    fn rescale(&mut self, scale: f32) {
         for slot in &mut self.slots {
-            let Some(widget_config) = config.widget(slot.name) else {
-                continue;
-            };
-            if let Some(made) = make_scaled(slot.name, widget_config, &self.shared, vars, scale) {
-                slot.widget = made.widget;
-                slot.size = made.size;
-                slot.scaled = made.scaled;
-            }
-            slot.stale = true;
+            let at = slot.scale(scale);
+            slot.size = fit(slot.widget.as_mut(), slot.text_box, slot.size, at, false);
+            (slot.stale, slot.reshape) = (true, true);
         }
         self.scale = scale;
-    }
-
-    /// Each slot's box on screen, to tell whether a scene's layers still fit.
-    fn sizes(&self) -> Vec<(u32, u32)> {
-        self.slots.iter().map(|s| s.size).collect()
     }
 }
 
@@ -356,8 +356,6 @@ struct Scene {
     layers: Vec<Vec<Layer>>,
     /// Per slot, each layer's position in the widget.
     offsets: Vec<Vec<(i32, i32)>>,
-    /// Per slot, the box the layers were made for.
-    sizes: Vec<(u32, u32)>,
 }
 
 impl Scene {
@@ -371,7 +369,7 @@ impl Scene {
         for slot in &layout.slots {
             let mut widget_layers = Vec::new();
             let mut widget_offsets = Vec::new();
-            let scale = if slot.scaled { layout.scale } else { 1.0 };
+            let scale = slot.scale(layout.scale);
             for spec in slot.widget.layers().into_iter().take(MAX_LAYERS) {
                 let spec = layer_in_box(spec, slot.widget.size(), slot.size, scale);
                 widget_layers.push(renderer.layer(
@@ -392,8 +390,39 @@ impl Scene {
             _targets: targets,
             layers,
             offsets,
-            sizes: layout.sizes(),
         })
+    }
+
+    /// Gives slot `id`'s layers new surfaces at the widget's new size in its box at text scale `scale`, and places
+    /// them. `false` when the widget's layers changed in number or kind, which needs the scene built again.
+    fn reshape(
+        &mut self,
+        renderer: &mut Renderer,
+        id: usize,
+        slot: &Slot,
+        scale: f32,
+    ) -> Result<bool, RenderError> {
+        let (Some(layers), Some(offsets)) = (self.layers.get_mut(id), self.offsets.get_mut(id))
+        else {
+            return Ok(true);
+        };
+        let specs = slot.widget.layers();
+        let same_kind = specs.len().min(MAX_LAYERS) == layers.len()
+            && specs
+                .iter()
+                .zip(layers.iter())
+                .all(|(spec, layer)| spec.scrolling == layer.scrolling());
+        if !same_kind {
+            return Ok(false);
+        }
+        let (widget, scale) = (slot.widget.size(), slot.scale(scale));
+        for ((layer, offset), spec) in layers.iter_mut().zip(offsets.iter_mut()).zip(specs) {
+            let spec = layer_in_box(spec, widget, slot.size, scale);
+            renderer.resize_layer(layer, spec.width, spec.height)?;
+            *offset = (spec.x, spec.y);
+            renderer.move_layer(layer, slot.x + spec.x, slot.y + spec.y)?;
+        }
+        Ok(true)
     }
 
     /// Moves slot `id`'s layers to the slot's position, without redrawing them.
@@ -434,24 +463,99 @@ impl Shown {
     }
 }
 
-/// A move handle over each widget, for dragging them while *Move widgets* is chosen.
-fn move_handles(slots: &[Slot]) -> Vec<MoveHandle> {
+/// Where slot's widget is on screen: its box.
+fn screen_rect(slot: &Slot) -> ScreenRect {
+    let (width, height) = slot.size;
+    ScreenRect {
+        x: slot.origin.0 + slot.x,
+        y: slot.origin.1 + slot.y,
+        width: i32::try_from(width).unwrap_or(i32::MAX),
+        height: i32::try_from(height).unwrap_or(i32::MAX),
+    }
+}
+
+/// A move handle over each widget, for dragging and resizing them while *Move widgets* is chosen, in a layout at
+/// text scale `scale`.
+fn move_handles(slots: &[Slot], scale: f32) -> Vec<MoveHandle> {
     slots
         .iter()
         .enumerate()
         .filter_map(|(id, slot)| {
-            let (width, height) = slot.size;
-            let rect = ScreenRect {
-                x: slot.origin.0 + slot.x,
-                y: slot.origin.1 + slot.y,
-                width: i32::try_from(width).unwrap_or(i32::MAX),
-                height: i32::try_from(height).unwrap_or(i32::MAX),
-            };
-            MoveHandle::create(id, rect)
+            MoveHandle::create(id, screen_rect(slot), slot.min_box(scale))
                 .inspect_err(|e| warn!("widgets.{} cannot be moved: {e}", slot.name))
                 .ok()
         })
         .collect()
+}
+
+/// Saves what the drag that ended changed of slot's widget: its place when it moved, its size when it was resized.
+/// A click that changed nothing writes nothing. The configuration in memory follows, so a reload sees no change.
+/// Returns whether the file was written.
+fn save_drag(config: &mut Config, slot: &mut Slot) -> bool {
+    let resized = std::mem::take(&mut slot.resized);
+    let (width, height) = slot.size;
+    let Some(widget) = config.widget_mut(slot.name) else {
+        return false;
+    };
+    let position = ((slot.x, slot.y) != (widget.x, widget.y)).then_some((slot.x, slot.y));
+    let size = resized.then_some((width, height));
+    if position.is_none() && size.is_none() {
+        return false;
+    }
+    (widget.x, widget.y) = (slot.x, slot.y);
+    if resized {
+        (widget.width, widget.height) = (Some(width), Some(height));
+    }
+    let saved = config::config_file()
+        .ok_or_else(|| "no APPDATA directory".to_owned())
+        .and_then(|path| {
+            config::save_placement(&path, slot.name, position, size).map_err(|e| e.to_string())
+        });
+    match saved {
+        Ok(()) => {
+            info!(
+                widget = slot.name,
+                x = slot.x,
+                y = slot.y,
+                width,
+                height,
+                "widget moved or resized"
+            );
+            true
+        }
+        Err(e) => {
+            warn!(
+                widget = slot.name,
+                "widget moved or resized but not saved: {e}"
+            );
+            false
+        }
+    }
+}
+
+/// Gives the layers of the slots marked to reshape their widgets' new sizes: after a drag in *Move widgets*, or a
+/// new text size. Drops the scene when a widget's layers changed in kind, so it is built again.
+fn reshape_slots(layout: &mut Layout, renderer: &mut Option<Renderer>, scene: &mut Option<Scene>) {
+    let scale = layout.scale;
+    for (id, slot) in layout.slots.iter_mut().enumerate() {
+        if !std::mem::take(&mut slot.reshape) {
+            continue;
+        }
+        slot.stale = true;
+        let rebuild = match (renderer.as_mut(), scene.as_mut()) {
+            (Some(device), Some(current)) => match current.reshape(device, id, slot, scale) {
+                Ok(placed) => !placed,
+                Err(e) => {
+                    debug!("widget not resized on screen, rebuilding the scene: {e}");
+                    true
+                }
+            },
+            _ => false,
+        };
+        if rebuild {
+            *scene = None;
+        }
+    }
 }
 
 /// Loads the configuration file, falling back to defaults (and saying why) when it cannot be used.
@@ -572,7 +676,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                     layout.slots.iter_mut().for_each(|s| s.stale = true);
                 }
                 TrayCommand::SetMoving(on) if on != handles.is_some() => {
-                    handles = on.then(|| move_handles(&layout.slots));
+                    handles = on.then(|| move_handles(&layout.slots, layout.scale));
                     tray.set_moving(on);
                     if on && hidden {
                         hidden = false;
@@ -616,32 +720,38 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             };
             slot.x = moved.x - slot.origin.0;
             slot.y = moved.y - slot.origin.1;
-            if let (Some(device), Some(current)) = (renderer.as_mut(), scene.as_mut())
+            let size = (
+                u32::try_from(moved.width).unwrap_or(0),
+                u32::try_from(moved.height).unwrap_or(0),
+            );
+            if size != slot.size {
+                // A resized widget has a box of its own from now on, at any text size. New surfaces once per batch
+                // of moves, below.
+                slot.text_box = false;
+                let scale = slot.scale(layout.scale);
+                slot.size = fit(slot.widget.as_mut(), false, size, scale, true);
+                (slot.reshape, slot.resized) = (true, true);
+            } else if let (Some(device), Some(current)) = (renderer.as_mut(), scene.as_mut())
                 && let Err(e) = current.place(device, moved.id, slot)
             {
                 debug!("widget not moved on screen, rebuilding the scene: {e}");
                 scene = None;
             }
             if moved.done {
-                if let Some(widget) = config.widget_mut(slot.name) {
-                    (widget.x, widget.y) = (slot.x, slot.y);
+                // The watch sees the write; the new stamp keeps it from reloading.
+                if save_drag(&mut config, slot) {
+                    stamp = config_stamp();
                 }
-                let saved = config::config_file()
-                    .ok_or_else(|| "no APPDATA directory".to_owned())
-                    .and_then(|path| {
-                        config::save_position(&path, slot.name, slot.x, slot.y)
-                            .map_err(|e| e.to_string())
-                    });
-                match saved {
-                    // The watch sees the write; the new stamp keeps it from reloading.
-                    Ok(()) => {
-                        stamp = config_stamp();
-                        info!(widget = slot.name, x = slot.x, y = slot.y, "widget moved");
-                    }
-                    Err(e) => warn!(widget = slot.name, "widget moved but not saved: {e}"),
+                // The handle follows a widget that took another size than the one dragged to.
+                let shown = screen_rect(slot);
+                if let Some(handle) = handles.iter().flatten().find(|h| h.id() == moved.id)
+                    && (shown.width, shown.height) != (moved.width, moved.height)
+                {
+                    handle.place(shown);
                 }
             }
         }
+        reshape_slots(&mut layout, &mut renderer, &mut scene);
         if reload_at.is_some_and(|at| Instant::now() >= at) {
             reload_at = None;
             if let Some(path) = config::config_file() {
@@ -673,7 +783,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                         config = fresh;
                         // New windows go above the old handles, so the handles are made again.
                         if moving {
-                            handles = Some(move_handles(&layout.slots));
+                            handles = Some(move_handles(&layout.slots, layout.scale));
                         }
                         info!("configuration reloaded");
                         platform::notify_control(ControlEvent::ConfigChanged);
@@ -681,6 +791,33 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                     Err(e) => warn!("keeping the previous configuration: {e}"),
                 }
             }
+        }
+        // A changed text size, from the slider or the file, lays the widgets out again in their boxes and makes the
+        // text formats and the atlas again. The windows stay, and so do the layers but those of a box made of text.
+        let text_size = previews.text_size(&config);
+        let scale = config::text_scale(text_size);
+        if layout.scale != scale {
+            let started = Instant::now();
+            layout.rescale(scale);
+            let laid_out = started.elapsed();
+            if let Some(device) = renderer.as_mut()
+                && let Err(e) = device.set_text_scale(scale)
+            {
+                warn!("text not made at the new size, rebuilding the device: {e}");
+                scene = None;
+                renderer = None;
+            }
+            rescaled = Some(Rescaled {
+                text_size,
+                started,
+                laid_out,
+                text: started.elapsed() - laid_out,
+            });
+            // The smallest box a drag may give a widget changes with the text.
+            if handles.is_some() {
+                handles = Some(move_handles(&layout.slots, scale));
+            }
+            reshape_slots(&mut layout, &mut renderer, &mut scene);
         }
         let changes = view.poll();
         if changes.connection {
@@ -699,34 +836,6 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
             layout.shared.reset();
         }
-        // A changed text size lays the widgets out again in their boxes and makes the text formats and the atlas
-        // again. The windows and layers stay unless a widget's box changes with its text (the status line).
-        let text_size = previews.text_size(&config);
-        let scale = config::text_scale(text_size);
-        if layout.scale != scale {
-            let started = Instant::now();
-            layout.rescale(&config, view.var_set(), scale);
-            if scene.as_ref().is_some_and(|s| s.sizes != layout.sizes()) {
-                scene = None;
-                if let Some(moving) = handles.as_mut() {
-                    *moving = move_handles(&layout.slots);
-                }
-            }
-            let laid_out = started.elapsed();
-            if let Some(device) = renderer.as_mut()
-                && let Err(e) = device.set_text_scale(scale)
-            {
-                warn!("text not made at the new size, rebuilding the device: {e}");
-                scene = None;
-                renderer = None;
-            }
-            rescaled = Some(Rescaled {
-                text_size,
-                started,
-                laid_out,
-                text: started.elapsed() - laid_out,
-            });
-        }
         if renderer.is_none() {
             renderer = Renderer::new(layout.scale)
                 .inspect(|_| info!("render device rebuilt"))
@@ -740,6 +849,20 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 .inspect_err(|e| debug!("scene not built: {e}"))
                 .ok();
             layout.slots.iter_mut().for_each(|s| s.stale = true);
+        }
+        // A configuration built again at another text size, or a device made before the size changed.
+        if let Some(device) = renderer.as_mut()
+            && device.text_scale() != layout.scale
+        {
+            match device.set_text_scale(layout.scale) {
+                Ok(_) => layout.slots.iter_mut().for_each(|s| s.stale = true),
+                Err(e) => {
+                    warn!("text not made at the new size, rebuilding the device: {e}");
+                    scene = None;
+                    renderer = None;
+                    continue;
+                }
+            }
         }
         // A changed background opacity redraws every widget once, as hidden widgets do when they show again.
         let background = previews.background(&config);

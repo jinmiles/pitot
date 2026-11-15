@@ -25,10 +25,12 @@ use super::{Build, MAX_LAYERS, Redraw, Register, Widget};
 
 const ROW_HEIGHT: f32 = 24.0;
 const TEXT_SIZE: f32 = 13.0;
-/// Leaders shown per class.
+/// Leaders shown per class, and cars on each side of the player in the player's class, before the rows are filled
+/// (see [`select_rows`]).
 const LEADERS: usize = 3;
-/// Cars shown on each side of the player in the player's class.
 const AROUND: usize = 3;
+/// The fixed columns with a short name, and a header with three cars.
+const MIN_SIZE: (u32, u32) = (400, 96);
 const MAX_CLASSES: usize = 8;
 /// Sector columns drawn at most.
 const MAX_SECTOR_COLUMNS: usize = 6;
@@ -413,19 +415,14 @@ impl StandingsWidget {
 
     /// A standings widget timing gaps with `clock`, which other widgets may observe too.
     pub(crate) fn with_clock(config: &WidgetConfig, clock: SharedTrackClock) -> Self {
-        let width = config.width.unwrap_or(760);
-        let height = config.height.unwrap_or(560).max(ROW_HEIGHT as u32 * 2);
-        let rows = (height as f32 / ROW_HEIGHT) as usize;
-        Self {
-            width,
-            height,
+        let mut widget = Self {
+            width: 0,
+            height: 0,
             opacity: config.opacity,
-            rows: vec![Row::Empty; rows],
-            next: vec![Row::Empty; rows],
-            spare_cars: (0..rows).map(|_| CarRow::new()).collect(),
-            spare_headers: (0..MAX_CLASSES.min(rows))
-                .map(|_| HeaderRow::new())
-                .collect(),
+            rows: Vec::new(),
+            next: Vec::new(),
+            spare_cars: Vec::new(),
+            spare_headers: Vec::new(),
             entries: Vec::with_capacity(72),
             result_of: Vec::with_capacity(72),
             clocks: Vec::with_capacity(72),
@@ -436,7 +433,9 @@ impl StandingsWidget {
             ratings: Vec::with_capacity(72),
             places: Vec::with_capacity(72),
             changes: Vec::with_capacity(72),
-        }
+        };
+        widget.resize(config.width.unwrap_or(760), config.height.unwrap_or(560));
+        widget
     }
 
     /// (car number, gap) of the car rows last filled.
@@ -676,6 +675,7 @@ impl StandingsWidget {
 
         let mut next_row = 0;
         let rows = self.next.len();
+        let shown = select_rows(&self.entries, player, rows);
         let mut start = 0;
         let mut first_header = true;
         while start < self.entries.len() && next_row < rows {
@@ -686,6 +686,10 @@ impl StandingsWidget {
                     .take_while(|e| e.class_rank == rank)
                     .count();
             let class = classes.get(rank).copied().unwrap_or_default();
+            if shown.player_class_only && !self.entries[start..end].iter().any(|e| Some(e.car) == player) {
+                start = end;
+                continue;
+            }
 
             // Estimated iRating changes, for a race with positions.
             if is_race {
@@ -730,14 +734,14 @@ impl StandingsWidget {
 
             let player_index =
                 player.and_then(|p| self.entries[start..end].iter().position(|e| e.car == p));
-            let around = player_index.map(|p| (p.saturating_sub(AROUND), p + AROUND));
+            let around = player_index.map(|p| (p.saturating_sub(shown.around), p + shown.around));
             let mut previous: Option<usize> = None;
             for offset in 0..end - start {
                 if next_row >= rows {
                     break;
                 }
                 let shown =
-                    offset < LEADERS || around.is_some_and(|(a, b)| offset >= a && offset <= b);
+                    offset < shown.leaders || around.is_some_and(|(a, b)| offset >= a && offset <= b);
                 if !shown {
                     continue;
                 }
@@ -1130,6 +1134,79 @@ const RED: u32 = 0xFF_6B5E;
 const PURPLE: u32 = 0xB4_5CFF;
 const BACKGROUND: u32 = 0x10_1418;
 
+/// Cars a class of `cars` shows: its first `leaders`, and with the player at `player` in it, the cars within
+/// `around` places of the player.
+fn shown_in_class(cars: usize, player: Option<usize>, leaders: usize, around: usize) -> usize {
+    let lead = leaders.min(cars);
+    let Some(p) = player.filter(|&p| p < cars) else {
+        return lead;
+    };
+    let (from, to) = (p.saturating_sub(around), (p + around).min(cars - 1));
+    let near = to + 1 - from;
+    // The cars near the player that are not leaders already.
+    lead + near - lead.saturating_sub(from).min(near)
+}
+
+/// Which cars the rows show: `leaders` per class, `around` cars on each side of the player in the player's class, and
+/// with `player_class_only`, no other class.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Selection {
+    leaders: usize,
+    around: usize,
+    player_class_only: bool,
+}
+
+/// Rows the classes of `entries` (sorted by class) take with `shown`: a header each, and the cars
+/// [`shown_in_class`] shows.
+fn rows_needed(entries: &[Entry], player: Option<usize>, shown: Selection) -> usize {
+    let mut rows = 0;
+    let mut start = 0;
+    while start < entries.len() {
+        let rank = entries[start].class_rank;
+        let cars = entries[start..]
+            .iter()
+            .take_while(|e| e.class_rank == rank)
+            .count();
+        let player_at = player.and_then(|p| entries[start..start + cars].iter().position(|e| e.car == p));
+        if player_at.is_some() || !shown.player_class_only {
+            rows += 1 + shown_in_class(cars, player_at, shown.leaders, shown.around);
+        }
+        start += cars;
+    }
+    rows
+}
+
+/// The cars that fill `rows`. Three leaders per class and three cars on each side of the player when they fit; with
+/// rows to spare, more cars around the player, then more leaders, until the rows or the cars run out. In a short
+/// widget, fewer cars around the player first, then fewer leaders down to one, and when even that does not fit,
+/// only the player's class, so the player stays in view.
+fn select_rows(entries: &[Entry], player: Option<usize>, rows: usize) -> Selection {
+    let fits = |shown: Selection| rows_needed(entries, player, shown) <= rows;
+    let has_player = player.is_some_and(|p| entries.iter().any(|e| e.car == p));
+    let mut shown = Selection {
+        leaders: 1,
+        around: 0,
+        player_class_only: false,
+    };
+    shown.player_class_only = has_player && !fits(shown);
+    (shown.leaders, shown.around) = (LEADERS, AROUND);
+    while shown.around > 0 && !fits(shown) {
+        shown.around -= 1;
+    }
+    while shown.leaders > 1 && !fits(shown) {
+        shown.leaders -= 1;
+    }
+    // More than the largest class can show adds nothing.
+    let most = entries.len();
+    while shown.around < most && fits(Selection { around: shown.around + 1, ..shown }) {
+        shown.around += 1;
+    }
+    while shown.leaders < most && fits(Selection { leaders: shown.leaders + 1, ..shown }) {
+        shown.leaders += 1;
+    }
+    shown
+}
+
 /// Rows up to and including the last one in use.
 fn used_rows(rows: &[Row]) -> usize {
     rows.iter()
@@ -1418,6 +1495,35 @@ impl Widget for StandingsWidget {
         (self.width, self.height)
     }
 
+    fn min_size(&self) -> (u32, u32) {
+        MIN_SIZE
+    }
+
+    fn resize(&mut self, width: u32, height: u32) {
+        self.width = width.max(MIN_SIZE.0);
+        self.height = height.max(MIN_SIZE.1);
+        let rows = (self.height as f32 / ROW_HEIGHT) as usize;
+        // Every row back to the pools; the next update fills the new rows.
+        self.recycle();
+        std::mem::swap(&mut self.rows, &mut self.next);
+        self.recycle();
+        for list in [&mut self.rows, &mut self.next] {
+            list.truncate(rows);
+            list.resize_with(rows, || Row::Empty);
+        }
+        // Rows for a full widget, and the most two filled lists hold, so the pools neither run dry nor keep the
+        // rows of a larger size.
+        let headers = MAX_CLASSES.min(rows);
+        self.spare_cars.truncate(2 * rows);
+        self.spare_headers.truncate(2 * headers);
+        while self.spare_cars.len() < rows {
+            self.spare_cars.push(CarRow::new());
+        }
+        while self.spare_headers.len() < headers {
+            self.spare_headers.push(HeaderRow::new());
+        }
+    }
+
     fn interval(&self) -> Duration {
         Duration::from_millis(500)
     }
@@ -1502,6 +1608,48 @@ impl Widget for StandingsWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rows_fill_with_cars_around_the_player_then_leaders() {
+        // Two classes: 5 cars, then 20 with the player 13th.
+        let entry = |class_rank, car| Entry {
+            class_rank,
+            position: 1,
+            car,
+            fastest: 0.0,
+            last: 0.0,
+            laps: 0,
+            f2: 0.0,
+            rating: 0.0,
+            rating_change: 0.0,
+            key: (0.0, 0.0),
+        };
+        let entries: Vec<Entry> = (0..25).map(|car| entry(usize::from(car >= 5), car)).collect();
+        let player = Some(17);
+        let pick = |rows| {
+            let s = select_rows(&entries, player, rows);
+            (s.leaders, s.around, s.player_class_only)
+        };
+        // Headers 2, leaders 3 + 3, the player and 3 on each side: 15 rows.
+        assert_eq!(pick(15), (3, 3, false));
+        assert_eq!(rows_needed(&entries, player, select_rows(&entries, player, 15)), 15);
+        // More rows: more cars around the player, then more leaders.
+        assert_eq!(pick(17), (3, 4, false));
+        let roomy = select_rows(&entries, player, 23);
+        assert_eq!((roomy.leaders, roomy.around), (3, 7));
+        assert_eq!(rows_needed(&entries, player, roomy), 23, "{roomy:?}");
+        // Every car: the leaders take what is left once the player's class is shown.
+        let all = select_rows(&entries, player, 40);
+        assert_eq!(rows_needed(&entries, player, all), 27, "{all:?}");
+        // Fewer rows: fewer around the player, then fewer leaders, then only the player's class.
+        assert_eq!(pick(11), (3, 1, false));
+        assert_eq!(pick(6), (1, 0, false));
+        assert_eq!(pick(5), (1, 0, false));
+        assert_eq!(pick(4), (2, 0, true));
+        assert_eq!(pick(3), (1, 0, true));
+        // Without a player, the leaders fill the rows.
+        assert_eq!(select_rows(&entries, None, 12).leaders, 5);
+    }
 
     #[test]
     fn the_background_ends_at_the_last_row_in_use() {

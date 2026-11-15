@@ -25,12 +25,14 @@ use super::pitstops::{PitModel, PitTracker, SharedPitTracker, Stop, player_index
 use super::text::FixedText;
 use super::{Build, MAX_LAYERS, Redraw, Register, Widget};
 
-/// Most car rows.
-const MAX_ROWS: usize = 16;
+/// Most car rows: a full grid.
+const MAX_ROWS: usize = 64;
 /// Rows above the cars: the lane loss and refueling speed, then the column names.
 const HEAD_ROWS: usize = 2;
 /// Row height the default size is laid out for.
 const ROW_HEIGHT: u32 = 22;
+/// The head line, the columns with room for a short name, and three cars.
+const MIN_SIZE: (u32, u32) = (380, 110);
 
 /// One car's current stint, followed with the player's fuel per lap.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -214,16 +216,12 @@ pub struct PitWidget {
 impl PitWidget {
     /// A pit widget following the stops with `tracker`, which other widgets may share.
     pub(crate) fn new(config: &WidgetConfig, tracker: SharedPitTracker) -> Self {
-        let height = config.height.unwrap_or(280).max(ROW_HEIGHT * 3);
-        let rows = ((height / ROW_HEIGHT) as usize)
-            .saturating_sub(HEAD_ROWS)
-            .clamp(1, MAX_ROWS);
-        Self {
-            width: config.width.unwrap_or(400),
-            height,
+        let mut widget = Self {
+            width: 0,
+            height: 0,
             opacity: config.opacity,
-            rows: (0..rows).map(|_| Row::new()).collect(),
-            next: (0..rows).map(|_| Row::new()).collect(),
+            rows: Vec::new(),
+            next: Vec::new(),
             head: Head::new(),
             next_head: Head::new(),
             tracker,
@@ -232,7 +230,9 @@ impl PitWidget {
             stints: Vec::with_capacity(72),
             cars: Vec::with_capacity(72),
             gaps: Vec::with_capacity(72),
-        }
+        };
+        widget.resize(config.width.unwrap_or(400), config.height.unwrap_or(280));
+        widget
     }
 
     /// A pit widget with its own tracker, keeping what it learns in `store`, or only in memory when `None`.
@@ -620,6 +620,24 @@ impl Register for PitWidget {
 impl Widget for PitWidget {
     fn size(&self) -> (u32, u32) {
         (self.width, self.height)
+    }
+
+    fn min_size(&self) -> (u32, u32) {
+        MIN_SIZE
+    }
+
+    fn resize(&mut self, width: u32, height: u32) {
+        self.width = width.max(MIN_SIZE.0);
+        self.height = height.max(MIN_SIZE.1);
+        let rows = ((self.height / ROW_HEIGHT) as usize)
+            .saturating_sub(HEAD_ROWS)
+            .clamp(1, MAX_ROWS);
+        for list in [&mut self.rows, &mut self.next] {
+            list.truncate(rows);
+            list.resize_with(rows, Row::new);
+            // Filled again at the next update.
+            list.iter_mut().for_each(|row| row.used = false);
+        }
     }
 
     fn interval(&self) -> Duration {

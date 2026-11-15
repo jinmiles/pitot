@@ -23,6 +23,8 @@ const PEDALS_WIDTH: u32 = 52;
 /// Largest steering wheel icon, in pixels.
 const WHEEL_MAX: u32 = 72;
 const PAD: u32 = 6;
+/// A second of trace beside the pedal bars and a small wheel.
+const MIN_SIZE: (u32, u32) = (240, 60);
 /// Trace line width.
 const LINE: f32 = 2.5;
 
@@ -114,6 +116,8 @@ pub struct InputTraceWidget {
     history: Box<[InputSample]>,
     /// Samples appended since the last reset.
     total: u64,
+    /// The oldest sample the ring holds: 0, or after a resize the oldest it kept.
+    first: u64,
     latest: InputSample,
     bars: [i32; 5],
     missed: u64,
@@ -122,33 +126,22 @@ pub struct InputTraceWidget {
 
 impl InputTraceWidget {
     pub fn new(config: &WidgetConfig) -> Self {
-        let height = config.height.unwrap_or(120).max(4 * PAD);
-        let side = side_width(height);
-        let width = config
-            .width
-            .unwrap_or(600)
-            .max(side + 4 * PAD + 2 * PX_PER_SAMPLE);
-        let columns = (width - side - 3 * PAD) / PX_PER_SAMPLE * PX_PER_SAMPLE;
-        let trace = Rect::new(
-            PAD as f32,
-            PAD as f32,
-            columns as f32,
-            (height - 2 * PAD) as f32,
-        );
-        let visible = (columns / PX_PER_SAMPLE) as usize + 1;
-        Self {
-            width,
-            height,
+        let mut widget = Self {
+            width: 0,
+            height: 0,
             opacity: config.opacity,
-            trace,
-            columns,
-            history: vec![InputSample::default(); visible].into_boxed_slice(),
+            trace: Rect::default(),
+            columns: PX_PER_SAMPLE,
+            history: Box::default(),
             total: 0,
+            first: 0,
             latest: InputSample::default(),
             bars: [-1; 5],
             missed: 0,
             missed_shown: 0,
-        }
+        };
+        widget.resize(config.width.unwrap_or(600), config.height.unwrap_or(120));
+        widget
     }
 
     fn column(&self, index: u64) -> u32 {
@@ -163,6 +156,7 @@ impl InputTraceWidget {
     fn first_visible(&self) -> u64 {
         self.total
             .saturating_sub(u64::from(self.columns / PX_PER_SAMPLE))
+            .max(self.first)
     }
 
     /// The live area right of the trace: pedal bars and the steering wheel.
@@ -256,7 +250,7 @@ impl InputTraceWidget {
             let current = self.sample(index);
             // Each segment covers exactly this sample's columns, from the previous value to this one, so
             // segments join without gaps and a wrap never draws across the trace.
-            let previous = if index > 0 {
+            let previous = if index > self.first {
                 self.sample(index - 1)
             } else {
                 current
@@ -292,6 +286,41 @@ impl Widget for InputTraceWidget {
     /// pixels per sample.
     fn scales_with_text(&self) -> bool {
         false
+    }
+
+    fn min_size(&self) -> (u32, u32) {
+        MIN_SIZE
+    }
+
+    fn resize(&mut self, width: u32, height: u32) {
+        let height = height.max(MIN_SIZE.1);
+        let side = side_width(height);
+        let width = width
+            .max(MIN_SIZE.0)
+            .max(side + 4 * PAD + 2 * PX_PER_SAMPLE);
+        let columns = (width - side - 3 * PAD) / PX_PER_SAMPLE * PX_PER_SAMPLE;
+        let visible = (columns / PX_PER_SAMPLE) as usize + 1;
+        // The newest samples move to the new ring, as many as both hold; a wider trace fills in from the right.
+        let kept = (self.total - self.first)
+            .min(self.history.len() as u64)
+            .min(visible as u64);
+        let mut history = vec![InputSample::default(); visible].into_boxed_slice();
+        for index in self.total - kept..self.total {
+            history[(index % visible as u64) as usize] = *self.sample(index);
+        }
+        self.history = history;
+        self.first = self.total - kept;
+        self.width = width;
+        self.height = height;
+        self.columns = columns;
+        self.trace = Rect::new(
+            PAD as f32,
+            PAD as f32,
+            columns as f32,
+            (height - 2 * PAD) as f32,
+        );
+        // The bars have a new height: draw them at the next update.
+        self.bars = [-1; 5];
     }
 
     fn layers(&self) -> Vec<LayerSpec> {
@@ -363,6 +392,7 @@ impl Widget for InputTraceWidget {
 
     fn reset(&mut self) {
         self.total = 0;
+        self.first = 0;
         self.latest = InputSample::default();
         self.bars = [-1; 5];
         self.missed = 0;

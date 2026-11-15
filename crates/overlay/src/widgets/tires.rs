@@ -296,8 +296,8 @@ pub struct TiresWidget {
 impl TiresWidget {
     pub fn new(config: &WidgetConfig) -> Self {
         Self {
-            width: config.width.unwrap_or(220).max(160),
-            height: config.height.unwrap_or(170).max(120),
+            width: config.width.unwrap_or(220).max(MIN_SIZE.0),
+            height: config.height.unwrap_or(170).max(MIN_SIZE.1),
             opacity: config.opacity,
             watch: PitWatch::default(),
             shown: Shown::new(),
@@ -515,6 +515,8 @@ impl TiresWidget {
 const HEADER_HEIGHT: f32 = 22.0;
 const PAD: f32 = 8.0;
 const GAP: f32 = 6.0;
+/// Three temperatures across each tire block, and its three lines.
+const MIN_SIZE: (u32, u32) = (200, 150);
 
 const WHITE: u32 = 0xF0_F2F5;
 const DIM: u32 = 0xA0_A6AE;
@@ -540,6 +542,15 @@ impl Register for TiresWidget {
 impl Widget for TiresWidget {
     fn size(&self) -> (u32, u32) {
         (self.width, self.height)
+    }
+
+    fn min_size(&self) -> (u32, u32) {
+        MIN_SIZE
+    }
+
+    fn resize(&mut self, width: u32, height: u32) {
+        self.width = width.max(MIN_SIZE.0);
+        self.height = height.max(MIN_SIZE.1);
     }
 
     fn interval(&self) -> Duration {
