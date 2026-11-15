@@ -31,8 +31,8 @@ const MAX_ROWS: usize = 64;
 const HEAD_ROWS: usize = 2;
 /// Row height the default size is laid out for.
 const ROW_HEIGHT: u32 = 22;
-/// The head line and the columns, and three cars.
-const MIN_SIZE: (u32, u32) = (360, 110);
+/// The head line, the columns with room for a short name, and three cars.
+const MIN_SIZE: (u32, u32) = (380, 110);
 
 /// One car's current stint, followed with the player's fuel per lap.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]

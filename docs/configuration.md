@@ -54,7 +54,7 @@ shapes keep their pixel size, and each widget lays out within the new box:
 | `relative` | 400 x 167 | more cars, a pair at a time: one on each side of the player per 67 px of height (rows of 33⅓ px); a wider box widens the names |
 | `standings` | 400 x 96 | more rows (24 px each): more cars around the player, then more leaders per class. A shorter box shows fewer cars around the player first, then fewer leaders, then only the player's class, so the player stays in view; a wider one gets back the columns dropped for room |
 | `fuel` | 380 x 120 | the four columns and six lines spread out; below the default height the text is a size smaller |
-| `pit` | 360 x 110 | more cars (22 px rows); a wider box widens the names |
+| `pit` | 380 x 110 | more cars (22 px rows); a wider box widens the names |
 | `sectors` | 340 x 120 | wider value columns; rows grow to 24 px, then the rest stays empty. Below 16 px a row, the last sectors are left out |
 | `wind` | 160 x 140 | a larger dial; the text column keeps its width |
 | `tires` | 200 x 150 | larger tire blocks |
