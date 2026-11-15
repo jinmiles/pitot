@@ -721,7 +721,7 @@ impl Widget for TrackMapWidget {
 
     fn draw(&self, layer: usize, canvas: &mut Canvas<'_>) {
         if layer == 0 {
-            canvas.fill(
+            canvas.fill_background(
                 Rect::new(0.0, 0.0, self.width as f32, self.height as f32),
                 Color::rgb(BACKGROUND, self.opacity),
             );

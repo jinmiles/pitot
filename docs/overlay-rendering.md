@@ -53,6 +53,9 @@ menu.
 - The device commits only when something was drawn or a visibility changed.
 - Widgets draw through `Canvas` (rectangles, lines, text) and never touch COM directly. All rendering `unsafe` is
   in the `render` module and all windowing `unsafe` in `platform`, each block with a `// SAFETY:` comment.
+- Backgrounds (a widget's panel, a band behind its content) are drawn with `Canvas::fill_background`, which
+  scales the color's own alpha by `[general] background_opacity` ([configuration](configuration.md#background-opacity));
+  everything else uses `Canvas::fill` and stays as it is. A change of the value redraws every widget once.
 - A rendering error, such as device loss, drops the renderer, waits 500 ms, rebuilds the device, every window
   target, and every layer, and redraws all widgets.
 - A configuration change keeps the device and rebuilds only window targets and layers. Recreating the D3D11
@@ -212,7 +215,8 @@ turn it off; the benchmark test fails until both do (then copy them to the `*.lo
 Such a widget may also get a section in `DEFAULT_TOML`, at the end.
 
 The rules for every widget stay: no allocation per update or draw after warm-up, a redraw only of what changed,
-its own update rate, `visible()` for the display states it shows in, and no logging per update.
+its own update rate, `visible()` for the display states it shows in, its background through
+`Canvas::fill_background` (at the alpha of its `opacity`), and no logging per update.
 
 ## Development measurement
 

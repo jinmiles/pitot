@@ -216,6 +216,11 @@ pub enum TrayCommand {
     SetHidden(bool),
     /// Start or end moving widgets with the mouse.
     SetMoving(bool),
+    /// The Pitot window's background opacity slider, in percent: moved, or saved into `config.toml`.
+    BackgroundOpacity {
+        percent: u8,
+        saved: bool,
+    },
 }
 
 thread_local! {
@@ -270,6 +275,18 @@ unsafe extern "system" fn window_proc(
                 }
                 Some(OverlayCommand::SetHidden(on)) => push_command(TrayCommand::SetHidden(on)),
                 Some(OverlayCommand::SetMoving(on)) => push_command(TrayCommand::SetMoving(on)),
+                Some(OverlayCommand::BackgroundPreview(percent)) => {
+                    push_command(TrayCommand::BackgroundOpacity {
+                        percent,
+                        saved: false,
+                    })
+                }
+                Some(OverlayCommand::BackgroundSaved(percent)) => {
+                    push_command(TrayCommand::BackgroundOpacity {
+                        percent,
+                        saved: true,
+                    })
+                }
                 // SAFETY: posts WM_QUIT to this thread's own message queue.
                 Some(OverlayCommand::Quit) => unsafe { PostQuitMessage(0) },
                 None => {}
@@ -1385,8 +1402,13 @@ mod tests {
         };
         send(OverlayCommand::SetMoving(true));
         send(OverlayCommand::SetHidden(false));
+        send(OverlayCommand::BackgroundPreview(30));
+        send(OverlayCommand::BackgroundSaved(31));
         assert_eq!(take_tray_command(), Some(TrayCommand::SetMoving(true)));
         assert_eq!(take_tray_command(), Some(TrayCommand::SetHidden(false)));
+        let background = |percent, saved| Some(TrayCommand::BackgroundOpacity { percent, saved });
+        assert_eq!(take_tray_command(), background(30, false));
+        assert_eq!(take_tray_command(), background(31, true));
         assert_eq!(take_tray_command(), None);
     }
 

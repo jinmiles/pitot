@@ -1217,7 +1217,7 @@ fn used_rows(rows: &[Row]) -> usize {
 impl StandingsWidget {
     fn draw_header(&self, canvas: &mut Canvas<'_>, y: f32, header: &HeaderRow) {
         let w = self.width as f32;
-        canvas.fill(
+        canvas.fill_background(
             Rect::new(0.0, y + 1.0, w, ROW_HEIGHT - 2.0),
             Color::rgb(0x1C_2228, self.opacity.max(0.6)),
         );
@@ -1572,7 +1572,7 @@ impl Widget for StandingsWidget {
     fn draw(&self, _layer: usize, canvas: &mut Canvas<'_>) {
         let w = self.width as f32;
         // The background ends at the last row in use; below it the widget stays transparent.
-        canvas.fill(
+        canvas.fill_background(
             Rect::new(0.0, 0.0, w, used_rows(&self.rows) as f32 * ROW_HEIGHT),
             Color::rgb(BACKGROUND, self.opacity),
         );

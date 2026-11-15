@@ -11,13 +11,23 @@ own executable again with `--window`.
   widgets* (the tray menu's *Move widgets*, which places and resizes widgets with the mouse). A change on either
   side shows on the other at once. When no overlay runs, a *Start the overlay* row starts the overlay
   (`pitot.exe` without arguments).
+- **Appearance**: *Background opacity*, a slider from 0% (no backgrounds) to 100% (opaque backgrounds) with its
+  percent shown, for the backgrounds of every widget at once; text and graphs stay as they are (see
+  [Background opacity](configuration.md#background-opacity) for what counts as background). A click on the track
+  sets it, and dragging the knob moves it; the widgets follow at once, also outside the window while the button
+  is held. Releasing the button saves `[general] background_opacity` into `config.toml` in place. After a click,
+  the slider has the focus (a ring around its knob), and the arrow keys move it by 1% (Shift: 10%), Page Up and
+  Page Down by 10%, Home and End to 0% and 100%; each key's release saves. Without a running overlay the slider
+  only saves, and the overlay starts with that value. When the window loses the focus mid-move, the value is
+  saved then.
 - **Widgets**: one switch per widget, for every widget of the overlay's [list](widgets.md) in its order, with
   the label the list gives it (the window reads the list from `pitot-overlay`, so a new widget needs no change
   here). A switch writes that widget's `enabled` into `%APPDATA%\Pitot\config.toml`
   in place, changing only that value, so comments and layout stay (a missing key goes under the widget's
   `[widgets.<name>]` header, a missing table at the end; see
-  [Moving and resizing widgets](configuration.md#moving-and-resizing-widgets) for the same rules). The overlay reloads the file as it does after any edit. Edits made elsewhere show when
-  the window is activated again, or when the overlay reloads the file.
+  [Moving and resizing widgets](configuration.md#moving-and-resizing-widgets) for the same rules). The overlay
+  reloads the file as it does after any edit. Edits made elsewhere show when the window is activated again, or
+  when the overlay reloads the file.
 - **Quit Pitot**: quits the overlay and closes the window.
 
 A problem, such as a configuration file that does not parse, shows in red above *Quit Pitot*.
@@ -50,12 +60,19 @@ spends nothing on it per tick or frame.
 
 - The overlay's tray icon belongs to a hidden top-level window of class `PitotTray`. The Pitot window finds it by
   class and posts it a message (`WM_APP + 2`) with a command and a value in its parameters: hello (answer with
-  the state), hide or show the widgets, start or end moving, quit. The overlay handles it on its message-loop
+  the state), hide or show the widgets, start or end moving, quit, the background opacity while the slider moves
+  (a percent), and the background opacity the window just saved. The overlay handles it on its message-loop
   thread between frames, as it handles the tray menu.
 - The Pitot window owns a message-only window of class `PitotControlLink` on a thread of its own. The overlay
   posts it the state (widgets hidden, moving) after every change and after a hello, a note after each
   configuration reload, a request to come to the front, and a close when the overlay quits.
 - Turning widgets on and off goes through `config.toml`, which the overlay already reloads.
+- The background opacity slider sends each new percent while it moves (at most 101 messages for a drag across
+  the track), and the overlay redraws every widget once per value, without a reload. When the slider stops, the
+  window saves the value and then tells the overlay what the file now holds (the old value if the save failed),
+  so the overlay's reload of that write changes nothing. A slider value holds over the file's in a reload for
+  two seconds after it last moved: the reload of an earlier save cannot undo a newer value, and a window that
+  closed mid-move does not hold it for ever.
 - Each process is single-instance through a named mutex (`Local\PitotOverlay`, `Local\PitotControl`).
 
 The message-handling code of both ends is in `crates/overlay/src/platform/link.rs`, so the window's crate has no
@@ -64,7 +81,8 @@ The message-handling code of both ends is in `crates/overlay/src/platform/link.r
 ## Cost
 
 The overlay's own work is unchanged: messages from the window arrive only when the user acts, and the overlay
-answers with one posted message. The benchmark configurations set `start_in_tray = true`, so measurements of the
+answers with one posted message. Moving the background opacity slider redraws every shown widget once per new
+value, as showing hidden widgets does; nothing is drawn while it does not move. The benchmark configurations set `start_in_tray = true`, so measurements of the
 overlay do not include the window, which would otherwise run as a child process of the overlay.
 
 The window is built with [GPUI](https://www.gpui.rs/) (Apache-2.0), the UI framework of the Zed editor, which

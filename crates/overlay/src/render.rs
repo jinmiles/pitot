@@ -44,6 +44,7 @@ use windows::Win32::Graphics::Dxgi::IDXGIDevice;
 use windows::core::{HSTRING, Interface, w};
 use windows_numerics::{Matrix3x2, Vector2};
 
+use crate::config;
 use crate::platform::OverlayWindow;
 
 /// A rendering failure. Device loss surfaces as an error; the app rebuilds the renderer.
@@ -365,6 +366,8 @@ pub struct Renderer {
     text: Vec<u16>,
     /// Whether a layer was drawn since the last commit.
     dirty: bool,
+    /// `[general] background_opacity`, in percent, for [`Canvas::fill_background`].
+    background: u8,
     pub software: bool,
 }
 
@@ -450,9 +453,18 @@ impl Renderer {
                 },
                 text: Vec::with_capacity(256),
                 dirty: false,
+                background: config::DEFAULT_BACKGROUND_OPACITY,
                 software,
             })
         }
+    }
+
+    /// Sets `[general] background_opacity` for what is drawn from now on. Returns whether it changed, in which case
+    /// every layer needs a redraw to show it.
+    pub fn set_background_opacity(&mut self, percent: u8) -> bool {
+        let changed = self.background != percent;
+        self.background = percent;
+        changed
     }
 
     /// Attaches a composition tree to `window`.
@@ -664,6 +676,7 @@ impl Renderer {
                     atlas: &self.atlas,
                     layouts: &mut self.layouts,
                     text: &mut self.text,
+                    background: self.background,
                     area: Rect::new(
                         update.left as f32,
                         update.top as f32,
@@ -758,6 +771,8 @@ pub struct Canvas<'a> {
     atlas: &'a [AtlasFace],
     layouts: &'a mut LayoutCache,
     text: &'a mut Vec<u16>,
+    /// `[general] background_opacity`, in percent.
+    background: u8,
     area: Rect,
 }
 
@@ -772,6 +787,17 @@ impl Canvas<'_> {
         unsafe {
             self.brush.SetColor(&color.d2d());
             self.context.FillRectangle(&rect.d2d(), self.brush);
+        }
+    }
+
+    /// Fills `rect` with a widget's background: its panel, or a band behind content such as a header. `color`'s
+    /// alpha is the background's own (from the widget's `opacity`), which `[general] background_opacity` scales
+    /// (see [`config::background_alpha`]). Text, graphs, lines, and markers use [`Canvas::fill`] and stay as they
+    /// are.
+    pub fn fill_background(&mut self, rect: Rect, color: Color) {
+        let a = config::background_alpha(color.a, self.background);
+        if a > 0.0 {
+            self.fill(rect, Color { a, ..color });
         }
     }
 
