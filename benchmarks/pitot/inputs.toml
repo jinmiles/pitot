@@ -6,6 +6,7 @@
 font = "Segoe UI"
 start_in_tray = true
 background_opacity = 82
+text_size = 100
 
 [widgets.status]
 enabled = false

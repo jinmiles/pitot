@@ -219,6 +219,11 @@ pub enum TrayCommand {
         percent: u8,
         saved: bool,
     },
+    /// The Pitot window's text size slider, in percent: moved, or saved into `config.toml`.
+    TextSize {
+        percent: u8,
+        saved: bool,
+    },
 }
 
 thread_local! {
@@ -281,6 +286,18 @@ unsafe extern "system" fn window_proc(
                 }
                 Some(OverlayCommand::BackgroundSaved(percent)) => {
                     push_command(TrayCommand::BackgroundOpacity {
+                        percent,
+                        saved: true,
+                    })
+                }
+                Some(OverlayCommand::TextSizePreview(percent)) => {
+                    push_command(TrayCommand::TextSize {
+                        percent,
+                        saved: false,
+                    })
+                }
+                Some(OverlayCommand::TextSizeSaved(percent)) => {
+                    push_command(TrayCommand::TextSize {
                         percent,
                         saved: true,
                     })
@@ -1024,11 +1041,16 @@ mod tests {
         send(OverlayCommand::SetHidden(false));
         send(OverlayCommand::BackgroundPreview(30));
         send(OverlayCommand::BackgroundSaved(31));
+        send(OverlayCommand::TextSizePreview(125));
+        send(OverlayCommand::TextSizeSaved(130));
         assert_eq!(take_tray_command(), Some(TrayCommand::SetMoving(true)));
         assert_eq!(take_tray_command(), Some(TrayCommand::SetHidden(false)));
         let background = |percent, saved| Some(TrayCommand::BackgroundOpacity { percent, saved });
         assert_eq!(take_tray_command(), background(30, false));
         assert_eq!(take_tray_command(), background(31, true));
+        let text = |percent, saved| Some(TrayCommand::TextSize { percent, saved });
+        assert_eq!(take_tray_command(), text(125, false));
+        assert_eq!(take_tray_command(), text(130, true));
         assert_eq!(take_tray_command(), None);
     }
 

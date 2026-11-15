@@ -196,8 +196,17 @@ pub struct LayerSpec {
 }
 
 pub trait Widget {
-    /// Size in pixels.
+    /// Size in widget pixels: see [`Widget::scales_with_text`].
     fn size(&self) -> (u32, u32);
+
+    /// Whether the widget is laid out at `[general] text_size`. Such a widget is made with its configured box in
+    /// widget pixels, which are `text_scale` screen pixels each (see [`config::text_scale`]), and draws in them:
+    /// its text, rows, columns, and spacing grow with the text while its box on screen stays, so larger text fits
+    /// less. Shapes it sizes from its box still fill the box. A widget that draws no text, such as the input trace,
+    /// says `false` and is laid out in screen pixels at any text size.
+    fn scales_with_text(&self) -> bool {
+        true
+    }
 
     /// The widget's layers, bottom to top. Called when the widget is placed.
     fn layers(&self) -> Vec<LayerSpec> {

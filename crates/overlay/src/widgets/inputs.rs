@@ -288,6 +288,12 @@ impl Widget for InputTraceWidget {
         (self.width, self.height)
     }
 
+    /// No text: the trace, the bars, and the wheel fill the box at any text size, and the trace keeps two screen
+    /// pixels per sample.
+    fn scales_with_text(&self) -> bool {
+        false
+    }
+
     fn layers(&self) -> Vec<LayerSpec> {
         vec![
             LayerSpec {
