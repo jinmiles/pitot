@@ -1,4 +1,5 @@
-//! The link between the overlay and the Pitot window (`pitot-control.exe`), which runs as its own process.
+//! The link between the overlay and the Pitot window, which runs as its own process: the same executable started
+//! with [`WINDOW_FLAG`].
 //!
 //! Each side owns a window the other finds by class name: the overlay's tray window (`PitotTray`, a hidden
 //! top-level window) and the Pitot window's message-only window (`PitotControlLink`). A message carries a
@@ -33,10 +34,8 @@ pub(super) const TRAY_CLASS: PCWSTR = w!("PitotTray");
 /// Class of the Pitot window's message-only window.
 const CONTROL_CLASS: PCWSTR = w!("PitotControlLink");
 
-/// The overlay's executable, which the Pitot window starts when the overlay is not running.
-pub const OVERLAY_EXE: &str = "pitot-overlay.exe";
-/// The Pitot window's executable, next to the overlay's.
-pub const CONTROL_EXE: &str = "pitot-control.exe";
+/// The argument that makes Pitot's executable run the Pitot window. Without it, the executable runs the overlay.
+pub const WINDOW_FLAG: &str = "--window";
 
 /// A request to the overlay.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -169,8 +168,8 @@ thread_local! {
     static STARTED: Cell<Option<Instant>> = const { Cell::new(None) };
 }
 
-/// Brings the Pitot window to the front, or starts `pitot-control.exe` from the overlay's folder when it is not
-/// open. Call it in answer to the user (a tray click, a second launch), which lets the window take the focus.
+/// Brings the Pitot window to the front, or starts it (this executable with [`WINDOW_FLAG`]) when it is not open.
+/// Call it in answer to the user (a tray click, a second launch), which lets the window take the focus.
 pub fn open_control() -> std::io::Result<()> {
     if activate_control() {
         return Ok(());
@@ -182,7 +181,7 @@ pub fn open_control() -> std::io::Result<()> {
     {
         return Ok(());
     }
-    start_sibling(CONTROL_EXE)?;
+    start_self(Some(WINDOW_FLAG))?;
     STARTED.with(|at| at.set(Some(Instant::now())));
     Ok(())
 }
@@ -201,10 +200,16 @@ pub fn activate_control() -> bool {
     post(hwnd, ControlEvent::Activate.encode())
 }
 
-/// Starts `name` from the folder of the running executable.
-pub fn start_sibling(name: &str) -> std::io::Result<()> {
-    let exe = std::env::current_exe()?.with_file_name(name);
-    std::process::Command::new(exe)
+/// Starts the overlay: this executable again, without arguments. A running overlay makes the new one open the
+/// Pitot window and exit.
+pub fn start_overlay() -> std::io::Result<()> {
+    start_self(None)
+}
+
+/// Starts the running executable in a new process, with `arg` if given.
+fn start_self(arg: Option<&str>) -> std::io::Result<()> {
+    std::process::Command::new(std::env::current_exe()?)
+        .args(arg)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())

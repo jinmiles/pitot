@@ -11,7 +11,7 @@ reported with its line and column, and the previous configuration stays in use. 
 
 ## The Pitot window
 
-The [Pitot window](control-window.md) (`pitot-control.exe`, next to the overlay) turns the overlay and each
+The [Pitot window](control-window.md) (`pitot.exe --window`, which the overlay starts) turns the overlay and each
 widget on and off. It opens when the overlay starts, and a left click on the tray icon opens it later. Its close
 button closes only the window; the overlay keeps running in the tray.
 
@@ -61,7 +61,7 @@ max_gb = 5.0
 - Captures hold other drivers' names and IDs from the session info. They stay on this PC; anonymize them with
   [`pitot-bench anonymize`](anonymize.md) before sharing.
 
-Captures are looked up in `%APPDATA%\Pitot\captures` and in `captures` next to `pitot-overlay.exe`, where
+Captures are looked up in `%APPDATA%\Pitot\captures` and in `captures` next to `pitot.exe`, where
 [`pitot-bench record`](recorder.md) writes them when it runs from that folder.
 
 The log says whether a capture was found (`replay: playing the capture of this session`) and when the widgets
@@ -94,7 +94,7 @@ next clean lap. The default `shape = "circle"` needs no outline and does not tou
 
 Only one overlay runs per Windows session. Launching it again while it runs opens the Pitot window (or brings it
 to the front) and exits at once, leaving the running overlay and its log untouched. Only one Pitot window runs
-too; starting `pitot-control.exe` again brings the open one to the front.
+too; starting `pitot.exe --window` again brings the open one to the front.
 
 ## Log file
 

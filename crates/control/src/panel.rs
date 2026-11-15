@@ -5,7 +5,7 @@ use gpui::{
     Stateful, Styled, Subscription, Window, div, prelude::*, px,
 };
 use pitot_overlay::config;
-use pitot_overlay::platform::{self, ControlEvent, ControlLink, OVERLAY_EXE, OverlayCommand};
+use pitot_overlay::platform::{self, ControlEvent, ControlLink, OverlayCommand};
 
 use crate::model::{self, Overlay};
 use crate::style;
@@ -105,9 +105,9 @@ impl Panel {
     }
 
     fn start_overlay(&mut self, cx: &mut Context<Self>) {
-        match platform::start_sibling(OVERLAY_EXE) {
+        match platform::start_overlay() {
             Ok(()) => self.overlay = Overlay::Starting,
-            Err(e) => self.note = Some(format!("Cannot start {OVERLAY_EXE}: {e}").into()),
+            Err(e) => self.note = Some(format!("Cannot start the overlay: {e}").into()),
         }
         cx.notify();
     }

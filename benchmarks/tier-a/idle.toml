@@ -18,5 +18,5 @@ dwm_no_increase = true
 
 [[app]]
 name = "pitot-four"
-command = "target/release/pitot-overlay.exe"
+command = "target/release/pitot.exe"
 files = [{ from = "benchmarks/pitot/four.toml", to = "%APPDATA%/Pitot/config.toml" }]

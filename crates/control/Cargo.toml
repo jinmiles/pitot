@@ -13,7 +13,7 @@ serde = { version = "1", features = ["derive"] }
 toml = { version = "1.2.1", default-features = false, features = ["std", "serde", "parse"] }
 
 [target."cfg(windows)".dependencies]
-# The window's UI framework. It runs only in this process, never in the overlay's.
+# The window's UI framework. It runs only in the window's process (`pitot.exe --window`), never in the overlay's.
 gpui = { version = "0.2.2", default-features = false, features = ["windows-manifest"] }
 # Both already in gpui's tree: a channel from the link thread to the UI, and the window's HWND.
 futures = "0.3"

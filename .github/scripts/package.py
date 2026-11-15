@@ -2,22 +2,26 @@
 
 Usage: python .github/scripts/package.py <out dir> [--tag vX.Y.Z]
 
-Run after `cargo build --release --locked -p pitot-overlay -p pitot-control -p pitot-bench`. With `--tag`, the tag
-must match the workspace version. Writes one zip per package and SHA256SUMS.txt into the out dir.
+Run after `cargo build --release --locked -p pitot -p pitot-bench`. With `--tag`, the tag must match the workspace
+version. Writes into the out dir one zip per package, the binaries published on their own with their license
+texts, and SHA256SUMS.txt over all of them.
 """
 
 import argparse
 import hashlib
 import json
 import pathlib
+import shutil
 import subprocess
 import sys
 import zipfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 TARGET = "x86_64-pc-windows-msvc"
-# Each zip and the binaries in it: the Pitot window ships next to the overlay, which starts it.
-PACKAGES = {"pitot-overlay": ["pitot-overlay", "pitot-control"], "pitot-bench": ["pitot-bench"]}
+# Each zip and the binaries in it. `pitot` is the overlay and the Pitot window in one executable.
+PACKAGES = {"pitot": ["pitot"], "pitot-bench": ["pitot-bench"]}
+# Packages whose binary is also published on its own, next to the zips, and the name of its license text there.
+SINGLE = {"pitot": "pitot-THIRD-PARTY-LICENSES.txt"}
 LICENSE_PREFIXES = ("license", "licence", "copying", "notice", "unlicense")
 # License texts for crates whose package has no license file: `<crate>.txt` from the crate's repository, or the
 # canonical text of a license the crate offers.
@@ -164,15 +168,26 @@ def main():
             for package in linked_packages(meta, binary):
                 linked[package["id"]] = package
         packages = sorted(linked.values(), key=lambda p: (p["name"], p["version"]))
+        licenses = licenses_text(binaries, packages)
         archive = args.out / f"{name}-{version}-windows-x64.zip"
         with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as z:
             for exe in exes:
                 z.write(exe, exe.name)
-            z.writestr("THIRD-PARTY-LICENSES.txt", licenses_text(binaries, packages))
+            z.writestr("THIRD-PARTY-LICENSES.txt", licenses)
         sums.append(f"{sha256(archive)}  {archive.name}")
         sizes = ", ".join(f"{exe.name} {exe.stat().st_size} bytes" for exe in exes)
         print(f"{archive.name}: {sizes}, {len(packages)} crates")
-    (args.out / "SHA256SUMS.txt").write_text("\n".join(sums) + "\n", encoding="utf-8")
+        if name in SINGLE:
+            # The same bytes as in the zip.
+            single = [args.out / exe.name for exe in exes] + [args.out / SINGLE[name]]
+            for exe, copy in zip(exes, single):
+                shutil.copyfile(exe, copy)
+            single[-1].write_bytes(licenses.encode("utf-8"))
+            for path in single:
+                sums.append(f"{sha256(path)}  {path.name}")
+                print(f"{path.name}: {path.stat().st_size} bytes")
+    # Unix line endings, so `sha256sum -c` reads it on any system.
+    (args.out / "SHA256SUMS.txt").write_bytes(("\n".join(sums) + "\n").encode("utf-8"))
 
 
 if __name__ == "__main__":

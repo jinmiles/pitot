@@ -21,6 +21,8 @@ pub const KNOWN: &[(&str, &str)] = &[
     ("GameBar.exe", "Xbox Game Bar"),
     ("CapFrameX.exe", "CapFrameX"),
     ("SimHubWPF.exe", "SimHub"),
+    // The overlay and the Pitot window since 0.1.4; the overlay alone before.
+    ("pitot.exe", "Pitot"),
     ("pitot-overlay.exe", "Pitot overlay"),
 ];
 
@@ -84,11 +86,15 @@ mod tests {
             entry(12, "iRacingSim64DX11.exe"),
             entry(13, "MyOverlay.exe"),
             entry(14, "Discord.exe"),
+            entry(15, "pitot.exe"),
+            entry(16, "Pitot-Overlay.exe"),
         ];
         let found = find(&entries, &["myoverlay".to_owned()]);
         let pids: Vec<u32> = found.iter().map(|f| f.pid).collect();
-        assert_eq!(pids, [11, 12, 13, 14]);
+        assert_eq!(pids, [11, 12, 13, 14, 15, 16]);
         assert_eq!(found[2].what, "listed in the plan");
+        assert_eq!(found[4].what, "Pitot");
+        assert_eq!(found[5].what, "Pitot overlay");
         assert!(find(&entries[..1], &[]).is_empty());
     }
 }

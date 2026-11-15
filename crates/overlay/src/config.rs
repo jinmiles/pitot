@@ -35,7 +35,7 @@ pub fn pit_file() -> Option<PathBuf> {
     config_dir().map(|dir| dir.join("pit.toml"))
 }
 
-/// Where the Pitot window (`pitot-control.exe`) opens next, kept when it closes, inside [`config_dir`].
+/// Where the Pitot window (`pitot.exe --window`) opens next, kept when it closes, inside [`config_dir`].
 pub fn window_file() -> Option<PathBuf> {
     config_dir().map(|dir| dir.join("window.toml"))
 }
@@ -84,8 +84,8 @@ pub const DEFAULT_TOML: &str = r#"# Pitot overlay configuration. Changes apply w
 # *Move widgets* in the tray menu places widgets with the mouse and saves their x and y here. The Pitot window
 # turns widgets on and off and saves their `enabled` here.
 
-# The Pitot window (pitot-control.exe) opens when the overlay starts. With start_in_tray = true, only the tray
-# icon shows; clicking it opens the window.
+# The Pitot window opens when the overlay starts. With start_in_tray = true, only the tray icon shows; clicking
+# it opens the window.
 [general]
 font = "Segoe UI"
 start_in_tray = false

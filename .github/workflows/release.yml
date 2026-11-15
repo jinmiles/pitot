@@ -49,7 +49,7 @@ jobs:
         run: cargo test --workspace --locked
 
       - name: Build
-        run: cargo build --release --locked -p pitot-overlay -p pitot-control -p pitot-bench
+        run: cargo build --release --locked -p pitot -p pitot-bench
 
       - name: Package
         shell: bash
@@ -93,10 +93,13 @@ jobs:
             flags+=(--prerelease)
           fi
           cat > notes.md <<'EOF'
-          Windows 10/11 x64. Unzip and run the `.exe`; nothing is installed. The binaries are not signed yet, so
-          Windows SmartScreen may warn on the first start ("More info", then "Run anyway"). They need the
-          Microsoft Visual C++ Redistributable (x64), which the sim installs. `THIRD-PARTY-LICENSES.txt` in each zip
-          lists the code compiled into it, and `SHA256SUMS.txt` has the checksums of the zips.
+          Windows 10/11 x64. Download `pitot.exe` and run it, or unzip the `pitot` zip; nothing is installed.
+          `pitot.exe` is the overlay and the Pitot window in one file. The binaries are not signed yet, so Windows
+          SmartScreen may warn on the first start ("More info", then "Run anyway"). They need the Microsoft Visual
+          C++ Redistributable (x64), which the sim installs. `THIRD-PARTY-LICENSES.txt` in each zip, and
+          `pitot-THIRD-PARTY-LICENSES.txt` for `pitot.exe` on its own, list the code compiled in, and
+          `SHA256SUMS.txt` has the checksums of the other files.
           EOF
-          gh release create "$GITHUB_REF_NAME" dist/*.zip dist/SHA256SUMS.txt \
+          gh release create "$GITHUB_REF_NAME" dist/*.zip dist/pitot.exe dist/pitot-THIRD-PARTY-LICENSES.txt \
+            dist/SHA256SUMS.txt \
             --verify-tag --title "Pitot $version" --notes-file notes.md --generate-notes "${flags[@]}"

@@ -154,8 +154,29 @@ mod tests {
     }
 
     #[test]
+    fn pitot_and_its_window_are_one_tree() {
+        // Pitot's overlay opens its window by starting its own executable again.
+        let entries = [
+            entry(100, 4, "explorer.exe"),
+            entry(500, 100, "pitot.exe"),
+            entry(510, 500, "pitot.exe"),
+            entry(600, 100, "pitot-bench.exe"),
+        ];
+        let mut out = Vec::new();
+        select(
+            &entries,
+            &Target::Names(vec!["pitot.exe".into()]),
+            |_| None,
+            &mut out,
+        );
+        out.sort_unstable();
+        assert_eq!(out, [500, 510]);
+    }
+
+    #[test]
     fn labels() {
         assert_eq!(Target::Pid(42).label(), "pid-42");
+        assert_eq!(Target::Names(vec!["pitot.exe".into()]).label(), "pitot");
         assert_eq!(
             Target::Names(vec!["Pitot-Overlay.exe".into()]).label(),
             "pitot-overlay"

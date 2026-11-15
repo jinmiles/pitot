@@ -1,0 +1,13 @@
+[package]
+name = "pitot"
+description = "Pitot's executable: the overlay, or with --window the Pitot window, each in a process of its own."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+# The overlay. Its library never depends on the window's UI framework.
+pitot-overlay = { path = "../overlay" }
+# The Pitot window, which only a process started with --window runs.
+pitot-control = { path = "../control" }
