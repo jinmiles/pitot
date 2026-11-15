@@ -1,5 +1,5 @@
-//! Wind: speed, and a dial that turns with the car (its nose at the top) with an arrow showing where the air
-//! flows relative to the car, so headwind, tailwind, and crosswind read at a glance.
+//! Wind: one speed in km/h, and a dial that turns with the car (its nose at the top) with an arrow showing where
+//! the air flows relative to the car, so where the wind hits the car reads at a glance.
 //!
 //! `YawNorth` is the car's compass heading, clockwise from north: it matches the course over ground from an
 //! `.ibt`'s latitude and longitude within 0.2 degrees. `WindDir` is taken as the compass direction the wind comes
@@ -57,13 +57,6 @@ pub(crate) fn compass(direction: f32) -> &'static str {
     POINTS[eighth % 8]
 }
 
-/// Headwind (positive) or tailwind (negative), and crosswind (positive from the right), for a wind of `speed`
-/// coming from `relative` radians clockwise from the nose.
-pub(crate) fn parts(speed: f32, relative: f32) -> (f32, f32) {
-    let (sin, cos) = relative.sin_cos();
-    (speed * cos, speed * sin)
-}
-
 /// An angle in whole steps, from 0 to `STEPS - 1`.
 fn step(angle: f32) -> i32 {
     ((angle.rem_euclid(TAU).to_degrees() / STEP_DEGREES).round() as i32).rem_euclid(STEPS)
@@ -104,10 +97,6 @@ struct Reading {
     speed: FixedText,
     /// Compass point the wind comes from, empty when calm or unknown.
     from: &'static str,
-    /// "Head 12" or "Tail 12", empty without a heading.
-    along: FixedText,
-    /// "Cross 9", empty without a heading.
-    cross: FixedText,
     /// Where the wind comes from relative to the nose, in steps; `None` when calm or without a heading.
     arrow: Option<i32>,
     /// Where north is on the dial, in steps; `None` without a heading.
@@ -121,8 +110,6 @@ impl Reading {
         Self {
             speed: FixedText::new(8),
             from: "",
-            along: FixedText::new(16),
-            cross: FixedText::new(16),
             arrow: None,
             north: None,
             level: 0,
@@ -133,8 +120,6 @@ impl Reading {
     fn fill(&mut self, speed: Option<f32>, wind_dir: Option<f32>, heading: Option<f32>) {
         self.speed.set("--");
         self.from = "";
-        self.along.clear();
-        self.cross.clear();
         self.arrow = None;
         let heading = heading.filter(|h| h.is_finite());
         self.north = heading.map(|h| step(-h));
@@ -155,20 +140,7 @@ impl Reading {
             return;
         }
         self.from = compass(dir);
-        let Some(heading) = heading else {
-            return;
-        };
-        let rel = relative(dir, heading);
-        self.arrow = Some(step(rel));
-        let (along, cross) = parts(kmh, rel);
-        let _ = write!(
-            self.along,
-            "{} {:.0}",
-            // A wind straight across rounds to 0 either way: call it a headwind then.
-            if along > -0.5 { "Head" } else { "Tail" },
-            along.abs()
-        );
-        let _ = write!(self.cross, "Cross {:.0}", cross.abs());
+        self.arrow = heading.map(|heading| step(relative(dir, heading)));
     }
 }
 
@@ -207,6 +179,8 @@ impl WindWidget {
 
 /// Width of the text column on the right.
 const COLUMN: f32 = 64.0;
+/// Where the speed's number ends in the text column: two digits at the speed's size fit before it.
+const SPEED_END: f32 = 30.0;
 const PAD: f32 = 8.0;
 /// The text column's lines apart, and a dial beside it.
 const MIN_SIZE: (u32, u32) = (160, 140);
@@ -299,18 +273,32 @@ impl Widget for WindWidget {
             canvas.line(head, right, 3.0, ink);
         }
 
-        // The text column: speed, where the wind comes from, and its parts along and across the car.
+        // The text column, centered beside the dial: the speed with its unit, and where the wind comes from.
         let x = w - COLUMN - 4.0;
         let row = |top: f32, height: f32| Rect::new(x, top * h / 170.0, COLUMN, height * h / 170.0);
-        canvas.text("Wind", row(6.0, 16.0), 11.0, Align::Left, dim);
-        canvas.text(r.speed.as_str(), row(22.0, 28.0), 24.0, Align::Left, white);
-        canvas.text("km/h", row(50.0, 14.0), 11.0, Align::Left, dim);
+        canvas.text("Wind", row(40.0, 16.0), 11.0, Align::Left, dim);
+        // The number ends at a fixed point and the unit follows it, so one to three digits keep the unit in place.
+        let value = row(56.0, 30.0);
+        canvas.text(
+            r.speed.as_str(),
+            Rect::new(x - 12.0, value.y, 12.0 + SPEED_END, value.h),
+            24.0,
+            Align::Right,
+            white,
+        );
+        // Lowered so the smaller unit sits on the number's baseline.
+        let unit = SPEED_END + 3.0;
+        canvas.text(
+            "km/h",
+            Rect::new(x + unit, value.y + 6.0, COLUMN - unit, value.h),
+            11.0,
+            Align::Left,
+            dim,
+        );
         if !r.from.is_empty() {
-            canvas.text("from", row(70.0, 14.0), 11.0, Align::Left, dim);
-            canvas.text(r.from, row(84.0, 22.0), 16.0, Align::Left, white);
+            canvas.text("from", row(92.0, 14.0), 11.0, Align::Left, dim);
+            canvas.text(r.from, row(106.0, 22.0), 16.0, Align::Left, white);
         }
-        canvas.text(r.along.as_str(), row(114.0, 18.0), 12.0, Align::Left, white);
-        canvas.text(r.cross.as_str(), row(134.0, 18.0), 12.0, Align::Left, white);
     }
 }
 
@@ -349,16 +337,6 @@ mod tests {
     }
 
     #[test]
-    fn head_tail_and_cross_parts() {
-        let (along, cross) = parts(20.0, 0.0);
-        assert!(close(along, 20.0) && close(cross, 0.0), "straight headwind");
-        let (along, cross) = parts(20.0, PI);
-        assert!(close(along, -20.0) && cross.abs() < 1e-3, "tailwind");
-        let (along, cross) = parts(20.0, PI / 2.0);
-        assert!(along.abs() < 1e-3 && close(cross, 20.0), "from the right");
-    }
-
-    #[test]
     fn the_arrow_points_downwind() {
         let center = (100.0, 100.0);
         // Headwind: the air comes at the car from the front, so the arrow points down the dial.
@@ -375,29 +353,32 @@ mod tests {
     }
 
     #[test]
-    fn reading_shows_speed_direction_and_parts() {
+    fn reading_shows_one_speed_and_direction() {
         let mut r = Reading::new();
         // 5 m/s from the west (270 degrees), car heading north: from the left, 18 km/h.
         r.fill(Some(5.0), Some(3.0 * PI / 2.0), Some(0.0));
         assert_eq!(r.speed.as_str(), "18");
         assert_eq!(r.from, "W");
-        assert_eq!(r.along.as_str(), "Head 0");
-        assert_eq!(r.cross.as_str(), "Cross 18");
         assert_eq!(r.arrow, Some(135), "270 degrees in 2-degree steps");
         assert_eq!(r.north, Some(0));
         assert_eq!(r.level, 1, "18 km/h is moderate");
-        // Heading west into it: a headwind.
+        // Heading west into it: a headwind, the same speed.
         r.fill(Some(5.0), Some(3.0 * PI / 2.0), Some(3.0 * PI / 2.0));
-        assert_eq!(r.along.as_str(), "Head 18");
+        assert_eq!(r.speed.as_str(), "18");
         assert_eq!(r.arrow, Some(0));
         assert_eq!(
             r.north,
             Some(45),
             "north is to the right of a car heading west"
         );
-        // Heading east: a tailwind.
+        // Heading east: a tailwind, still the same speed.
         r.fill(Some(5.0), Some(3.0 * PI / 2.0), Some(PI / 2.0));
-        assert_eq!(r.along.as_str(), "Tail 18");
+        assert_eq!(r.speed.as_str(), "18");
+        assert_eq!(r.arrow, Some(90));
+        // Whole km/h, also for a strong wind: 30 m/s is 108 km/h.
+        r.fill(Some(30.0), Some(0.0), Some(0.0));
+        assert_eq!(r.speed.as_str(), "108");
+        assert_eq!(r.level, 3);
     }
 
     #[test]
@@ -409,11 +390,10 @@ mod tests {
         r.fill(Some(0.1), Some(1.0), Some(0.0));
         assert_eq!(r.speed.as_str(), "0");
         assert_eq!((r.arrow, r.from), (None, ""), "calm");
-        assert!(r.along.as_str().is_empty());
         r.fill(Some(5.0), Some(1.0), None);
         assert_eq!(r.from, "NE", "direction without a heading: 57 degrees");
         assert_eq!(r.arrow, None);
-        assert!(r.along.as_str().is_empty());
+        assert_eq!(r.speed.as_str(), "18");
     }
 
     #[test]
