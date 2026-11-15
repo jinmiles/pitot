@@ -59,18 +59,46 @@ missing `[general]` table is added at the end). The overlay's reload of that wri
 shows and does nothing. A value from the slider holds over the file's in a reload for two seconds after the
 slider last moved, so the reload of one save cannot undo a newer value.
 
-## Moving widgets
+## Moving and resizing widgets
 
-Choose *Move widgets* in the tray menu or the Pitot window to place widgets with the mouse. Every enabled widget shows, also without
-the sim, under a tinted handle. Drag a handle with the left button; the widget follows and stays on its monitor.
-Releasing the button saves the widget's `x` and `y` to `config.toml`. Only those two numbers change in the file,
-so comments and layout stay. A missing `x` or `y` goes on the line after the widget's `[widgets.<name>]` header,
-and a missing table is added at the end. A widget written as an inline table without `x` and `y` cannot be saved
-this way; the log says so, and the widget keeps its new place until the file is reloaded or the overlay exits.
+Choose *Move widgets* in the tray menu or the Pitot window to place and size widgets with the mouse. Every enabled
+widget shows, also without the sim, under a tinted handle with a thin frame and a grip of dots in its bottom-right
+corner.
+
+- **Move**: drag the inside of a handle with the left button; the widget follows and stays on its monitor.
+- **Resize**: drag an edge (6 px wide) or a corner (16 px along each edge, the grip among them); the cursor shows
+  which. The widget takes the new size as it is dragged. It stays on its monitor and gets no smaller than its
+  smallest size (below). The opposite edges stay where they are.
+
+Releasing the button saves what changed to `config.toml`: `x` and `y` after a move, `width` and `height` after a
+resize, and all four when a left or top edge moved. Only those numbers change in the file, so comments and layout
+stay. A missing key goes on the line after the widget's `[widgets.<name>]` header, and a missing table is added at
+the end. A widget written as an inline table without those keys cannot be saved this way; the log says so, and the
+widget keeps its new place and size until the file is reloaded or the overlay exits. A click that changes nothing
+writes nothing.
+
+Resizing is the same as editing `width` and `height` in the file: the widget's box changes, not its text. Text and
+shapes keep their pixel size, and each widget lays out within the new box:
+
+| Widget | Smallest | In a larger box |
+|---|---|---|
+| `status` | 160 x 54 | the second line has more room; the rest stays empty |
+| `inputs` | 240 x 60 | a wider trace shows a longer history (2 px per sample, 60 samples a second); a taller one, a taller trace and a wheel up to 72 px |
+| `relative` | 400 x 167 | more cars, a pair at a time: one on each side of the player per 67 px of height (rows of 33⅓ px); a wider box widens the names |
+| `standings` | 400 x 96 | more rows (24 px each): more cars around the player, then more leaders per class. A shorter box shows fewer cars around the player first, then fewer leaders, then only the player's class, so the player stays in view; a wider one gets back the columns dropped for room |
+| `fuel` | 380 x 120 | the four columns and six lines spread out; below the default height the text is a size smaller |
+| `pit` | 380 x 110 | more cars (22 px rows); a wider box widens the names |
+| `sectors` | 340 x 120 | wider value columns; rows grow to 24 px, then the rest stays empty. Below 16 px a row, the last sectors are left out |
+| `wind` | 160 x 140 | a larger dial; the text column keeps its width |
+| `tires` | 200 x 150 | larger tire blocks |
+| `trackmap` | 200 x 150 | a larger map, with the same dots and road (a box smaller than the default thins them) |
+
+A size below the smallest in the file is raised to it too. While a widget is resized, its composition surfaces are
+made again at each new size and drawn whole; outside *Move widgets* nothing of this runs.
 
 Clicks outside the handles still reach the windows below. A right click on a handle opens the tray menu, and
-choosing *Move widgets* again (or turning it off in the Pitot window) ends moving. The overlay's own write to the file does not trigger a reload. A
-widget's monitor and size are set in the file.
+choosing *Move widgets* again (or turning it off in the Pitot window) ends moving. The overlay's own write to the
+file does not trigger a reload. A widget's monitor is set in the file.
 
 ## Recording and replays
 

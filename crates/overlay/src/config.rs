@@ -81,8 +81,8 @@ pub const DEFAULT_TOML: &str = r#"# Pitot overlay configuration. Changes apply w
 #
 # Positions are in physical pixels from the top-left corner of the widget's monitor.
 # `monitor` counts monitors from the left (0 is the leftmost); leave it out to use the primary monitor.
-# *Move widgets* in the tray menu places widgets with the mouse and saves their x and y here. The Pitot window
-# turns widgets on and off and saves their `enabled` here.
+# *Move widgets* in the tray menu places and resizes widgets with the mouse and saves their x, y, width, and
+# height here. The Pitot window turns widgets on and off and saves their `enabled` here.
 
 # The Pitot window opens when the overlay starts. With start_in_tray = true, only the tray icon shows; clicking
 # it opens the window.
@@ -705,10 +705,34 @@ pub fn load_or_create(path: &Path) -> Result<Config, ConfigError> {
 /// Returns `text` with widget `name` placed at (`x`, `y`). Only the numbers of its `x` and `y` keys change, so
 /// comments and layout stay as they are. See [`with_fields`] for missing keys and what cannot be edited.
 pub fn with_position(text: &str, name: &str, x: i32, y: i32) -> Result<String, ConfigError> {
-    let fields = [("x", x.to_string()), ("y", y.to_string())];
+    with_placement(text, name, Some((x, y)), None)
+}
+
+/// Returns `text` with widget `name` at `position` (`x`, `y`) and of `size` (`width`, `height`), each when given.
+/// Only the numbers of those keys change, so comments and layout stay as they are. See [`with_fields`] for missing
+/// keys and what cannot be edited.
+pub fn with_placement(
+    text: &str,
+    name: &str,
+    position: Option<(i32, i32)>,
+    size: Option<(u32, u32)>,
+) -> Result<String, ConfigError> {
+    let mut fields = Vec::with_capacity(4);
+    if let Some((x, y)) = position {
+        fields.extend([("x", x.to_string()), ("y", y.to_string())]);
+    }
+    if let Some((width, height)) = size {
+        fields.extend([("width", width.to_string()), ("height", height.to_string())]);
+    }
     with_fields(text, &["widgets", name], &fields, |config| {
-        if let Some(widget) = config.widget_mut(name) {
+        let Some(widget) = config.widget_mut(name) else {
+            return;
+        };
+        if let Some((x, y)) = position {
             (widget.x, widget.y) = (x, y);
+        }
+        if let Some((width, height)) = size {
+            (widget.width, widget.height) = (Some(width), Some(height));
         }
     })
 }
@@ -821,6 +845,16 @@ fn with_fields(
 /// Saves widget `name` at (`x`, `y`) in the file at `path` (see [`with_position`]).
 pub fn save_position(path: &Path, name: &str, x: i32, y: i32) -> Result<(), ConfigError> {
     save_edit(path, |text| with_position(text, name, x, y))
+}
+
+/// Saves widget `name`'s position and size, each when given, in the file at `path` (see [`with_placement`]).
+pub fn save_placement(
+    path: &Path,
+    name: &str,
+    position: Option<(i32, i32)>,
+    size: Option<(u32, u32)>,
+) -> Result<(), ConfigError> {
+    save_edit(path, |text| with_placement(text, name, position, size))
 }
 
 /// Saves widget `name` turned on or off in the file at `path` (see [`with_enabled`]).
@@ -1189,6 +1223,108 @@ mod tests {
             place("[widgets.fuel\n", "fuel"),
             Err(ConfigError::Parse(_))
         ));
+    }
+
+    #[test]
+    fn saving_a_size_changes_only_its_numbers() {
+        let sized =
+            with_placement(DEFAULT_TOML, "relative", None, Some((520, 410))).expect("sized");
+        let relative = Config::parse(&sized).expect("parses");
+        let relative = widget(&relative, "relative");
+        assert_eq!((relative.width, relative.height), (Some(520), Some(410)));
+        assert_eq!((relative.x, relative.y), (1460, 560), "the place stays");
+        let changed: Vec<(&str, &str)> = DEFAULT_TOML
+            .lines()
+            .zip(sized.lines())
+            .filter(|(a, b)| a != b)
+            .collect();
+        assert_eq!(
+            changed,
+            [
+                ("width = 460", "width = 520"),
+                ("height = 300", "height = 410")
+            ]
+        );
+        assert_eq!(DEFAULT_TOML.lines().count(), sized.lines().count());
+
+        // A top-left corner moves the place too; comments stay.
+        let commented =
+            "[widgets.fuel]\nx = 5 # left edge\ny = 6\nwidth = 420 # wide\nheight = 150\n";
+        assert_eq!(
+            with_placement(commented, "fuel", Some((1, 2)), Some((424, 154))).expect("placed"),
+            "[widgets.fuel]\nx = 1 # left edge\ny = 2\nwidth = 424 # wide\nheight = 154\n"
+        );
+        let inline = "[widgets]\nfuel = { width = 100, height = 50 }\n";
+        assert_eq!(
+            with_placement(inline, "fuel", None, Some((300, 200))).expect("sized"),
+            "[widgets]\nfuel = { width = 300, height = 200 }\n"
+        );
+        assert_eq!(
+            with_placement(DEFAULT_TOML, "fuel", None, None).expect("nothing"),
+            DEFAULT_TOML,
+            "nothing to change"
+        );
+    }
+
+    #[test]
+    fn saving_a_size_adds_missing_keys_and_tables() {
+        // The status widget has no size in the default file: the keys go under its header.
+        let sized = with_placement(DEFAULT_TOML, "status", None, Some((340, 60))).expect("sized");
+        assert!(
+            sized.contains("[widgets.status]\nwidth = 340\nheight = 60\nenabled = true\n"),
+            "{sized}"
+        );
+        let status = Config::parse(&sized).expect("parses");
+        let status = widget(&status, "status");
+        assert_eq!((status.width, status.height), (Some(340), Some(60)));
+        assert_eq!(
+            with_placement(
+                "[widgets.fuel]\nwidth = 50\n",
+                "fuel",
+                None,
+                Some((400, 160))
+            )
+            .expect("sized"),
+            "[widgets.fuel]\nheight = 160\nwidth = 400\n"
+        );
+        assert_eq!(
+            with_placement("[general]\n", "wind", Some((3, 4)), Some((210, 180))).expect("sized"),
+            "[general]\n\n[widgets.wind]\nx = 3\ny = 4\nwidth = 210\nheight = 180\n"
+        );
+        assert!(matches!(
+            with_placement(
+                "[widgets]\nfuel = { x = 1 }\n",
+                "fuel",
+                None,
+                Some((400, 160))
+            ),
+            Err(ConfigError::Unplaceable)
+        ));
+        // A size the configuration refuses is not written.
+        assert!(matches!(
+            with_placement(DEFAULT_TOML, "fuel", None, Some((9000, 160))),
+            Err(ConfigError::Invalid {
+                widget: "fuel",
+                field: "width"
+            })
+        ));
+    }
+
+    #[test]
+    fn saved_sizes_replace_the_file() {
+        let dir = std::env::temp_dir().join(format!("pitot-size-{}", std::process::id()));
+        fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("config.toml");
+        fs::write(&path, DEFAULT_TOML).expect("write");
+        save_placement(&path, "inputs", Some((600, 880)), Some((800, 140))).expect("saved");
+        let config = load_or_create(&path).expect("loads");
+        let inputs = widget(&config, "inputs");
+        assert_eq!(
+            (inputs.x, inputs.y, inputs.width, inputs.height),
+            (600, 880, Some(800), Some(140))
+        );
+        assert!(!path.with_extension("toml.tmp").exists());
+        fs::remove_dir_all(&dir).expect("cleans up");
     }
 
     #[test]

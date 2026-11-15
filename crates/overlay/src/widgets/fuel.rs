@@ -272,16 +272,21 @@ pub struct FuelWidget {
 
 impl FuelWidget {
     pub fn new(config: &WidgetConfig) -> Self {
-        Self {
-            width: config.width.unwrap_or(420),
-            height: config.height.unwrap_or(150).max(90),
+        let mut widget = Self {
+            width: 0,
+            height: 0,
             opacity: config.opacity,
             tracker: FuelTracker::default(),
             lines: Lines::new(),
             next: Lines::new(),
-        }
+        };
+        widget.resize(config.width.unwrap_or(420), config.height.unwrap_or(150));
+        widget
     }
 }
+
+/// Four columns of values, and six lines that keep their text a size below the default's.
+const MIN_SIZE: (u32, u32) = (380, 120);
 
 const WHITE: u32 = 0xF0_F2F5;
 const DIM: u32 = 0xA0_A6AE;
@@ -304,6 +309,15 @@ impl Register for FuelWidget {
 impl Widget for FuelWidget {
     fn size(&self) -> (u32, u32) {
         (self.width, self.height)
+    }
+
+    fn min_size(&self) -> (u32, u32) {
+        MIN_SIZE
+    }
+
+    fn resize(&mut self, width: u32, height: u32) {
+        self.width = width.max(MIN_SIZE.0);
+        self.height = height.max(MIN_SIZE.1);
     }
 
     fn interval(&self) -> Duration {

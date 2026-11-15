@@ -27,9 +27,16 @@ use super::text::FixedText;
 use super::trackclock::{SharedTrackClock, TrackClock};
 use super::{Build, MAX_LAYERS, Redraw, Register, Widget};
 
-/// Cars shown on each side of the player.
-const SIDE: usize = 3;
-const ROWS: usize = 2 * SIDE + 1;
+/// Rows per 100 px of height: a row is 33⅓ px, so the default 300 px holds the header, three cars on each side of
+/// the player, and the footer. A taller widget shows more cars, a pair at a time; the rows share any height left.
+const ROWS_PER_100_PX: u32 = 3;
+/// Text sizes, the same at any height.
+const FRAME_TEXT: f32 = 14.0;
+const ROW_TEXT: f32 = 15.0;
+/// Height of the badges and the rating and license boxes in a row.
+const BADGE_HEIGHT: f32 = 56.0 / 3.0;
+/// One car on each side of the player, and room for the name between the left and right columns.
+const MIN_SIZE: (u32, u32) = (400, 167);
 /// Lap time used when neither the session nor the class gives one.
 const FALLBACK_LAP: f32 = 90.0;
 
@@ -212,8 +219,13 @@ pub struct RelativeWidget {
     width: u32,
     height: u32,
     opacity: f32,
+    /// Cars shown on each side of the player.
+    side: usize,
+    /// The cars, farthest ahead first: `2 * side + 1` rows.
     rows: Vec<Row>,
     next: Vec<Row>,
+    /// (lap distance from the player, gap, car index) of each row's car this update.
+    order: Vec<Option<(f32, f32, usize)>>,
     frame: Frame,
     next_frame: Frame,
     /// (lap distance from the player, gap, car index) of cars on track this update; capacity grows to the car
@@ -227,8 +239,12 @@ pub struct RelativeWidget {
     clock: SharedTrackClock,
 }
 
-/// Rows: the header, the cars, and the footer.
-const SLOTS: usize = ROWS + 2;
+/// Cars shown on each side of the player in a widget `height` pixels tall: as many as fit between the header and
+/// the footer, the same number on both sides.
+fn cars_each_side(height: u32) -> usize {
+    let slots = (height * ROWS_PER_100_PX / 100) as usize;
+    slots.saturating_sub(3) / 2
+}
 
 impl RelativeWidget {
     pub fn new(config: &WidgetConfig) -> Self {
@@ -237,19 +253,28 @@ impl RelativeWidget {
 
     /// A relative widget timing gaps with `clock`, which other widgets may observe too.
     pub(crate) fn with_clock(config: &WidgetConfig, clock: SharedTrackClock) -> Self {
-        Self {
-            width: config.width.unwrap_or(460),
-            height: config.height.unwrap_or(300).max(SLOTS as u32 * 12),
+        let mut widget = Self {
+            width: 0,
+            height: 0,
             opacity: config.opacity,
-            rows: (0..ROWS).map(|_| Row::new()).collect(),
-            next: (0..ROWS).map(|_| Row::new()).collect(),
+            side: 0,
+            rows: Vec::new(),
+            next: Vec::new(),
+            order: Vec::new(),
             frame: Frame::new(),
             next_frame: Frame::new(),
             cars: Vec::with_capacity(72),
             on_pit: Vec::with_capacity(72),
             out_lap_of: Vec::with_capacity(72),
             clock,
-        }
+        };
+        widget.resize(config.width.unwrap_or(460), config.height.unwrap_or(300));
+        widget
+    }
+
+    /// Rows: the header, the cars, and the footer.
+    fn slots(&self) -> usize {
+        self.rows.len() + 2
     }
 
     fn fill_frame(&mut self, view: &View) {
@@ -392,19 +417,21 @@ impl RelativeWidget {
         let split = self
             .cars
             .partition_point(|&(distance, _, _)| distance <= 0.0);
-        let behind = self.cars[..split].iter().rev().take(SIDE);
-        let ahead = self.cars[split..].iter().take(SIDE);
+        let side = self.side;
+        let behind = self.cars[..split].iter().rev().take(side);
+        let ahead = self.cars[split..].iter().take(side);
         let lap_of = |i: usize| snap.i32(vars.car_lap, i).unwrap_or(0);
         // Rows: farthest ahead at the top, the player in the middle, farthest behind at the bottom.
-        let mut slots: [Option<(f32, f32, usize)>; ROWS] = [None; ROWS];
+        let slots = &mut self.order;
+        slots.iter_mut().for_each(|slot| *slot = None);
         for (n, &car) in ahead.enumerate() {
-            slots[SIDE - 1 - n] = Some(car);
+            slots[side - 1 - n] = Some(car);
         }
-        slots[SIDE] = Some((0.0, 0.0, player));
+        slots[side] = Some((0.0, 0.0, player));
         for (n, &car) in behind.enumerate() {
-            slots[SIDE + 1 + n] = Some(car);
+            slots[side + 1 + n] = Some(car);
         }
-        for (row, slot) in self.next.iter_mut().zip(slots) {
+        for (row, &slot) in self.next.iter_mut().zip(slots.iter()) {
             let Some((distance, gap, i)) = slot else {
                 continue;
             };
@@ -465,12 +492,12 @@ impl RelativeWidget {
     }
 
     fn row_height(&self) -> f32 {
-        self.height as f32 / SLOTS as f32
+        self.height as f32 / self.slots() as f32
     }
 
     fn draw_frame_line(&self, canvas: &mut Canvas<'_>, y: f32, top: bool) {
         let (w, row_h) = (self.width as f32, self.row_height());
-        let size = (row_h * 0.42).clamp(11.0, 16.0);
+        let size = FRAME_TEXT;
         let dim = Color::rgb(DIM, 1.0);
         let white = Color::rgb(WHITE, 1.0);
         let f = &self.frame;
@@ -525,7 +552,9 @@ impl RelativeWidget {
 
     fn draw_row(&self, canvas: &mut Canvas<'_>, y: f32, row: &Row) {
         let (w, row_h) = (self.width as f32, self.row_height());
-        let size = (row_h * 0.45).clamp(12.0, 18.0);
+        let size = ROW_TEXT;
+        // Badges and boxes keep their height, centered in the row.
+        let badge_y = y + (row_h - BADGE_HEIGHT) / 2.0;
         let small = size * 0.78;
         let cell = |x: f32, width: f32| Rect::new(x, y, width, row_h);
         if row.player {
@@ -574,7 +603,7 @@ impl RelativeWidget {
             dim,
         );
         canvas.fill(
-            Rect::new(rating_x + 2.0, y + row_h * 0.22, 40.0, row_h * 0.56),
+            Rect::new(rating_x + 2.0, badge_y, 40.0, BADGE_HEIGHT),
             Color::rgb(0xE8_EAED, 0.9 * alpha),
         );
         canvas.text(
@@ -586,7 +615,7 @@ impl RelativeWidget {
         );
         if !row.license_class.as_str().is_empty() {
             canvas.fill(
-                Rect::new(license_x, y + row_h * 0.22, 40.0, row_h * 0.56),
+                Rect::new(license_x, badge_y, 40.0, BADGE_HEIGHT),
                 Color::rgb(row.license_color, 0.9 * alpha),
             );
             let ink = Color::rgb(0xFF_FFFF, alpha);
@@ -610,7 +639,7 @@ impl RelativeWidget {
             |canvas: &mut Canvas<'_>, label: &str, fill: u32, ink: u32, border: Option<u32>| {
                 let width = 12.0 + 8.0 * label.chars().count() as f32;
                 badge_x -= width + 4.0;
-                let rect = Rect::new(badge_x, y + row_h * 0.22, width, row_h * 0.56);
+                let rect = Rect::new(badge_x, badge_y, width, BADGE_HEIGHT);
                 canvas.fill(rect, Color::rgb(fill, 1.0));
                 if let Some(border) = border {
                     let (l, t, r, b) = (rect.x, rect.y, rect.x + rect.w, rect.y + rect.h);
@@ -664,6 +693,25 @@ impl Widget for RelativeWidget {
         (self.width, self.height)
     }
 
+    fn min_size(&self) -> (u32, u32) {
+        MIN_SIZE
+    }
+
+    fn resize(&mut self, width: u32, height: u32) {
+        self.width = width.max(MIN_SIZE.0);
+        self.height = height.max(MIN_SIZE.1);
+        self.side = cars_each_side(self.height);
+        let rows = 2 * self.side + 1;
+        for list in [&mut self.rows, &mut self.next] {
+            list.truncate(rows);
+            list.resize_with(rows, Row::new);
+            // Filled again at the next update.
+            list.iter_mut().for_each(|row| row.used = false);
+        }
+        self.order.clear();
+        self.order.resize(rows, None);
+    }
+
     fn interval(&self) -> Duration {
         Duration::from_millis(100)
     }
@@ -689,7 +737,7 @@ impl Widget for RelativeWidget {
             first_row.map(|r| r + 1)
         };
         let last = if footer {
-            Some(SLOTS - 1)
+            Some(self.slots() - 1)
         } else {
             last_row.map(|r| r + 1)
         };
@@ -727,8 +775,9 @@ impl Widget for RelativeWidget {
                 self.draw_row(canvas, (n + 1) as f32 * row_h, row);
             }
         }
-        if visible(SLOTS - 1) {
-            self.draw_frame_line(canvas, (SLOTS - 1) as f32 * row_h, false);
+        let footer = self.slots() - 1;
+        if visible(footer) {
+            self.draw_frame_line(canvas, footer as f32 * row_h, false);
         }
     }
 

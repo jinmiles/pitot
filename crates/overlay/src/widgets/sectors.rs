@@ -26,6 +26,8 @@ const MAX_ROW_HEIGHT: f32 = 24.0;
 const MIN_ROW_HEIGHT: f32 = 16.0;
 const TEXT_SIZE: f32 = 13.0;
 const LABEL_SIZE: f32 = 11.0;
+/// Five value columns, and the header with six sectors' rows at their smallest.
+const MIN_SIZE: (u32, u32) = (340, 120);
 /// `CarIdxTrackSurface` value for a car that is not in the world.
 const NOT_IN_WORLD: i32 = -1;
 /// How far apart in time two passes of a sector may be to count as next to each other, while the player has no
@@ -304,8 +306,8 @@ pub struct SectorsWidget {
 
 impl SectorsWidget {
     pub fn new(config: &WidgetConfig) -> Self {
-        let width = config.width.unwrap_or(400);
-        let height = config.height.unwrap_or(200).max(HEADER_HEIGHT as u32 * 2);
+        let width = config.width.unwrap_or(400).max(MIN_SIZE.0);
+        let height = config.height.unwrap_or(200).max(MIN_SIZE.1);
         Self {
             width,
             height,
@@ -480,6 +482,15 @@ impl Register for SectorsWidget {
 impl Widget for SectorsWidget {
     fn size(&self) -> (u32, u32) {
         (self.width, self.height)
+    }
+
+    fn min_size(&self) -> (u32, u32) {
+        MIN_SIZE
+    }
+
+    fn resize(&mut self, width: u32, height: u32) {
+        self.width = width.max(MIN_SIZE.0);
+        self.height = height.max(MIN_SIZE.1);
     }
 
     fn interval(&self) -> Duration {

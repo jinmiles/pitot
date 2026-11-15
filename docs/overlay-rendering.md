@@ -28,10 +28,16 @@ menu.
   updated or drawn), *Reload configuration*, and *Quit Pitot*. Windows 11 shows new tray icons in the
   hidden-icons area next to the clock until they are pinned.
 - While moving widgets, each widget gets a move handle: a small layered top-level window over it, tinted at
-  28% opacity, that never takes the focus. Only the handles take the mouse, so clicks elsewhere still pass
-  through. Dragging moves the handle and the widget's composition visuals (no redraw), and releasing the
-  button saves the position ([configuration](configuration.md#moving-widgets)). The overlay windows themselves
-  stay click-through. Outside move mode no handle exists.
+  28% opacity with a thin frame and a grip of dots at the bottom right, that never takes the focus. Only the
+  handles take the mouse, so clicks elsewhere still pass through. The handle answers `WM_SETCURSOR` with the
+  move or resize cursor for the spot under the pointer, and captures the mouse while the button is held.
+  Dragging the inside moves the handle and the widget's composition visuals (no redraw). Dragging an edge or a
+  corner resizes the handle, within its monitor and down to the widget's `min_size()`; the app calls the
+  widget's `resize`, gives its layers new composition surfaces at the new size (`Renderer::resize_layer`, once
+  per batch of mouse messages, since a surface cannot change its size), and draws them whole. Releasing the button
+  saves what changed ([configuration](configuration.md#moving-and-resizing-widgets)). The overlay windows
+  themselves stay click-through. Outside move mode no handle exists, and widgets keep the surfaces they were made
+  with.
 - `WM_CLOSE` to any of these windows quits like Quit, so tools that close apps the usual way (End task, the
   benchmark runner) end the overlay cleanly and its exit line with the data counters is written. The Pitot
   window, if open, closes with it.
@@ -61,7 +67,8 @@ menu.
   text size when the device is created: each glyph is rendered once in white, and drawing it is a colored
   `FillOpacityMask` from the atlas, with no DirectWrite work per frame.
 - Stable text without digits (names, labels) uses an `IDWriteTextLayout` cached per string, size, alignment, and
-  box, created on first use and drawn with `DrawTextLayout`. The cache is cleared past 512 entries.
+  box, created on first use and drawn with `DrawTextLayout`. A string drawn in more than one box (an arrow in two
+  columns, `PIT` in two widgets) keeps a layout for each. The cache is cleared past 512 layouts.
 - Text that mixes digits with letters (a tick counter, "46.0 laps") changes too often to cache and is drawn with
   `DrawText` directly. Caching it filled the cache every couple of minutes and made private bytes swing between
   16 and 23.5 MB; drawn directly, they stay flat.
@@ -106,6 +113,13 @@ Each widget type implements `Register` next to its `Widget` implementation:
   `config.options_as::<MapOptions>()`.
 - `fn build(cx, vars)`: makes the widget from `cx.config` (its `WidgetConfig`) and the shared trackers
   `cx.shared`.
+
+Its `Widget` implementation gives, besides drawing, its smallest size (`min_size`) and `resize(width, height)`,
+which *Move widgets* calls while the widget is resized. A resized widget must be the widget made at that size:
+the same `size()` and `layers()`, with what it follows of the session kept. Text and shapes keep their pixel
+size; the widget lays out within the box (more rows, a longer history). `resize` may allocate (buffers for more
+rows), so updates and draws at the new size do not. The usual pattern is a constructor that makes the widget
+empty and calls `resize` with the configured size.
 
 ### Shared trackers
 
@@ -187,12 +201,14 @@ not `docs/configuration.md` or the benchmark configurations. `list.rs` and `docs
 What checks the new widget without more code:
 
 - `cargo test -p pitot-overlay`: names and labels are unique, rates are in range, every widget is made from its
-  defaults, `docs/widgets.md` has its row in the list's order, the default file and the defaults agree, and the
-  benchmark configurations still turn on exactly the four reference widgets.
+  defaults, a resized widget equals the widget made at that size (and keeps its layers inside it), `docs/widgets.md`
+  has its row in the list's order, the default file and the defaults agree, and the benchmark configurations still
+  turn on exactly the four reference widgets.
 - `cargo test -p pitot-overlay --features alloc-check --test alloc_check`:
   `every_widget_and_the_histories_do_not_allocate_per_update` makes every widget of the list and updates them
-  through a light race of three cars, counting allocations. A widget whose work needs other data adds its own
-  test there.
+  through a light race of three cars, counting allocations; with a render device it draws them too, at their
+  default size, their smallest, and twice the default. A widget whose work needs other data adds its own test
+  there.
 
 A widget on by default joins the benchmark's measured set unless `benchmarks/pitot/four.toml` and `inputs.toml`
 turn it off; the benchmark test fails until both do (then copy them to the `*.local.toml` files with `monitor` set).

@@ -26,9 +26,12 @@ gaps](#live-race-order-and-gaps)).
 
 ## Layout
 
-Each class starts with a header row; the class leaders (three) follow. In the player's class, the three cars on
-each side of the player follow too, after a thin line when cars are left out between them. The configured height
-sets the most rows shown; the background ends at the last row in use, and the space below stays transparent.
+Each class starts with a header row; its leaders follow. In the player's class, the cars on each side of the player
+follow too, after a thin line when cars are left out between them. The height sets the rows (24 px each), and the
+cars fill them: three leaders per class and three cars on each side of the player, then, while rows are left, more
+cars around the player, then more leaders, until every car is shown. A short widget shows fewer cars around the
+player first, then fewer leaders per class (down to one), then only the player's class, so the player stays in
+view. The background ends at the last row in use, and the space below stays transparent.
 
 Header: class name in the class color, strength of field, cars in the world over cars entered, and laps: the class
 leader's laps over the session's laps, or `≈` an estimate from the time left at the leader's pace in a timed
