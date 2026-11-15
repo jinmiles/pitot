@@ -86,9 +86,12 @@ pub const DEFAULT_TOML: &str = r#"# Pitot overlay configuration. Changes apply w
 
 # The Pitot window opens when the overlay starts. With start_in_tray = true, only the tray icon shows; clicking
 # it opens the window.
+# background_opacity sets how opaque the widgets' backgrounds are, from 0 (none) to 100 (opaque); text and
+# graphs stay as they are. At 82 each widget uses its own opacity below. The Pitot window's slider saves it here.
 [general]
 font = "Segoe UI"
 start_in_tray = false
+background_opacity = 82
 
 # Records each session while you drive into %APPDATA%\Pitot\captures, so a replay of it (in the session or
 # from a saved .rpy file) can show the widgets. The oldest recordings are deleted once the folder holds more
@@ -213,6 +216,8 @@ pub struct General {
     pub font: String,
     /// Start without opening the Pitot window; the tray icon opens it.
     pub start_in_tray: bool,
+    /// How opaque the widgets' backgrounds are, in percent: see [`background_alpha`].
+    pub background_opacity: u8,
 }
 
 impl Default for General {
@@ -220,7 +225,34 @@ impl Default for General {
         Self {
             font: "Segoe UI".to_owned(),
             start_in_tray: false,
+            background_opacity: DEFAULT_BACKGROUND_OPACITY,
         }
+    }
+}
+
+/// `[general] background_opacity` when the file leaves it out: every widget's background at its own `opacity`.
+pub const DEFAULT_BACKGROUND_OPACITY: u8 = 82;
+
+/// The highest `[general] background_opacity`: opaque backgrounds.
+pub const MAX_BACKGROUND_OPACITY: u8 = 100;
+
+/// The alpha of a background fill whose own alpha is `base` (a widget's `opacity`, or a band drawn over its panel)
+/// at `[general] background_opacity` = `percent`. At [`DEFAULT_BACKGROUND_OPACITY`] it is `base`; below, it falls
+/// in proportion to 0 at 0; above, it rises in proportion to 1 at 100. A widget at the default `opacity` (0.82)
+/// gets the percent itself as its panel's alpha. Percents above 100 count as 100.
+pub fn background_alpha(base: f32, percent: u8) -> f32 {
+    let base = base.clamp(0.0, 1.0);
+    let percent = percent.min(MAX_BACKGROUND_OPACITY);
+    // Exactly `base`, so the default draws as it did before the setting existed.
+    if percent == DEFAULT_BACKGROUND_OPACITY {
+        return base;
+    }
+    let (p, d) = (f32::from(percent), f32::from(DEFAULT_BACKGROUND_OPACITY));
+    let max = f32::from(MAX_BACKGROUND_OPACITY);
+    if p < d {
+        base * p / d
+    } else {
+        base + (1.0 - base) * (p - d) / (max - d)
     }
 }
 
@@ -547,7 +579,8 @@ pub enum ConfigError {
         widget: &'static str,
         field: &'static str,
     },
-    /// A widget's position or `enabled` cannot be written into the file without changing more than that.
+    /// A widget's position or `enabled`, or the background opacity, cannot be written into the file without changing
+    /// more than that.
     Unplaceable,
     /// A setting outside the widgets is outside its allowed range.
     OutOfRange {
@@ -565,7 +598,8 @@ impl fmt::Display for ConfigError {
                 "invalid configuration: widgets.{widget}.{field} is out of range"
             ),
             Self::Unplaceable => f.write_str(
-                "cannot change the file in place: write the widget as a [widgets.<name>] table",
+                "cannot change the file in place: write the table with its own header, such as \
+                 [widgets.<name>] or [general]",
             ),
             Self::OutOfRange { key } => write!(f, "invalid configuration: {key} is out of range"),
         }
@@ -624,6 +658,11 @@ impl Config {
     }
 
     fn validate(&self) -> Result<(), ConfigError> {
+        if self.general.background_opacity > MAX_BACKGROUND_OPACITY {
+            return Err(ConfigError::OutOfRange {
+                key: "general.background_opacity",
+            });
+        }
         if !(0.1..=10_000.0).contains(&self.recording.max_gb) {
             return Err(ConfigError::OutOfRange {
                 key: "recording.max_gb",
@@ -667,37 +706,62 @@ pub fn load_or_create(path: &Path) -> Result<Config, ConfigError> {
 /// comments and layout stay as they are. See [`with_fields`] for missing keys and what cannot be edited.
 pub fn with_position(text: &str, name: &str, x: i32, y: i32) -> Result<String, ConfigError> {
     let fields = [("x", x.to_string()), ("y", y.to_string())];
-    with_fields(text, name, &fields, |widget| (widget.x, widget.y) = (x, y))
+    with_fields(text, &["widgets", name], &fields, |config| {
+        if let Some(widget) = config.widget_mut(name) {
+            (widget.x, widget.y) = (x, y);
+        }
+    })
 }
 
 /// Returns `text` with widget `name` turned on or off. Only the value of its `enabled` key changes. See
 /// [`with_fields`] for missing keys and what cannot be edited.
 pub fn with_enabled(text: &str, name: &str, enabled: bool) -> Result<String, ConfigError> {
     let fields = [("enabled", enabled.to_string())];
-    with_fields(text, name, &fields, |widget| widget.enabled = enabled)
+    with_fields(text, &["widgets", name], &fields, |config| {
+        if let Some(widget) = config.widget_mut(name) {
+            widget.enabled = enabled;
+        }
+    })
 }
 
-/// Returns `text` with the keys of widget `name` in `fields` set to their TOML values. Only those values change,
-/// so comments and layout stay as they are. A missing key goes on the line after the widget's `[widgets.<name>]`
-/// header, and a missing table is added at the end. `expect` makes the same change to the parsed configuration,
-/// and the edited text must parse to exactly that. Fails when the widget is written in a form this cannot edit
-/// in place (an inline table without the keys, or dotted keys) or when `text` does not parse.
+/// Returns `text` with `[general] background_opacity` set to `percent`, at most 100. Only that value changes; a
+/// missing key goes on the line after the `[general]` header, and a missing table is added at the end. See
+/// [`with_fields`] for what cannot be edited.
+pub fn with_background_opacity(text: &str, percent: u8) -> Result<String, ConfigError> {
+    let percent = percent.min(MAX_BACKGROUND_OPACITY);
+    let fields = [("background_opacity", percent.to_string())];
+    with_fields(text, &["general"], &fields, |config| {
+        config.general.background_opacity = percent;
+    })
+}
+
+/// Returns `text` with the keys in `fields` of the table at `path` (`["widgets", name]`, `["general"]`) set to
+/// their TOML values. Only those values change, so comments and layout stay as they are. A missing key goes on the
+/// line after the table's header (`[widgets.<name>]`), and a missing table is added at the end. `expect` makes the
+/// same change to the parsed configuration, and the edited text must parse to exactly that. Fails when the table
+/// is written in a form this cannot edit in place (an inline table without the keys, or dotted keys) or when
+/// `text` does not parse.
 fn with_fields(
     text: &str,
-    name: &str,
+    path: &[&str],
     fields: &[(&str, String)],
-    expect: impl FnOnce(&mut WidgetConfig),
+    expect: impl FnOnce(&mut Config),
 ) -> Result<String, ConfigError> {
     let before = Config::parse(text)?;
     let parse_error = |e: toml::de::Error| ConfigError::Parse(e.to_string());
     let document = toml::de::DeTable::parse(text).map_err(parse_error)?;
-    let widget = match document.get_ref().get("widgets").map(|w| w.get_ref()) {
-        Some(toml::de::DeValue::Table(widgets)) => widgets.get_key_value(name),
-        _ => None,
-    };
+    let (name, parents) = path.split_last().ok_or(ConfigError::Unplaceable)?;
+    let mut parent = Some(document.get_ref());
+    for key in parents {
+        parent = match parent.and_then(|t| t.get(*key)).map(|v| v.get_ref()) {
+            Some(toml::de::DeValue::Table(table)) => Some(table),
+            _ => None,
+        };
+    }
+    let found = parent.and_then(|t| t.get_key_value(*name));
     // Edits as (byte range, replacement), applied from the end so earlier ranges stay valid.
     let mut edits: Vec<(std::ops::Range<usize>, String)> = Vec::new();
-    match widget {
+    match found {
         Some((key, value)) => {
             let toml::de::DeValue::Table(table) = value.get_ref() else {
                 return Err(ConfigError::Unplaceable);
@@ -710,7 +774,7 @@ fn with_fields(
                 }
             }
             if !missing.is_empty() {
-                // Only a `[widgets.<name>]` header line can take new keys on the line below it.
+                // Only a table's header line, such as `[widgets.<name>]`, can take new keys on the line below it.
                 let line_start = text[..key.span().start].rfind('\n').map_or(0, |i| i + 1);
                 if !text[line_start..].trim_start().starts_with('[') {
                     return Err(ConfigError::Unplaceable);
@@ -732,7 +796,7 @@ fn with_fields(
             } else {
                 "\n\n"
             };
-            let mut table = format!("{gap}[widgets.{name}]\n");
+            let mut table = format!("{gap}[{}]\n", path.join("."));
             for (field, value) in fields {
                 table.push_str(&format!("{field} = {value}\n"));
             }
@@ -747,9 +811,7 @@ fn with_fields(
     // The edit must make the change and nothing else.
     let after = Config::parse(&out)?;
     let mut expected = before;
-    if let Some(widget) = expected.widget_mut(name) {
-        expect(widget);
-    }
+    expect(&mut expected);
     if after != expected {
         return Err(ConfigError::Unplaceable);
     }
@@ -764,6 +826,11 @@ pub fn save_position(path: &Path, name: &str, x: i32, y: i32) -> Result<(), Conf
 /// Saves widget `name` turned on or off in the file at `path` (see [`with_enabled`]).
 pub fn save_enabled(path: &Path, name: &str, enabled: bool) -> Result<(), ConfigError> {
     save_edit(path, |text| with_enabled(text, name, enabled))
+}
+
+/// Saves `[general] background_opacity` in the file at `path` (see [`with_background_opacity`]).
+pub fn save_background_opacity(path: &Path, percent: u8) -> Result<(), ConfigError> {
+    save_edit(path, |text| with_background_opacity(text, percent))
 }
 
 /// Rewrites the file at `path` with `edit`. Writes a temporary file next to it first and moves it over the old
@@ -954,6 +1021,12 @@ mod tests {
             four.general.start_in_tray && inputs.general.start_in_tray,
             "measured without the Pitot window"
         );
+        for general in [&four.general, &inputs.general] {
+            assert_eq!(
+                general.background_opacity, DEFAULT_BACKGROUND_OPACITY,
+                "default backgrounds"
+            );
+        }
     }
 
     #[test]
@@ -1162,6 +1235,151 @@ mod tests {
             with_enabled("[widgets.fuel]\nx = 1\n", "radar", false),
             Err(ConfigError::Parse(_))
         ));
+    }
+
+    #[test]
+    fn background_opacity_defaults_to_the_widgets_own() {
+        assert_eq!(
+            Config::default().general.background_opacity,
+            DEFAULT_BACKGROUND_OPACITY
+        );
+        assert_eq!(
+            Config::parse("[general]\nfont = \"Arial\"\n")
+                .expect("parses")
+                .general
+                .background_opacity,
+            82,
+            "left out"
+        );
+        let config = Config::parse("[general]\nbackground_opacity = 0\n").expect("parses");
+        assert_eq!(config.general.background_opacity, 0);
+        assert_eq!(
+            config.general.font, "Segoe UI",
+            "other fields keep defaults"
+        );
+        assert!(matches!(
+            Config::parse("[general]\nbackground_opacity = 101\n"),
+            Err(ConfigError::OutOfRange {
+                key: "general.background_opacity"
+            })
+        ));
+        // A percent is a whole number from 0 to 100.
+        for bad in ["-1", "50.5", "\"50\"", "300"] {
+            assert!(
+                Config::parse(&format!("[general]\nbackground_opacity = {bad}\n")).is_err(),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn background_opacity_maps_onto_each_widgets_own() {
+        // At the default every background keeps its own alpha exactly, so nothing changes for existing files.
+        for base in [0.0, 0.3, 0.6, 0.82, 1.0] {
+            assert_eq!(background_alpha(base, DEFAULT_BACKGROUND_OPACITY), base);
+            assert_eq!(background_alpha(base, 0), 0.0, "{base}: none at 0");
+            assert!(
+                (background_alpha(base, 100) - 1.0).abs() < 1e-6,
+                "{base}: opaque at 100"
+            );
+        }
+        // A panel at the default `opacity` gets the percent itself.
+        for percent in [0u8, 10, 41, 82, 90, 100] {
+            let alpha = background_alpha(0.82, percent);
+            assert!(
+                (alpha - f32::from(percent) / 100.0).abs() < 1e-6,
+                "{percent}: {alpha}"
+            );
+        }
+        // Halfway down halves a band's own alpha; halfway up closes half the gap to opaque.
+        assert!((background_alpha(0.6, 41) - 0.3).abs() < 1e-6);
+        assert!((background_alpha(0.6, 91) - 0.8).abs() < 1e-6);
+        // Rising with the percent, and clamped at both ends.
+        let alphas: Vec<f32> = (0..=100).map(|p| background_alpha(0.5, p)).collect();
+        assert!(alphas.windows(2).all(|w| w[0] <= w[1]), "monotonic");
+        assert_eq!(background_alpha(0.5, 200), background_alpha(0.5, 100));
+        assert_eq!(background_alpha(1.5, 82), 1.0);
+        assert_eq!(background_alpha(-0.5, 100), 1.0);
+    }
+
+    #[test]
+    fn saving_background_opacity_changes_only_its_value() {
+        let edited = with_background_opacity(DEFAULT_TOML, 40).expect("edited");
+        assert_eq!(
+            Config::parse(&edited)
+                .expect("parses")
+                .general
+                .background_opacity,
+            40
+        );
+        let changed: Vec<(&str, &str)> = DEFAULT_TOML
+            .lines()
+            .zip(edited.lines())
+            .filter(|(a, b)| a != b)
+            .collect();
+        assert_eq!(
+            changed,
+            [("background_opacity = 82", "background_opacity = 40")]
+        );
+        assert_eq!(DEFAULT_TOML.lines().count(), edited.lines().count());
+        assert_eq!(
+            with_background_opacity(&edited, 82).expect("edited"),
+            DEFAULT_TOML,
+            "back to the default gives the same file"
+        );
+        // Above 100 saves 100.
+        assert_eq!(
+            with_background_opacity("[general]\nbackground_opacity = 5 # dim\n", 250)
+                .expect("edited"),
+            "[general]\nbackground_opacity = 100 # dim\n"
+        );
+        // A file from before the setting: the key goes under the header, or the table at the end.
+        assert_eq!(
+            with_background_opacity("# mine\n[general]\nfont = \"Arial\"\n", 0).expect("edited"),
+            "# mine\n[general]\nbackground_opacity = 0\nfont = \"Arial\"\n"
+        );
+        assert_eq!(
+            with_background_opacity("[widgets.fuel]\nx = 1\n", 55).expect("edited"),
+            "[widgets.fuel]\nx = 1\n\n[general]\nbackground_opacity = 55\n"
+        );
+        assert_eq!(
+            with_background_opacity("", 55).expect("edited"),
+            "[general]\nbackground_opacity = 55\n"
+        );
+        assert_eq!(
+            with_background_opacity(
+                "general = { font = \"Arial\", background_opacity = 9 }\n",
+                10
+            )
+            .expect("edited"),
+            "general = { font = \"Arial\", background_opacity = 10 }\n"
+        );
+        assert!(matches!(
+            with_background_opacity("general = { font = \"Arial\" }\n", 10),
+            Err(ConfigError::Unplaceable)
+        ));
+        assert!(matches!(
+            with_background_opacity("[general\n", 10),
+            Err(ConfigError::Parse(_))
+        ));
+    }
+
+    #[test]
+    fn saved_background_opacity_replaces_the_file() {
+        let dir = std::env::temp_dir().join(format!("pitot-background-{}", std::process::id()));
+        fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("config.toml");
+        fs::write(&path, DEFAULT_TOML).expect("write");
+        save_background_opacity(&path, 25).expect("saved");
+        let config = load_or_create(&path).expect("loads");
+        assert_eq!(config.general.background_opacity, 25);
+        assert_eq!(
+            widget(&config, "fuel").opacity,
+            0.82,
+            "the widgets' own stay"
+        );
+        assert!(!path.with_extension("toml.tmp").exists());
+        fs::remove_dir_all(&dir).expect("cleans up");
     }
 
     #[test]

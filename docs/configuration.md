@@ -26,6 +26,39 @@ start_in_tray = false
 Its widget switches write the widget's `enabled` into this file, changing only that value, by the same rules as
 moving widgets below.
 
+## Background opacity
+
+How opaque the widgets' backgrounds are, for every widget at once. The Pitot window's *Background opacity* slider
+sets it; it can also be edited here.
+
+```toml
+# background_opacity sets how opaque the widgets' backgrounds are, from 0 (none) to 100 (opaque); text and
+# graphs stay as they are. At 82 each widget uses its own opacity below. The Pitot window's slider saves it here.
+[general]
+background_opacity = 82
+```
+
+- `background_opacity`: a whole number from 0 to 100. Left out, it is 82, which draws every widget as before the
+  setting existed.
+- Only backgrounds change: each widget's panel, the standings' class header bands, and the tire widget's corner
+  blocks. Text, numbers, graphs and their bar tracks, lines, badges and chips, class colour bars, the highlights
+  that mark the player's row (relative, standings, pit stops) and the current sector, the track map's road and
+  car dots, and the tire temperature swatches stay as they are.
+- Each background keeps its own alpha as a base: the widget's `opacity` (0.82 by default) for its panel, and the
+  band's own for a band drawn over the panel (the standings' header bands use the widget's `opacity`, at least
+  0.6). At 82 every background is drawn at its base. Below 82 it fades in proportion, to nothing at 0; above 82
+  it rises in proportion to opaque at 100. A panel at the default `opacity` therefore has the percent as its
+  opacity: 50 draws it at 0.50, 100 at 1.0. A widget given its own `opacity` keeps its difference from the others
+  between the ends.
+- A change of the value redraws every widget once, without rebuilding windows or widgets. While it does not
+  change, nothing more is drawn.
+
+While the slider moves, the window sends each value to the overlay, which draws it at once; releasing the
+slider saves the value here, changing only that number (a missing key goes on the line after `[general]`, a
+missing `[general]` table is added at the end). The overlay's reload of that write finds the value it already
+shows and does nothing. A value from the slider holds over the file's in a reload for two seconds after the
+slider last moved, so the reload of one save cannot undo a newer value.
+
 ## Moving widgets
 
 Choose *Move widgets* in the tray menu or the Pitot window to place widgets with the mouse. Every enabled widget shows, also without
@@ -125,6 +158,7 @@ At every sim disconnect and at exit, the line also carries the data path's count
 [general]
 font = "Segoe UI"
 start_in_tray = false  # true: do not open the Pitot window at start
+background_opacity = 82  # every widget's background, 0 (none) to 100 (opaque); 82 is each widget's opacity
 
 [widgets.inputs]
 enabled = true
@@ -134,7 +168,7 @@ y = 900
 width = 600
 height = 120
 rate_hz = 60.0  # update rate; leave out for the widget's own rate
-opacity = 0.82  # background opacity, 0 to 1
+opacity = 0.82  # background opacity, 0 to 1, at the default background_opacity
 ```
 
 The widgets, their names, and their pages are listed in [widgets.md](widgets.md). Widgets added after the first ten
@@ -148,6 +182,7 @@ The pit widget keeps what it measures, the refueling speed by car and the pit la
 
 | Field | Range |
 |---|---|
+| `background_opacity` | `[general]` only: 0 to 100, a whole number |
 | `rate_hz` | 0.1 to 120 |
 | `opacity` | 0 to 1 |
 | `width`, `height` | 16 to 8192 |
@@ -157,4 +192,5 @@ Monitors are counted left to right, then top to bottom, by their top-left corner
 when Windows renumbers displays.
 
 A configuration change rebuilds the overlay windows, widgets, and composition layers. The GPU device, the
-connection to the sim, and the data pipeline keep running, so reloading does not grow memory.
+connection to the sim, and the data pipeline keep running, so reloading does not grow memory. A change of
+`background_opacity` alone only redraws the widgets.
