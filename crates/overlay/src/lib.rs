@@ -1,11 +1,12 @@
 //! Overlay process: one process, no IPC between data and rendering. No async runtimes,
-//! WebView, or garbage-collected runtimes.
+//! WebView, or garbage-collected runtimes. `pitot.exe` runs it through [`app::main`] when started without
+//! arguments; with `--window` it runs the Pitot window instead, in a process of its own.
 //!
 //! - [`pipeline`]: data and session threads, and the render thread's view of the latest telemetry.
 //! - [`platform`]: monitors, overlay windows, message loop, timers, the tray icon, and the link to the Pitot window
 //!   (`pitot-control`) (Windows).
 //! - [`render`]: D3D11, Direct2D, DirectWrite, and DirectComposition layers per widget (Windows).
-//! - [`app`]: the render thread's schedule and main loop (Windows).
+//! - [`app`]: the process start, and the render thread's schedule and main loop (Windows).
 //! - [`widgets`]: the widget trait and widgets.
 //! - [`config`]: the hot-reloaded TOML configuration.
 //! - [`log`]: the log file (Windows).

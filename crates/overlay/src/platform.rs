@@ -11,8 +11,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 pub use link::{
-    CONTROL_EXE, ControlEvent, ControlLink, OVERLAY_EXE, OverlayCommand, activate_control,
-    notify_control, open_control, overlay_running, send_to_overlay, start_sibling,
+    ControlEvent, ControlLink, OverlayCommand, WINDOW_FLAG, activate_control, notify_control,
+    open_control, overlay_running, send_to_overlay, start_overlay,
 };
 use link::{LINK_MESSAGE, TRAY_CLASS, register_class};
 
@@ -281,7 +281,7 @@ unsafe extern "system" fn window_proc(
 
 fn open_window() {
     if let Err(e) = open_control() {
-        tracing::warn!("cannot open the Pitot window ({CONTROL_EXE} next to the overlay): {e}");
+        tracing::warn!("cannot open the Pitot window: {e}");
     }
 }
 

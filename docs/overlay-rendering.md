@@ -4,12 +4,13 @@
 
 ```text
 cargo run -p pitot-bench --release -- replay --irdt data/irdashies/ai-race-10min.irdt --loop
-cargo run -p pitot-overlay --release
+cargo run -p pitot --release
 ```
 
 The overlay waits for the sim's shared memory and connects when the replay starts. It opens the
-[Pitot window](control-window.md) when `pitot-control.exe` is next to it (`cargo build -p pitot-control` puts it
-there). Quit from the window or the tray icon's menu.
+[Pitot window](control-window.md) by starting its own executable again with `--window`
+(`cargo run -p pitot --release -- --window` opens the window alone). Quit from the window or the tray icon's
+menu.
 
 ## Windows
 

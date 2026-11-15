@@ -16,7 +16,7 @@ Plans for the [runner](runner.md) live in `benchmarks/`, with the configurations
   exactly these widgets). Both set `start_in_tray = true`, so the [Pitot window](control-window.md)
   does not open: it would run as a child process of the overlay and be measured with it.
 - The race replay needs the capture under `data/irdashies/` (see [replay.md](replay.md)) and a release build:
-  `cargo build --release -p pitot-overlay -p pitot-bench`.
+  `cargo build --release -p pitot -p pitot-bench`.
 - Each plan carries the budget of the project plan in its `[budget]` table, so the report marks every app
   against it.
 

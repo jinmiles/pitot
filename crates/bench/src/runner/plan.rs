@@ -339,7 +339,7 @@ irdt = "data/race.irdt"
 
 [[app]]
 name = "pitot"
-command = "target/release/pitot-overlay.exe"
+command = "target/release/pitot.exe"
 files = [{ from = "benchmarks/pitot.toml", to = "%APPDATA%/Pitot/config.toml" }]
 
 [[app]]

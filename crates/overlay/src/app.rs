@@ -6,6 +6,7 @@
 //! renderer and redraws everything. A configuration change rebuilds windows and widgets; the data pipeline
 //! keeps running.
 
+use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 use pitot_irsdk::live::{ReaderConfig, SdkNames, VarSet};
@@ -14,8 +15,8 @@ use tracing::{debug, info, warn};
 use crate::config::{self, Config};
 use crate::pipeline::{Display, Pipeline, RecordingConfig, Source, View};
 use crate::platform::{
-    self, CONTROL_EXE, ControlEvent, DirectoryWatch, Monitor, MoveHandle, OverlayWindow,
-    ScreenRect, Timer, Tray, TrayCommand, Wake, WidgetMove,
+    self, ControlEvent, DirectoryWatch, Monitor, MoveHandle, OverlayWindow, ScreenRect, Timer,
+    Tray, TrayCommand, Wake, WidgetMove,
 };
 use crate::render::{Canvas, Layer, RenderError, Renderer, WindowTarget};
 use crate::widgets::{self, Build, MAX_LAYERS, Redraw, Shared, Widget};
@@ -236,6 +237,34 @@ fn load_config() -> Config {
     })
 }
 
+/// The overlay process, one per Windows session: logging, then [`run`]. A second start opens the Pitot window
+/// instead and exits at once.
+pub fn main() -> ExitCode {
+    // Checked before logging starts, so a second launch leaves the running overlay's log alone.
+    let instance = platform::SingleInstance::acquire();
+    if matches!(instance, Ok(None)) {
+        let _ = platform::open_control();
+        return ExitCode::SUCCESS;
+    }
+    crate::log::init();
+    if let Err(e) = &instance {
+        warn!("cannot check for a running overlay: {e}");
+    }
+    let code = match run() {
+        Ok(()) => {
+            info!("exiting");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            tracing::error!("stopped: {e}");
+            ExitCode::FAILURE
+        }
+    };
+    // Held until the overlay is done.
+    drop(instance);
+    code
+}
+
 /// Runs the overlay until Quit is chosen from the tray icon.
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     platform::enable_dpi_awareness();
@@ -280,7 +309,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     if !config.general.start_in_tray
         && let Err(e) = platform::open_control()
     {
-        warn!("cannot open the Pitot window ({CONTROL_EXE} next to the overlay): {e}");
+        warn!("cannot open the Pitot window: {e}");
     }
     let mut renderer = Some(Renderer::new()?);
     let mut scene = match renderer.as_mut() {

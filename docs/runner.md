@@ -29,7 +29,7 @@ speed = 1.0
 
 [[app]]
 name = "pitot"             # output directory name; not "baseline" or "series"
-command = "target/release/pitot-overlay.exe"
+command = "target/release/pitot.exe"
 args = []
 # measure = ["other.exe"]  # executable names to measure; default: the launched process tree
 files = [{ from = "benchmarks/pitot/full.toml", to = "%APPDATA%/Pitot/config.toml" }]

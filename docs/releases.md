@@ -18,7 +18,7 @@ is pushed. Nothing is built on a developer machine.
 The workflow then:
 
 - checks that the tagged commit is on `main` and that the tag matches the workspace version,
-- runs the tests, and builds `pitot-overlay`, `pitot-control`, and `pitot-bench` in release mode,
+- runs the tests, and builds `pitot` and `pitot-bench` in release mode,
 - packages them (below) and publishes a GitHub release named `Pitot X.Y.Z` with the packages, short notes on
   running the binaries, and the pull requests merged since the previous release. Versions before 1.0 are marked
   as pre-releases.
@@ -27,9 +27,14 @@ The workflow then:
 
 | File | Contents |
 |---|---|
-| `pitot-overlay-X.Y.Z-windows-x64.zip` | `pitot-overlay.exe`, `pitot-control.exe` (the [Pitot window](control-window.md), which the overlay starts from its own folder), and `THIRD-PARTY-LICENSES.txt` |
+| `pitot-X.Y.Z-windows-x64.zip` | `pitot.exe` (the overlay, and with `--window` the [Pitot window](control-window.md)) and `THIRD-PARTY-LICENSES.txt` |
+| `pitot.exe` | The same executable on its own, to download and run directly |
+| `pitot-THIRD-PARTY-LICENSES.txt` | The same text as `THIRD-PARTY-LICENSES.txt` in the `pitot` zip, for `pitot.exe` on its own |
 | `pitot-bench-X.Y.Z-windows-x64.zip` | `pitot-bench.exe` and `THIRD-PARTY-LICENSES.txt` |
-| `SHA256SUMS.txt` | SHA-256 of each zip |
+| `SHA256SUMS.txt` | SHA-256 of every other file |
+
+`pitot.exe` is everything a user needs: it runs the overlay and opens the Pitot window by starting itself again
+with `--window`, so it can be moved or run from anywhere on its own.
 
 `THIRD-PARTY-LICENSES.txt` lists what is compiled into the zip's binaries: the code ported from other projects
 (the Third-Party Notices section of `README.md`) and every Rust crate linked in, with its license files.
