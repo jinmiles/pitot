@@ -6,7 +6,7 @@ pub const FONT: &str = "Segoe UI";
 
 /// Window size in the UI framework's pixels (scaled with the display).
 pub const WINDOW_WIDTH: f32 = 400.0;
-pub const WINDOW_HEIGHT: f32 = 720.0;
+pub const WINDOW_HEIGHT: f32 = 840.0;
 
 pub fn background() -> Rgba {
     rgb(0x0014_181D)
