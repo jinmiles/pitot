@@ -3160,7 +3160,7 @@ dependencies = [
 
 [[package]]
 name = "pitot-bench"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "csv",
  "pitot-irsdk",
@@ -3173,7 +3173,7 @@ dependencies = [
 
 [[package]]
 name = "pitot-control"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "futures",
  "gpui",
@@ -3185,7 +3185,7 @@ dependencies = [
 
 [[package]]
 name = "pitot-irsdk"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "saphyr",
  "saphyr-parser",
@@ -3195,7 +3195,7 @@ dependencies = [
 
 [[package]]
 name = "pitot-overlay"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "pitot-irsdk",
  "serde",
