@@ -52,10 +52,10 @@ shapes keep their pixel size, and each widget lays out within the new box:
 | `status` | 160 x 54 | the second line has more room; the rest stays empty |
 | `inputs` | 240 x 60 | a wider trace shows a longer history (2 px per sample, 60 samples a second); a taller one, a taller trace and a wheel up to 72 px |
 | `relative` | 400 x 167 | more cars, a pair at a time: one on each side of the player per 67 px of height (rows of 33⅓ px); a wider box widens the names |
-| `standings` | 400 x 96 | more rows (24 px each), up to the cars to show: three leaders per class and three cars on each side of the player. A shorter box shows fewer cars around the player first, then fewer leaders, so the player stays in view; a wider one gets back the columns dropped for room |
+| `standings` | 400 x 96 | more rows (24 px each): more cars around the player, then more leaders per class. A shorter box shows fewer cars around the player first, then fewer leaders, then only the player's class, so the player stays in view; a wider one gets back the columns dropped for room |
 | `fuel` | 380 x 120 | the four columns and six lines spread out; below the default height the text is a size smaller |
 | `pit` | 360 x 110 | more cars (22 px rows); a wider box widens the names |
-| `sectors` | 340 x 100 | wider value columns; rows grow to 24 px, then the rest stays empty |
+| `sectors` | 340 x 120 | wider value columns; rows grow to 24 px, then the rest stays empty. Below 16 px a row, the last sectors are left out |
 | `wind` | 160 x 140 | a larger dial; the text column keeps its width |
 | `tires` | 200 x 150 | larger tire blocks |
 | `trackmap` | 200 x 150 | a larger map, with the same dots and road (a box smaller than the default thins them) |
