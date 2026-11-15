@@ -331,11 +331,16 @@ fn build_atlas(
     Ok(faces)
 }
 
+/// A text's layouts, one per box (width, height) it is drawn in.
+type Boxes = Vec<(f32, f32, IDWriteTextLayout)>;
+
 /// Text layouts for strings that are not in the atlas, created on first use and reused.
 #[derive(Debug, Default)]
 struct LayoutCache {
-    /// Per (size, alignment), text to (layout box width, height, layout).
-    maps: Vec<HashMap<String, (f32, f32, IDWriteTextLayout)>>,
+    /// Per (size, alignment), text to its layouts, one per box (width, height) it is drawn in: a text drawn in two
+    /// boxes, such as an arrow in two columns, keeps both instead of making one again at every draw.
+    maps: Vec<HashMap<String, Boxes>>,
+    /// Layouts held.
     entries: usize,
 }
 
@@ -527,6 +532,43 @@ impl Renderer {
         Ok(())
     }
 
+    /// Gives a layer a new surface of `width` x `height`, shown by the same visuals. The surface's content is
+    /// undefined until it is drawn, so the caller draws all of it before the next commit. A composition surface
+    /// cannot change its size; only resizing a widget in *Move widgets* makes new ones.
+    pub fn resize_layer(
+        &mut self,
+        layer: &mut Layer,
+        width: u32,
+        height: u32,
+    ) -> Result<(), RenderError> {
+        if layer.size() == (width, height) {
+            return Ok(());
+        }
+        // SAFETY: COM calls on live device objects; the new surface replaces the old one in `layer`, which
+        // releases it, and the visuals hold their own references.
+        unsafe {
+            let surface = self
+                .dcomp
+                .CreateSurface(
+                    width.max(1),
+                    height.max(1),
+                    DXGI_FORMAT_B8G8R8A8_UNORM,
+                    DXGI_ALPHA_MODE_PREMULTIPLIED,
+                )
+                .map_err(fail("CreateSurface"))?;
+            for visual in &layer.visuals {
+                visual.SetContent(&surface).map_err(fail("SetContent"))?;
+            }
+            layer.surface = surface;
+        }
+        (layer.width, layer.height) = (width, height);
+        if layer.visuals.len() == 2 {
+            self.place_scroll(layer, layer.head % width.max(1))?;
+        }
+        self.dirty = true;
+        Ok(())
+    }
+
     /// Moves a layer to (`x`, `y`) in its window without redrawing it.
     pub fn move_layer(&mut self, layer: &mut Layer, x: i32, y: i32) -> Result<(), RenderError> {
         layer.x = x;
@@ -698,6 +740,11 @@ impl Layer {
     pub fn size(&self) -> (u32, u32) {
         (self.width, self.height)
     }
+
+    /// Whether it is a scrolling layer, shown by two visuals.
+    pub fn scrolling(&self) -> bool {
+        self.visuals.len() == 2
+    }
 }
 
 /// Safe drawing API over a surface's device context, in layer pixels.
@@ -848,8 +895,14 @@ impl Canvas<'_> {
             return;
         }
         let key = index * 3 + column;
-        let fits = |entry: &(f32, f32, IDWriteTextLayout)| entry.0 == rect.w && entry.1 == rect.h;
-        if !self.layouts.maps[key].get(text).is_some_and(fits) {
+        let fits = |entry: &&(f32, f32, IDWriteTextLayout)| entry.0 == rect.w && entry.1 == rect.h;
+        let cached = |maps: &[HashMap<String, Boxes>]| {
+            maps[key]
+                .get(text)
+                .and_then(|boxes| boxes.iter().find(fits))
+                .is_some()
+        };
+        if !cached(&self.layouts.maps) {
             if self.layouts.entries >= MAX_CACHED_LAYOUTS {
                 self.layouts.maps.iter_mut().for_each(HashMap::clear);
                 self.layouts.entries = 0;
@@ -865,14 +918,18 @@ impl Canvas<'_> {
                 return;
             };
             let entry = (rect.w, rect.h, layout);
-            if self.layouts.maps[key]
-                .insert(text.to_owned(), entry)
-                .is_none()
-            {
-                self.layouts.entries += 1;
+            match self.layouts.maps[key].get_mut(text) {
+                Some(boxes) => boxes.push(entry),
+                None => {
+                    self.layouts.maps[key].insert(text.to_owned(), vec![entry]);
+                }
             }
+            self.layouts.entries += 1;
         }
-        if let Some((_, _, layout)) = self.layouts.maps[key].get(text) {
+        let layout = self.layouts.maps[key]
+            .get(text)
+            .and_then(|boxes| boxes.iter().find(fits));
+        if let Some((_, _, layout)) = layout {
             // SAFETY: drawing call inside BeginDraw/EndDraw with a live layout and brush.
             unsafe {
                 self.context.DrawTextLayout(

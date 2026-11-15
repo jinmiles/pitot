@@ -53,6 +53,10 @@ struct Slot {
     next_due: Instant,
     /// The widget must be fully redrawn, after creation, a rebuild, or a reset.
     stale: bool,
+    /// The widget took a new size in *Move widgets*: its layers need new surfaces.
+    reshape: bool,
+    /// The drag in progress changed the widget's size, which is saved when the drag ends.
+    resized: bool,
 }
 
 /// Windows and widgets built from one configuration.
@@ -114,6 +118,8 @@ impl Layout {
                 interval,
                 next_due: now,
                 stale: true,
+                reshape: false,
+                resized: false,
             });
         }
         Ok(Self {
@@ -167,6 +173,35 @@ impl Scene {
         })
     }
 
+    /// Gives slot `id`'s layers new surfaces at the widget's new size, and places them. `false` when the widget's
+    /// layers changed in number or kind, which needs the scene built again.
+    fn reshape(
+        &mut self,
+        renderer: &mut Renderer,
+        id: usize,
+        slot: &Slot,
+    ) -> Result<bool, RenderError> {
+        let (Some(layers), Some(offsets)) = (self.layers.get_mut(id), self.offsets.get_mut(id))
+        else {
+            return Ok(true);
+        };
+        let specs = slot.widget.layers();
+        let same_kind = specs.len().min(MAX_LAYERS) == layers.len()
+            && specs
+                .iter()
+                .zip(layers.iter())
+                .all(|(spec, layer)| spec.scrolling == layer.scrolling());
+        if !same_kind {
+            return Ok(false);
+        }
+        for ((layer, offset), spec) in layers.iter_mut().zip(offsets.iter_mut()).zip(specs) {
+            renderer.resize_layer(layer, spec.width, spec.height)?;
+            *offset = (spec.x, spec.y);
+            renderer.move_layer(layer, slot.x + spec.x, slot.y + spec.y)?;
+        }
+        Ok(true)
+    }
+
     /// Moves slot `id`'s layers to the slot's position, without redrawing them.
     fn place(
         &mut self,
@@ -205,24 +240,73 @@ impl Shown {
     }
 }
 
-/// A move handle over each widget, for dragging them while *Move widgets* is chosen.
+/// Where slot's widget is on screen, at its current size.
+fn screen_rect(slot: &Slot) -> ScreenRect {
+    let (width, height) = slot.widget.size();
+    ScreenRect {
+        x: slot.origin.0 + slot.x,
+        y: slot.origin.1 + slot.y,
+        width: i32::try_from(width).unwrap_or(i32::MAX),
+        height: i32::try_from(height).unwrap_or(i32::MAX),
+    }
+}
+
+/// A move handle over each widget, for dragging and resizing them while *Move widgets* is chosen.
 fn move_handles(slots: &[Slot]) -> Vec<MoveHandle> {
     slots
         .iter()
         .enumerate()
         .filter_map(|(id, slot)| {
-            let (width, height) = slot.widget.size();
-            let rect = ScreenRect {
-                x: slot.origin.0 + slot.x,
-                y: slot.origin.1 + slot.y,
-                width: i32::try_from(width).unwrap_or(i32::MAX),
-                height: i32::try_from(height).unwrap_or(i32::MAX),
-            };
-            MoveHandle::create(id, rect)
+            MoveHandle::create(id, screen_rect(slot), slot.widget.min_size())
                 .inspect_err(|e| warn!("widgets.{} cannot be moved: {e}", slot.name))
                 .ok()
         })
         .collect()
+}
+
+/// Saves what the drag that ended changed of slot's widget: its place when it moved, its size when it was resized.
+/// A click that changed nothing writes nothing. The configuration in memory follows, so a reload sees no change.
+/// Returns whether the file was written.
+fn save_drag(config: &mut Config, slot: &mut Slot) -> bool {
+    let resized = std::mem::take(&mut slot.resized);
+    let (width, height) = slot.widget.size();
+    let Some(widget) = config.widget_mut(slot.name) else {
+        return false;
+    };
+    let position = ((slot.x, slot.y) != (widget.x, widget.y)).then_some((slot.x, slot.y));
+    let size = resized.then_some((width, height));
+    if position.is_none() && size.is_none() {
+        return false;
+    }
+    (widget.x, widget.y) = (slot.x, slot.y);
+    if resized {
+        (widget.width, widget.height) = (Some(width), Some(height));
+    }
+    let saved = config::config_file()
+        .ok_or_else(|| "no APPDATA directory".to_owned())
+        .and_then(|path| {
+            config::save_placement(&path, slot.name, position, size).map_err(|e| e.to_string())
+        });
+    match saved {
+        Ok(()) => {
+            info!(
+                widget = slot.name,
+                x = slot.x,
+                y = slot.y,
+                width,
+                height,
+                "widget moved or resized"
+            );
+            true
+        }
+        Err(e) => {
+            warn!(
+                widget = slot.name,
+                "widget moved or resized but not saved: {e}"
+            );
+            false
+        }
+    }
 }
 
 /// Loads the configuration file, falling back to defaults (and saying why) when it cannot be used.
@@ -362,30 +446,51 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             };
             slot.x = moved.x - slot.origin.0;
             slot.y = moved.y - slot.origin.1;
-            if let (Some(device), Some(current)) = (renderer.as_mut(), scene.as_mut())
+            let size = (
+                u32::try_from(moved.width).unwrap_or(0),
+                u32::try_from(moved.height).unwrap_or(0),
+            );
+            if size != slot.widget.size() {
+                // New surfaces once per batch of moves, below.
+                slot.widget.resize(size.0, size.1);
+                (slot.reshape, slot.resized) = (true, true);
+            } else if let (Some(device), Some(current)) = (renderer.as_mut(), scene.as_mut())
                 && let Err(e) = current.place(device, moved.id, slot)
             {
                 debug!("widget not moved on screen, rebuilding the scene: {e}");
                 scene = None;
             }
             if moved.done {
-                if let Some(widget) = config.widget_mut(slot.name) {
-                    (widget.x, widget.y) = (slot.x, slot.y);
+                // The watch sees the write; the new stamp keeps it from reloading.
+                if save_drag(&mut config, slot) {
+                    stamp = config_stamp();
                 }
-                let saved = config::config_file()
-                    .ok_or_else(|| "no APPDATA directory".to_owned())
-                    .and_then(|path| {
-                        config::save_position(&path, slot.name, slot.x, slot.y)
-                            .map_err(|e| e.to_string())
-                    });
-                match saved {
-                    // The watch sees the write; the new stamp keeps it from reloading.
-                    Ok(()) => {
-                        stamp = config_stamp();
-                        info!(widget = slot.name, x = slot.x, y = slot.y, "widget moved");
+                // The handle follows a widget that took another size than the one dragged to.
+                let shown = screen_rect(slot);
+                if let Some(handle) = handles.iter().flatten().find(|h| h.id() == moved.id)
+                    && (shown.width, shown.height) != (moved.width, moved.height)
+                {
+                    handle.place(shown);
+                }
+            }
+        }
+        for (id, slot) in layout.slots.iter_mut().enumerate() {
+            if !std::mem::take(&mut slot.reshape) {
+                continue;
+            }
+            slot.stale = true;
+            let rebuild = match (renderer.as_mut(), scene.as_mut()) {
+                (Some(device), Some(current)) => match current.reshape(device, id, slot) {
+                    Ok(placed) => !placed,
+                    Err(e) => {
+                        debug!("widget not resized on screen, rebuilding the scene: {e}");
+                        true
                     }
-                    Err(e) => warn!(widget = slot.name, "widget moved but not saved: {e}"),
-                }
+                },
+                _ => false,
+            };
+            if rebuild {
+                scene = None;
             }
         }
         if reload_at.is_some_and(|at| Instant::now() >= at) {

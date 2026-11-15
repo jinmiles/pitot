@@ -8,14 +8,15 @@ own executable again with `--window`.
 ## What it shows
 
 - **Overlay**: whether the overlay runs, with *Show widgets* (off is the tray menu's *Hide widgets*) and *Move
-  widgets* (the tray menu's *Move widgets*). A change on either side shows on the other at once. When no
-  overlay runs, a *Start the overlay* row starts the overlay (`pitot.exe` without arguments).
+  widgets* (the tray menu's *Move widgets*, which places and resizes widgets with the mouse). A change on either
+  side shows on the other at once. When no overlay runs, a *Start the overlay* row starts the overlay
+  (`pitot.exe` without arguments).
 - **Widgets**: one switch per widget, for every widget of the overlay's [list](widgets.md) in its order, with
   the label the list gives it (the window reads the list from `pitot-overlay`, so a new widget needs no change
   here). A switch writes that widget's `enabled` into `%APPDATA%\Pitot\config.toml`
   in place, changing only that value, so comments and layout stay (a missing key goes under the widget's
-  `[widgets.<name>]` header, a missing table at the end; see [Moving widgets](configuration.md#moving-widgets)
-  for the same rules). The overlay reloads the file as it does after any edit. Edits made elsewhere show when
+  `[widgets.<name>]` header, a missing table at the end; see
+  [Moving and resizing widgets](configuration.md#moving-and-resizing-widgets) for the same rules). The overlay reloads the file as it does after any edit. Edits made elsewhere show when
   the window is activated again, or when the overlay reloads the file.
 - **Quit Pitot**: quits the overlay and closes the window.
 

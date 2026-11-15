@@ -65,6 +65,8 @@ const TURN_STEP: usize = 5;
 const NORTH_UP_PREFERENCE: f32 = 1.03;
 /// The pit ring's label.
 const TEXT_SIZE: f32 = 11.0;
+/// A circle with its pit ring and label, or an outline, still clear of the margins.
+const MIN_SIZE: (u32, u32) = (200, 150);
 
 const BACKGROUND: u32 = 0x10_1418;
 const ROAD: u32 = 0x6A_727E;
@@ -230,8 +232,8 @@ impl TrackMapWidget {
     ) -> Self {
         let shape = config.options_as::<MapOptions>().shape;
         let mut map = Self {
-            width: config.width.unwrap_or(440),
-            height: config.height.unwrap_or(330),
+            width: 0,
+            height: 0,
             opacity: config.opacity,
             shape,
             ticks: [0.0; MAX_TICKS],
@@ -247,14 +249,18 @@ impl TrackMapWidget {
             pit,
             fuel: FuelTracker::default(),
         };
-        if shape == MapShape::Circle {
-            let (center, radius) = map.circle();
-            map.screen.extend(
-                (0..outline::POINTS)
-                    .map(|i| circle_point(center, radius, i as f32 / outline::POINTS as f32)),
-            );
-        }
+        map.resize(config.width.unwrap_or(440), config.height.unwrap_or(330));
         map
+    }
+
+    /// The circle's points in widget pixels.
+    fn place_circle(&mut self) {
+        let (center, radius) = self.circle();
+        self.screen.clear();
+        self.screen.extend(
+            (0..outline::POINTS)
+                .map(|i| circle_point(center, radius, i as f32 / outline::POINTS as f32)),
+        );
     }
 
     /// The circle's center and radius in widget pixels.
@@ -643,6 +649,21 @@ impl Register for TrackMapWidget {
 impl Widget for TrackMapWidget {
     fn size(&self) -> (u32, u32) {
         (self.width, self.height)
+    }
+
+    fn min_size(&self) -> (u32, u32) {
+        MIN_SIZE
+    }
+
+    fn resize(&mut self, width: u32, height: u32) {
+        self.width = width.max(MIN_SIZE.0);
+        self.height = height.max(MIN_SIZE.1);
+        match self.shape {
+            MapShape::Circle => self.place_circle(),
+            MapShape::Outline => self.fit(),
+        }
+        // Placed again on the new map at the next update.
+        self.dots.clear();
     }
 
     /// The outline and background below, the dots above.

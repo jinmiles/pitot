@@ -187,8 +187,8 @@ impl WindWidget {
     /// A wind widget reading `vars`, from [`View::resolve`].
     pub fn new(config: &WidgetConfig, vars: WindVars) -> Self {
         Self {
-            width: config.width.unwrap_or(200).max(120),
-            height: config.height.unwrap_or(170).max(100),
+            width: config.width.unwrap_or(200).max(MIN_SIZE.0),
+            height: config.height.unwrap_or(170).max(MIN_SIZE.1),
             opacity: config.opacity,
             vars,
             shown: Reading::new(),
@@ -208,6 +208,8 @@ impl WindWidget {
 /// Width of the text column on the right.
 const COLUMN: f32 = 64.0;
 const PAD: f32 = 8.0;
+/// The text column's lines apart, and a dial beside it.
+const MIN_SIZE: (u32, u32) = (160, 140);
 
 impl Register for WindWidget {
     type Vars = WindVars;
@@ -221,6 +223,15 @@ impl Register for WindWidget {
 impl Widget for WindWidget {
     fn size(&self) -> (u32, u32) {
         (self.width, self.height)
+    }
+
+    fn min_size(&self) -> (u32, u32) {
+        MIN_SIZE
+    }
+
+    fn resize(&mut self, width: u32, height: u32) {
+        self.width = width.max(MIN_SIZE.0);
+        self.height = height.max(MIN_SIZE.1);
     }
 
     fn interval(&self) -> Duration {

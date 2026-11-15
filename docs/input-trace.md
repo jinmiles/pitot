@@ -11,6 +11,8 @@ lines so it stays sharp at any size and angle.
 ## How it draws
 
 - Lines are 2.5 px wide, inset by half a line at the top and bottom so zero and full pedal stay whole.
+- The width sets the history: each sample takes 2 px, so the default 600 px shows 3.8 s and a wider widget more.
+  Resizing in *Move widgets* keeps the samples already drawn, as many as the new width shows.
 - The trace is a scrolling layer: a ring surface where each sample owns two columns. A frame draws only the
   columns of samples that arrived since the last frame, and scrolling moves the two composition visuals that
   show the ring. Nothing else is redrawn.

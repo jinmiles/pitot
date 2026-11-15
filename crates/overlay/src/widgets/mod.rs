@@ -199,6 +199,14 @@ pub trait Widget {
     /// Size in pixels.
     fn size(&self) -> (u32, u32);
 
+    /// The smallest size its layout still reads at. A configured or dragged size below it is raised to it.
+    fn min_size(&self) -> (u32, u32);
+
+    /// Takes the size `width` by `height`, raised to [`Widget::min_size`], as if it had been configured: text and
+    /// shapes keep their pixel size, and the widget lays out within the new box (more rows, a longer history).
+    /// What it follows of the session stays. Only *Move widgets* calls it, so it may allocate.
+    fn resize(&mut self, width: u32, height: u32);
+
     /// The widget's layers, bottom to top. Called when the widget is placed.
     fn layers(&self) -> Vec<LayerSpec> {
         let (width, height) = self.size();
@@ -240,6 +248,8 @@ pub trait Widget {
 pub struct AllWidgets {
     shared: Shared,
     widgets: Vec<Box<dyn Widget>>,
+    /// Each widget's size as made.
+    defaults: Vec<(u32, u32)>,
 }
 
 #[cfg(feature = "alloc-check")]
@@ -247,7 +257,7 @@ impl AllWidgets {
     /// Every widget of the list, on or off by default, with its variables resolved in `view`'s set.
     pub fn new(view: &View) -> Self {
         let shared = Shared::with_pit_store(None);
-        let widgets = SPECS
+        let widgets: Vec<Box<dyn Widget>> = SPECS
             .iter()
             .filter_map(|spec| {
                 let config = spec.defaults();
@@ -258,7 +268,26 @@ impl AllWidgets {
                 make_widget(spec.name, &cx, view.var_set())
             })
             .collect();
-        Self { shared, widgets }
+        let defaults = widgets.iter().map(|w| w.size()).collect();
+        Self {
+            shared,
+            widgets,
+            defaults,
+        }
+    }
+
+    /// Resizes every widget, as *Move widgets* does, to what `size` picks from its smallest size and the size it
+    /// was made with.
+    pub fn resize(&mut self, size: impl Fn((u32, u32), (u32, u32)) -> (u32, u32)) {
+        for (widget, &made) in self.widgets.iter_mut().zip(&self.defaults) {
+            let (width, height) = size(widget.min_size(), made);
+            widget.resize(width, height);
+        }
+    }
+
+    /// The widgets, in the list's order.
+    pub fn widgets(&self) -> impl Iterator<Item = &dyn Widget> {
+        self.widgets.iter().map(|w| w.as_ref())
     }
 
     /// How many widgets there are.
@@ -356,6 +385,72 @@ mod tests {
             shared: &shared,
         };
         assert!(make_widget("radar", &cx, &set).is_none());
+    }
+
+    #[test]
+    fn a_resized_widget_is_the_widget_made_at_that_size() {
+        let mut set = VarSet::new();
+        Vars::register(&mut set);
+        for name in widget_var_names() {
+            set.add(name);
+        }
+        let shared = Shared::with_pit_store(None);
+        let make = |name: &str, size: Option<(u32, u32)>| {
+            let spec = SPECS.iter().find(|s| s.name == name).expect("spec");
+            let mut config = spec.defaults();
+            if let Some((width, height)) = size {
+                (config.width, config.height) = (Some(width), Some(height));
+            }
+            let cx = Build {
+                config: &config,
+                shared: &shared,
+            };
+            make_widget(name, &cx, &set).expect("made")
+        };
+        for spec in SPECS {
+            let mut widget = make(spec.name, None);
+            let (min_w, min_h) = widget.min_size();
+            let (w, h) = widget.size();
+            assert!(w >= min_w && h >= min_h, "{}: the default fits", spec.name);
+            assert!(
+                min_w >= 16 && min_h >= 16,
+                "{}: a size the file accepts",
+                spec.name
+            );
+            for (width, height) in [
+                (w * 2, h * 3),
+                (min_w, min_h),
+                (w + 37, h + 23),
+                (1, 1),
+                (w, h),
+            ] {
+                widget.resize(width, height);
+                let at = format!("{} at {width}x{height}", spec.name);
+                let made = make(spec.name, Some((width, height)));
+                assert_eq!(widget.size(), made.size(), "{at}");
+                assert_eq!(widget.layers(), made.layers(), "{at}");
+                let (sw, sh) = widget.size();
+                if width >= min_w && height >= min_h {
+                    assert_eq!((sw, sh), (width, height), "{at}: takes the size");
+                } else {
+                    assert_eq!(
+                        (sw, sh),
+                        (width.max(min_w), height.max(min_h)),
+                        "{at}: the smallest"
+                    );
+                }
+                for layer in widget.layers() {
+                    let (x, y) = (layer.x as u32, layer.y as u32);
+                    assert!(
+                        layer.x >= 0
+                            && layer.y >= 0
+                            && x + layer.width <= sw
+                            && y + layer.height <= sh,
+                        "{at}: {layer:?} in the widget"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
