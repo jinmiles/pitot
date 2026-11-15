@@ -126,7 +126,6 @@ vars! {
     car_tire_compound => "CarIdxTireCompound",
     air_temp => "AirTemp",
     track_temp => "TrackTempCrew",
-    water_temp => "WaterTemp",
     incidents => "PlayerCarMyIncidentCount",
     time_of_day => "SessionTimeOfDay",
     car_session_flags => "CarIdxSessionFlags",

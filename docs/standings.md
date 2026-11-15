@@ -32,9 +32,9 @@ sets the most rows shown; the background ends at the last row in use, and the sp
 
 Header: class name in the class color, strength of field, cars in the world over cars entered, and laps: the class
 leader's laps over the session's laps, or `≈` an estimate from the time left at the leader's pace in a timed
-session. The first header also shows the session type's letter (P, Q, R), air and track temperature
-(`AirTemp`, `TrackTempCrew`), and the session time elapsed over its length (or `≈` an estimate for a lap-limited
-session).
+session. The first header also shows the session type's letter (P, Q, R), air and track temperature to one
+decimal (`Air 21.3°C`, `Track 30.5°C` from `AirTemp`, `TrackTempCrew`), and the session time elapsed over its
+length (or `≈` an estimate for a lap-limited session).
 
 Car rows, left to right:
 
