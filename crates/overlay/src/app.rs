@@ -24,6 +24,53 @@ use crate::widgets::{self, Build, MAX_LAYERS, Redraw, Shared, Widget};
 /// Saving a file often takes several writes; reload once they settle.
 const RELOAD_DELAY: Duration = Duration::from_millis(250);
 
+/// How long a value from the Pitot window's background opacity slider holds over the file's in a reload: the
+/// reload of the slider's previous save must not undo a newer value, but a window that went away mid-drag must not
+/// hold it for ever.
+const PREVIEW_HOLD: Duration = Duration::from_secs(2);
+
+/// The value of the background opacity slider while it moves, and when it last moved.
+#[derive(Debug, Clone, Copy)]
+struct Preview {
+    percent: u8,
+    at: Instant,
+}
+
+/// What a reload changes, before a configuration that differs from the current one is used.
+#[derive(Debug, PartialEq, Eq)]
+enum Reload {
+    Nothing,
+    /// Only `[general] background_opacity`: the widgets redraw, nothing is rebuilt.
+    Background,
+    Everything,
+}
+
+/// Compares the reloaded configuration with the current one. A recent slider value replaces the file's background
+/// opacity in `fresh`, and an old one is forgotten.
+fn compare(
+    current: &Config,
+    fresh: &mut Config,
+    preview: &mut Option<Preview>,
+    now: Instant,
+) -> Reload {
+    match *preview {
+        Some(p) if now.saturating_duration_since(p.at) < PREVIEW_HOLD => {
+            fresh.general.background_opacity = p.percent;
+        }
+        _ => *preview = None,
+    }
+    if fresh == current {
+        return Reload::Nothing;
+    }
+    let mut rest = fresh.clone();
+    rest.general.background_opacity = current.general.background_opacity;
+    if rest == *current {
+        Reload::Background
+    } else {
+        Reload::Everything
+    }
+}
+
 /// How often the render loop looks at the pipeline while no widget is shown: once per second with the sim not
 /// running, and often enough while it is connected that widgets appear promptly when the driver gets in the car.
 const IDLE_WAKE: Duration = Duration::from_secs(1);
@@ -323,6 +370,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     // While *Move widgets* is chosen: a handle over each widget.
     let mut handles: Option<Vec<MoveHandle>> = None;
     let mut moves: Vec<WidgetMove> = Vec::new();
+    // While the Pitot window's slider moves, the background opacity it shows.
+    let mut preview: Option<Preview> = None;
 
     loop {
         if !platform::pump_messages() {
@@ -348,6 +397,20 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                     layout.slots.iter_mut().for_each(|s| s.stale = true);
                 }
                 TrayCommand::SetHidden(_) | TrayCommand::SetMoving(_) => {}
+                TrayCommand::BackgroundOpacity { percent, saved } => {
+                    if saved {
+                        // The reload of the window's write then finds the file as the overlay has it.
+                        config.general.background_opacity = percent;
+                        preview = None;
+                    } else {
+                        preview = Some(Preview {
+                            percent,
+                            at: Instant::now(),
+                        });
+                    }
+                    // Applied below, before the frame. The window needs no answer.
+                    continue;
+                }
             }
             // Also when nothing changed, so the window's switches settle on the overlay's state.
             platform::notify_control(ControlEvent::State {
@@ -391,9 +454,18 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         if reload_at.is_some_and(|at| Instant::now() >= at) {
             reload_at = None;
             if let Some(path) = config::config_file() {
-                match config::load_or_create(&path) {
-                    Ok(fresh) if fresh == config => {}
-                    Ok(fresh) => {
+                let reloaded = config::load_or_create(&path).map(|mut fresh| {
+                    let change = compare(&config, &mut fresh, &mut preview, Instant::now());
+                    (fresh, change)
+                });
+                match reloaded {
+                    Ok((_, Reload::Nothing)) => {}
+                    Ok((fresh, Reload::Background)) => {
+                        config = fresh;
+                        info!("configuration reloaded: background opacity");
+                        platform::notify_control(ControlEvent::ConfigChanged);
+                    }
+                    Ok((fresh, Reload::Everything)) => {
                         if fresh.telemetry != config.telemetry {
                             view.set_telemetry_folders(config::telemetry_dirs(
                                 &fresh.telemetry,
@@ -445,6 +517,13 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             scene = Scene::build(device, &layout)
                 .inspect_err(|e| debug!("scene not built: {e}"))
                 .ok();
+            layout.slots.iter_mut().for_each(|s| s.stale = true);
+        }
+        // A changed background opacity redraws every widget once, as hidden widgets do when they show again.
+        let background = preview.map_or(config.general.background_opacity, |p| p.percent);
+        if let Some(device) = renderer.as_mut()
+            && device.set_background_opacity(background)
+        {
             layout.slots.iter_mut().for_each(|s| s.stale = true);
         }
         let shown = if handles.is_some() {
@@ -577,5 +656,54 @@ mod tests {
         );
         assert_eq!(next_wake(std::iter::empty(), false, now), now + IDLE_WAKE);
         assert_eq!(next_wake(std::iter::empty(), true, now), now + HIDDEN_WAKE);
+    }
+
+    #[test]
+    fn a_reload_does_not_undo_the_slider() {
+        let now = Instant::now();
+        let with = |percent| {
+            let mut config = Config::default();
+            config.general.background_opacity = percent;
+            config
+        };
+        // The window saved 50 and the overlay took it; the reload of that write changes nothing.
+        let mut preview = None;
+        let mut fresh = with(50);
+        assert_eq!(
+            compare(&with(50), &mut fresh, &mut preview, now),
+            Reload::Nothing
+        );
+        // The slider moved on to 30 before that reload: the file's 50 does not win over it.
+        let mut preview = Some(Preview {
+            percent: 30,
+            at: now,
+        });
+        let mut fresh = with(50);
+        assert_eq!(
+            compare(&with(50), &mut fresh, &mut preview, now + RELOAD_DELAY),
+            Reload::Background
+        );
+        assert_eq!(fresh.general.background_opacity, 30);
+        assert!(preview.is_some());
+        // A window that went away mid-drag: after a while the file's value is used again.
+        let mut fresh = with(50);
+        let later = now + PREVIEW_HOLD + RELOAD_DELAY;
+        assert_eq!(
+            compare(&with(50), &mut fresh, &mut preview, later),
+            Reload::Nothing
+        );
+        assert!(preview.is_none());
+        // A value edited by hand redraws without a rebuild; any other change rebuilds.
+        let mut fresh = with(10);
+        assert_eq!(
+            compare(&with(50), &mut fresh, &mut None, now),
+            Reload::Background
+        );
+        let mut fresh = with(10);
+        fresh.general.start_in_tray = true;
+        assert_eq!(
+            compare(&with(50), &mut fresh, &mut None, now),
+            Reload::Everything
+        );
     }
 }

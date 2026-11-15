@@ -86,5 +86,15 @@ pub fn switch_height() -> Pixels {
     px(20.0)
 }
 
+/// Thickness of the background opacity slider's track.
+pub fn slider_height() -> Pixels {
+    px(4.0)
+}
+
+/// Diameter of the slider's knob, the same as a switch's.
+pub fn slider_knob() -> Pixels {
+    px(16.0)
+}
+
 /// Opacity of a switch that cannot be used.
 pub const DISABLED_OPACITY: f32 = 0.4;

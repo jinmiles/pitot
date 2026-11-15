@@ -367,7 +367,7 @@ impl Widget for FuelWidget {
 
     fn draw(&self, _layer: usize, canvas: &mut Canvas<'_>) {
         let (w, h) = (self.width as f32, self.height as f32);
-        canvas.fill(
+        canvas.fill_background(
             Rect::new(0.0, 0.0, w, h),
             Color::rgb(BACKGROUND, self.opacity),
         );

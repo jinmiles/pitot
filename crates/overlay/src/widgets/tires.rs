@@ -404,7 +404,7 @@ impl TiresWidget {
     fn draw_corner(&self, c: usize, canvas: &mut Canvas<'_>) {
         let corner = &self.shown.corners[c];
         let block = self.corner_rect(c);
-        canvas.fill(block, Color::rgb(BLOCK, self.opacity));
+        canvas.fill_background(block, Color::rgb(BLOCK, self.opacity));
         let cell_w = block.w / ZONES as f32;
         let row_h = block.h / 3.0;
         let replay = self.shown.mode == Mode::Replay;
@@ -568,7 +568,7 @@ impl Widget for TiresWidget {
             return;
         }
         let (w, h) = (self.width as f32, self.height as f32);
-        canvas.fill(
+        canvas.fill_background(
             Rect::new(0.0, 0.0, w, h),
             Color::rgb(BACKGROUND, self.opacity),
         );

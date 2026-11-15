@@ -5,6 +5,7 @@
 [general]
 font = "Segoe UI"
 start_in_tray = true
+background_opacity = 82
 
 [widgets.status]
 enabled = false
