@@ -4,6 +4,7 @@
 //! All Win32 `unsafe` for windowing lives here; callers use the safe types below.
 
 mod link;
+mod monitors;
 
 use std::cell::{Cell, RefCell};
 use std::sync::OnceLock;
@@ -15,15 +16,15 @@ pub use link::{
     open_control, overlay_running, quit_overlay_and_wait, send_to_overlay, start_overlay,
 };
 use link::{LINK_MESSAGE, TRAY_CLASS, register_class};
+pub use monitors::{Monitor, displays, monitors};
 
 use windows::Win32::Foundation::{
     COLORREF, CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE, HINSTANCE, HWND, LPARAM,
     LRESULT, POINT, RECT, WAIT_OBJECT_0, WAIT_TIMEOUT, WPARAM,
 };
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, CreateSolidBrush, EndPaint, EnumDisplayMonitors, FillRect, FrameRect,
-    GetMonitorInfoW, GetStockObject, HBRUSH, HDC, HMONITOR, MONITOR_DEFAULTTONEAREST, MONITORINFO,
-    MONITORINFOEXW, MonitorFromWindow, PAINTSTRUCT, WHITE_BRUSH,
+    BeginPaint, CreateSolidBrush, EndPaint, FillRect, FrameRect, GetMonitorInfoW, GetStockObject,
+    HBRUSH, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow, PAINTSTRUCT, WHITE_BRUSH,
 };
 use windows::Win32::Storage::FileSystem::{
     FILE_NOTIFY_CHANGE_FILE_NAME, FILE_NOTIFY_CHANGE_LAST_WRITE, FindCloseChangeNotification,
@@ -37,8 +38,7 @@ use windows::Win32::System::Threading::{
     TIMER_ALL_ACCESS,
 };
 use windows::Win32::UI::HiDpi::{
-    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForMonitor, MDT_EFFECTIVE_DPI,
-    SetProcessDpiAwarenessContext,
+    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
 use windows::Win32::UI::Shell::{
@@ -140,60 +140,6 @@ pub struct ScreenRect {
     pub y: i32,
     pub width: i32,
     pub height: i32,
-}
-
-/// A display, in enumeration order.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Monitor {
-    pub rect: ScreenRect,
-    pub primary: bool,
-    /// Effective DPI (96 at 100% scaling).
-    pub dpi: u32,
-}
-
-/// Lists the connected monitors.
-pub fn monitors() -> Vec<Monitor> {
-    unsafe extern "system" fn collect(
-        monitor: HMONITOR,
-        _: HDC,
-        _: *mut RECT,
-        data: LPARAM,
-    ) -> windows::core::BOOL {
-        // SAFETY: `data` is the `&mut Vec<Monitor>` passed to EnumDisplayMonitors below, alive for the call.
-        let out = unsafe { &mut *(data.0 as *mut Vec<Monitor>) };
-        let mut info = MONITORINFOEXW::default();
-        info.monitorInfo.cbSize = size_of::<MONITORINFOEXW>() as u32;
-        // SAFETY: `info` is a MONITORINFOEXW with cbSize set, as GetMonitorInfoW requires.
-        if unsafe { GetMonitorInfoW(monitor, &mut info.monitorInfo as *mut MONITORINFO) }.as_bool()
-        {
-            let r = info.monitorInfo.rcMonitor;
-            let (mut dpi_x, mut dpi_y) = (96, 96);
-            // SAFETY: valid monitor handle from the enumeration and writable out parameters.
-            let _ = unsafe { GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y) };
-            out.push(Monitor {
-                rect: ScreenRect {
-                    x: r.left,
-                    y: r.top,
-                    width: r.right - r.left,
-                    height: r.bottom - r.top,
-                },
-                primary: info.monitorInfo.dwFlags & 1 != 0,
-                dpi: dpi_x,
-            });
-        }
-        true.into()
-    }
-    let mut out: Vec<Monitor> = Vec::new();
-    // SAFETY: the callback only runs during this call and receives a pointer to `out`, which outlives it.
-    let _ = unsafe {
-        EnumDisplayMonitors(
-            None,
-            None,
-            Some(collect),
-            LPARAM(&mut out as *mut _ as isize),
-        )
-    };
-    out
 }
 
 const TRAY_MESSAGE: u32 = WM_APP + 1;

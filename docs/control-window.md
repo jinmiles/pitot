@@ -16,6 +16,25 @@ own executable again with `--window`.
   widgets* (the tray menu's *Move widgets*, which places and resizes widgets with the mouse). A change on either
   side shows on the other at once. When no overlay runs, a *Start the overlay* row starts the overlay
   (`pitot.exe` without arguments).
+- **Display**: where the widgets show. One row per choice, with a round mark on the right that is filled, and a
+  tinted row, for the current one:
+  - *Primary display (follow Windows)*, with which display that is now (*Now Display 1 · DELL P2419H*). It leaves
+    `[general] monitor` out, so the widgets follow Windows' primary display.
+  - *Display 1*, *Display 2*, ...: every connected display in Pitot's order (left to right, then top to bottom;
+    *Display 1* is `monitor = 0` in the file), with the monitor's name where Windows provides one (from the
+    monitor's EDID, through the display configuration API), its resolution in physical pixels, and *Primary* on
+    the primary one.
+  - *Display N (not connected)*, *Using the primary display*: when the file names a display that is not connected.
+    It is dimmed and cannot be clicked; choosing another row replaces it.
+
+  A click writes `[general] monitor` (or removes it for the primary display) into `config.toml` in place, and
+  removes every widget's own `monitor` key, so all widgets move to that display; the overlay reloads the file and
+  rebuilds its windows there. While some widgets have a `monitor` of their own, a note above the rows says how
+  many (*2 widgets have their own display. Choosing a display moves them too.*), and a click on the current choice
+  still moves them. See [Display](configuration.md#display) for the setting, its precedence, and how widgets placed
+  on a larger display are kept inside a smaller one. The list is read again when the window opens, each time it is
+  activated, and when the overlay reloads the file, so a display connected or removed while the window is in the
+  background shows when it comes back.
 - **Appearance**: *Background opacity*, a slider from 0% (no backgrounds) to 100% (opaque backgrounds) with its
   percent shown, for the backgrounds of every widget at once; text and graphs stay as they are (see
   [Background opacity](configuration.md#background-opacity) for what counts as background). A click on the track
@@ -114,7 +133,7 @@ spends nothing on it per tick or frame.
 - The Pitot window owns a message-only window of class `PitotControlLink` on a thread of its own. The overlay
   posts it the state (widgets hidden, moving) after every change and after a hello, a note after each
   configuration reload, a request to come to the front, and a close when the overlay quits.
-- Turning widgets on and off goes through `config.toml`, which the overlay already reloads.
+- Turning widgets on and off and choosing a display go through `config.toml`, which the overlay already reloads.
 - The background opacity slider sends each new percent while it moves (at most 101 messages for a drag across
   the track), and the overlay redraws every widget once per value, without a reload. When the slider stops, the
   window saves the value and then tells the overlay what the file now holds (the old value if the save failed),

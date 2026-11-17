@@ -79,8 +79,12 @@ pub fn capture_dirs() -> Vec<PathBuf> {
 /// after the first ten, off by default) take their defaults from the registry.
 pub const DEFAULT_TOML: &str = r#"# Pitot overlay configuration. Changes apply when the file is saved.
 #
-# Positions are in physical pixels from the top-left corner of the widget's monitor.
-# `monitor` counts monitors from the left (0 is the leftmost); leave it out to use the primary monitor.
+# Positions are in physical pixels from the top-left corner of the widget's monitor. A widget that would reach
+# past the monitor's edges shows just inside them; the file keeps its numbers.
+# `monitor` counts monitors from the left (0 is the leftmost), then from the top. In [general] it puts every
+# widget on that monitor; leave it out to use the primary monitor. A widget's own `monitor` puts just that widget
+# elsewhere. A monitor that is not connected counts as left out. The Pitot window's Display section saves
+# [general] monitor and removes the widgets' own.
 # *Move widgets* in the tray menu places and resizes widgets with the mouse and saves their x, y, width, and
 # height here. The Pitot window turns widgets on and off and saves their `enabled` here.
 
@@ -220,6 +224,9 @@ pub struct Config {
 #[serde(default, deny_unknown_fields)]
 pub struct General {
     pub font: String,
+    /// The monitor every widget shows on, counted as [`monitor_order`] does; `None` is the primary monitor. A
+    /// widget's own `monitor` overrides it: see [`resolve_monitor`].
+    pub monitor: Option<usize>,
     /// Start without opening the Pitot window; the tray icon opens it.
     pub start_in_tray: bool,
     /// How opaque the widgets' backgrounds are, in percent: see [`background_alpha`].
@@ -235,6 +242,7 @@ impl Default for General {
     fn default() -> Self {
         Self {
             font: "Segoe UI".to_owned(),
+            monitor: None,
             start_in_tray: false,
             background_opacity: DEFAULT_BACKGROUND_OPACITY,
             text_size: DEFAULT_TEXT_SIZE,
@@ -481,7 +489,7 @@ fn spec_index(name: &str) -> Option<usize> {
 #[derive(Debug, Clone, PartialEq)]
 pub struct WidgetConfig {
     pub enabled: bool,
-    /// Monitor index from the left; `None` is the primary monitor.
+    /// Monitor index from the left, over `[general] monitor`; `None` follows `[general] monitor`.
     pub monitor: Option<usize>,
     pub x: i32,
     pub y: i32,
@@ -818,6 +826,100 @@ pub fn with_check_updates(text: &str, on: bool) -> Result<String, ConfigError> {
     })
 }
 
+/// Returns `text` with every widget on `monitor`, as the Pitot window's Display section chooses: `[general]
+/// monitor` set to it, or removed for `None` (the primary monitor), and every widget's own `monitor` removed, so
+/// no widget stays elsewhere. A value changes in place, a missing `[general] monitor` goes on the line after the
+/// `[general]` header (a missing table is added at the end), and a removed key's line goes, with its comment on
+/// that line; other comments and lines stay. Fails when a key to remove is not on a line of its own in a table
+/// with its own header (an inline table, dotted keys), as [`with_fields`] fails for keys it cannot place.
+pub fn with_display(text: &str, monitor: Option<usize>) -> Result<String, ConfigError> {
+    let before = Config::parse(text)?;
+    let own: Vec<&'static str> = before
+        .widgets()
+        .filter(|(_, widget)| widget.monitor.is_some())
+        .map(|(name, _)| name)
+        .collect();
+    let mut lines = Vec::with_capacity(own.len() + 1);
+    for name in &own {
+        lines.push(key_line(text, &["widgets", name], "monitor")?.ok_or(ConfigError::Unplaceable)?);
+    }
+    if monitor.is_none()
+        && let Some(line) = key_line(text, &["general"], "monitor")?
+    {
+        lines.push(line);
+    }
+    // Removed from the end, so earlier ranges stay valid.
+    lines.sort_by_key(|range| std::cmp::Reverse(range.start));
+    let mut out = text.to_owned();
+    for range in lines {
+        out.replace_range(range, "");
+    }
+    if let Some(index) = monitor {
+        let fields = [("monitor", index.to_string())];
+        out = with_fields(&out, &["general"], &fields, |config| {
+            config.general.monitor = Some(index);
+        })?;
+    }
+    // The edit must make the change and nothing else.
+    let mut expected = before;
+    expected.general.monitor = monitor;
+    for name in own {
+        if let Some(widget) = expected.widget_mut(name) {
+            widget.monitor = None;
+        }
+    }
+    if Config::parse(&out)? != expected {
+        return Err(ConfigError::Unplaceable);
+    }
+    Ok(out)
+}
+
+/// The bytes of the line that holds key `field` of the table at `path` in `text`, with its line break; `None`
+/// when the table or the key is not there. Fails unless the table has its own header (`[widgets.<name>]`) and
+/// the key is alone on its line, with at most a comment after its value.
+fn key_line(
+    text: &str,
+    path: &[&str],
+    field: &str,
+) -> Result<Option<std::ops::Range<usize>>, ConfigError> {
+    let parse_error = |e: toml::de::Error| ConfigError::Parse(e.to_string());
+    let document = toml::de::DeTable::parse(text).map_err(parse_error)?;
+    let (name, parents) = path.split_last().ok_or(ConfigError::Unplaceable)?;
+    let mut parent = Some(document.get_ref());
+    for key in parents {
+        parent = match parent.and_then(|t| t.get(*key)).map(|v| v.get_ref()) {
+            Some(toml::de::DeValue::Table(table)) => Some(table),
+            _ => None,
+        };
+    }
+    let Some((table_key, table)) = parent.and_then(|t| t.get_key_value(*name)) else {
+        return Ok(None);
+    };
+    let toml::de::DeValue::Table(table) = table.get_ref() else {
+        return Err(ConfigError::Unplaceable);
+    };
+    let Some((key, value)) = table.get_key_value(field) else {
+        return Ok(None);
+    };
+    let line_start = |at: usize| text[..at].rfind('\n').map_or(0, |i| i + 1);
+    if !text[line_start(table_key.span().start)..]
+        .trim_start()
+        .starts_with('[')
+    {
+        return Err(ConfigError::Unplaceable);
+    }
+    let start = line_start(key.span().start);
+    let end = text[value.span().end..]
+        .find('\n')
+        .map_or(text.len(), |i| value.span().end + i + 1);
+    let before_key = &text[start..key.span().start];
+    let after_value = text[value.span().end..end].trim();
+    if !before_key.trim().is_empty() || !(after_value.is_empty() || after_value.starts_with('#')) {
+        return Err(ConfigError::Unplaceable);
+    }
+    Ok(Some(start..end))
+}
+
 /// Returns `text` with the keys in `fields` of the table at `path` (`["widgets", name]`, `["general"]`) set to
 /// their TOML values. Only those values change, so comments and layout stay as they are. A missing key goes on the
 /// line after the table's header (`[widgets.<name>]`), and a missing table is added at the end. `expect` makes the
@@ -936,6 +1038,11 @@ pub fn save_check_updates(path: &Path, on: bool) -> Result<(), ConfigError> {
     save_edit(path, |text| with_check_updates(text, on))
 }
 
+/// Saves every widget on `monitor`, `None` for the primary monitor, in the file at `path` (see [`with_display`]).
+pub fn save_display(path: &Path, monitor: Option<usize>) -> Result<(), ConfigError> {
+    save_edit(path, |text| with_display(text, monitor))
+}
+
 /// Rewrites the file at `path` with `edit`. Writes a temporary file next to it first and moves it over the old
 /// one, so a failed write leaves the old file.
 fn save_edit(
@@ -973,6 +1080,32 @@ pub fn monitor_order(rects: &[(i32, i32)]) -> Vec<usize> {
     let mut order: Vec<usize> = (0..rects.len()).collect();
     order.sort_by_key(|&i| (rects[i].0, rects[i].1));
     order
+}
+
+/// The monitor a widget shows on, as an index into the `count` connected monitors in [`monitor_order`]: the
+/// widget's own `monitor`, else `[general] monitor`, else `primary`. A monitor that is not connected counts as left
+/// out, so a widget's own falls back to the general one, and the general one to the primary.
+pub fn resolve_monitor(
+    own: Option<usize>,
+    general: Option<usize>,
+    count: usize,
+    primary: usize,
+) -> usize {
+    let connected = |index: &usize| *index < count;
+    own.filter(connected)
+        .or(general.filter(connected))
+        .unwrap_or(primary)
+}
+
+/// Where a widget configured at (`x`, `y`) with a box of `size` shows on a monitor of `monitor` (width, height),
+/// all in physical pixels: moved just far enough to be inside the monitor, as on a monitor smaller than the one it
+/// was placed on. A widget larger than the monitor keeps its top-left corner in the monitor's.
+pub fn clamp_position(x: i32, y: i32, size: (u32, u32), monitor: (i32, i32)) -> (i32, i32) {
+    let fit = |at: i32, length: u32, room: i32| {
+        let length = i32::try_from(length).unwrap_or(i32::MAX);
+        at.clamp(0, room.saturating_sub(length).max(0))
+    };
+    (fit(x, size.0, monitor.0), fit(y, size.1, monitor.1))
 }
 
 #[cfg(test)]
@@ -1131,6 +1264,11 @@ mod tests {
             );
             assert_eq!(general.text_size, DEFAULT_TEXT_SIZE, "default text");
             assert!(!general.check_updates, "no network during a measurement");
+            // No value means the primary monitor, so the key is left out.
+            assert_eq!(general.monitor, None, "the primary monitor");
+        }
+        for (_, widget) in four.widgets().chain(inputs.widgets()) {
+            assert_eq!(widget.monitor, None, "the primary monitor");
         }
     }
 
@@ -1825,5 +1963,273 @@ mod tests {
         // Lab PC layout: primary at 0, one to its right, a portrait one further right and higher.
         assert_eq!(monitor_order(&[(1920, 0), (3840, -383), (0, 0)]), [2, 0, 1]);
         assert_eq!(monitor_order(&[(-1920, 0), (0, 0)]), [0, 1]);
+    }
+
+    #[test]
+    fn the_general_monitor_is_left_out_by_default_and_read() {
+        assert_eq!(Config::default().general.monitor, None);
+        assert_eq!(
+            Config::parse("[general]\nfont = \"Arial\"\n")
+                .expect("a file from before the setting")
+                .general
+                .monitor,
+            None
+        );
+        let config = Config::parse("[general]\nmonitor = 3\n").expect("parses");
+        assert_eq!(config.general.monitor, Some(3));
+        assert_eq!(config.general.text_size, 100, "others keep defaults");
+        assert!(
+            config.widgets().all(|(_, w)| w.monitor.is_none()),
+            "the widgets' own stay left out"
+        );
+        // A monitor's index is a whole number from 0.
+        for bad in ["-1", "1.5", "\"left\"", "true"] {
+            assert!(
+                matches!(
+                    Config::parse(&format!("[general]\nmonitor = {bad}\n")),
+                    Err(ConfigError::Parse(_))
+                ),
+                "{bad}"
+            );
+        }
+        // Any index reads; one that is not connected falls back when the widgets are laid out.
+        assert_eq!(
+            Config::parse("[general]\nmonitor = 40\n")
+                .expect("parses")
+                .general
+                .monitor,
+            Some(40)
+        );
+    }
+
+    #[test]
+    fn a_widgets_own_monitor_comes_before_the_general_one() {
+        // Four monitors, the primary second from the left.
+        let on = |own, general| resolve_monitor(own, general, 4, 1);
+        assert_eq!(on(None, None), 1, "the primary");
+        assert_eq!(on(None, Some(3)), 3, "the general one");
+        assert_eq!(on(None, Some(0)), 0);
+        assert_eq!(on(Some(2), Some(3)), 2, "the widget's own first");
+        assert_eq!(on(Some(2), None), 2);
+        assert_eq!(on(Some(3), Some(3)), 3);
+        // Not connected counts as left out.
+        assert_eq!(on(None, Some(4)), 1, "the general one is not connected");
+        assert_eq!(on(Some(7), Some(3)), 3, "the widget's own is not connected");
+        assert_eq!(on(Some(7), None), 1);
+        assert_eq!(on(Some(7), Some(9)), 1, "neither is connected");
+        assert_eq!(resolve_monitor(Some(0), Some(0), 1, 0), 0, "one monitor");
+
+        // As read from a file: two widgets on monitors of their own, the rest on the general one.
+        let config = Config::parse(
+            "[general]\nmonitor = 3\n[widgets.fuel]\nmonitor = 0\n[widgets.wind]\nmonitor = 6\n",
+        )
+        .expect("parses");
+        let general = config.general.monitor;
+        let monitors: Vec<(&str, usize)> = config
+            .widgets()
+            .filter(|(_, w)| w.enabled)
+            .map(|(name, w)| (name, resolve_monitor(w.monitor, general, 4, 1)))
+            .collect();
+        for (name, monitor) in monitors {
+            let expected = if name == "fuel" { 0 } else { 3 };
+            assert_eq!(monitor, expected, "{name}");
+        }
+    }
+
+    #[test]
+    fn widgets_are_kept_inside_a_smaller_monitor() {
+        let full_hd = (1920, 1080);
+        // Inside: unchanged.
+        assert_eq!(clamp_position(1460, 900, (420, 150), full_hd), (1460, 900));
+        assert_eq!(clamp_position(1500, 930, (420, 150), full_hd), (1500, 930));
+        assert_eq!(
+            clamp_position(0, 0, (1920, 1080), full_hd),
+            (0, 0),
+            "fills it"
+        );
+        // Laid out on 1920 x 1080, shown on 1280 x 720: moved in just far enough.
+        let small = (1280, 720);
+        assert_eq!(clamp_position(1460, 900, (420, 150), small), (860, 570));
+        assert_eq!(clamp_position(24, 260, (760, 560), small), (24, 160));
+        assert_eq!(clamp_position(660, 900, (600, 120), small), (660, 600));
+        // A portrait monitor: only the side that does not fit moves.
+        assert_eq!(
+            clamp_position(1460, 560, (460, 300), (1080, 1920)),
+            (620, 560)
+        );
+        // Past the top-left corner.
+        assert_eq!(clamp_position(-40, -5, (200, 100), full_hd), (0, 0));
+        // Larger than the monitor: its top-left corner at the monitor's.
+        assert_eq!(clamp_position(500, 300, (2000, 1200), full_hd), (0, 0));
+        assert_eq!(clamp_position(500, 300, (2000, 100), full_hd), (0, 300));
+        // Extreme values do not overflow.
+        assert_eq!(
+            clamp_position(i32::MAX, i32::MIN, (u32::MAX, 0), full_hd),
+            (0, 0)
+        );
+        assert_eq!(clamp_position(i32::MAX, 5, (16, 16), full_hd), (1904, 5));
+    }
+
+    #[test]
+    fn choosing_a_display_sets_the_general_monitor_in_place() {
+        let chosen = with_display(DEFAULT_TOML, Some(3)).expect("edited");
+        let config = Config::parse(&chosen).expect("parses");
+        assert_eq!(config.general.monitor, Some(3));
+        let mut expected = Config::default();
+        expected.general.monitor = Some(3);
+        assert_eq!(config, expected, "nothing else changed");
+        // One line more, right under the header; every comment stays.
+        assert!(
+            chosen.contains("[general]\nmonitor = 3\nfont = \"Segoe UI\"\n"),
+            "{chosen}"
+        );
+        assert_eq!(chosen.lines().count(), DEFAULT_TOML.lines().count() + 1);
+        assert_eq!(chosen.replace("monitor = 3\n", ""), DEFAULT_TOML);
+        // Another display changes the number only.
+        let again = with_display(&chosen, Some(0)).expect("edited");
+        assert_eq!(again, chosen.replace("monitor = 3\n", "monitor = 0\n"));
+        // The primary display removes the key, which gives back the file.
+        assert_eq!(
+            with_display(&chosen, None).expect("edited"),
+            DEFAULT_TOML,
+            "back to the primary gives the same file"
+        );
+        assert_eq!(
+            with_display(DEFAULT_TOML, None).expect("edited"),
+            DEFAULT_TOML,
+            "already the primary"
+        );
+        // A comment on the key's line goes with it; one above it stays.
+        let commented =
+            "# mine\n[general]\n# the sim's screen\nmonitor = 2 # right\nfont = \"Arial\"\n";
+        assert_eq!(
+            with_display(commented, Some(1)).expect("edited"),
+            "# mine\n[general]\n# the sim's screen\nmonitor = 1 # right\nfont = \"Arial\"\n"
+        );
+        assert_eq!(
+            with_display(commented, None).expect("edited"),
+            "# mine\n[general]\n# the sim's screen\nfont = \"Arial\"\n"
+        );
+        // A file without the table gets it at the end.
+        assert_eq!(
+            with_display("[widgets.fuel]\nx = 1\n", Some(2)).expect("edited"),
+            "[widgets.fuel]\nx = 1\n\n[general]\nmonitor = 2\n"
+        );
+        assert_eq!(
+            with_display("", Some(2)).expect("edited"),
+            "[general]\nmonitor = 2\n"
+        );
+        assert_eq!(with_display("", None).expect("edited"), "");
+    }
+
+    #[test]
+    fn choosing_a_display_removes_the_widgets_own() {
+        // Two widgets on a monitor of their own, as an older file or a hand edit leaves them.
+        let own = DEFAULT_TOML
+            .replace(
+                "[widgets.relative]\nenabled = true\n",
+                "[widgets.relative]\nenabled = true\nmonitor = 3 # the sim\n",
+            )
+            .replace(
+                "[widgets.fuel]\nenabled = true\n",
+                "[widgets.fuel]\nenabled = true\n  monitor = 1\n",
+            );
+        let before = Config::parse(&own).expect("parses");
+        assert_eq!(widget(&before, "relative").monitor, Some(3));
+        assert_eq!(widget(&before, "fuel").monitor, Some(1));
+        for choice in [Some(3), Some(0), None] {
+            let chosen = with_display(&own, choice).expect("edited");
+            let config = Config::parse(&chosen).expect("parses");
+            assert_eq!(config.general.monitor, choice, "{choice:?}");
+            assert!(
+                config.widgets().all(|(_, w)| w.monitor.is_none()),
+                "{choice:?}: no widget stays elsewhere"
+            );
+            // Nothing else changed, and every comment line stayed.
+            let mut expected = before.clone();
+            expected.general.monitor = choice;
+            expected.widget_mut("relative").expect("relative").monitor = None;
+            expected.widget_mut("fuel").expect("fuel").monitor = None;
+            assert_eq!(config, expected, "{choice:?}");
+            let comments = |text: &str| -> Vec<String> {
+                text.lines()
+                    .filter(|line| line.trim_start().starts_with('#'))
+                    .map(str::to_owned)
+                    .collect()
+            };
+            assert_eq!(comments(&chosen), comments(DEFAULT_TOML), "{choice:?}");
+        }
+        assert_eq!(
+            with_display(&own, None).expect("edited"),
+            DEFAULT_TOML,
+            "the keys' lines go whole"
+        );
+        // The same choice as before still moves the widgets with their own.
+        let same = "[general]\nmonitor = 3\n\n[widgets.inputs]\nmonitor = 3\nx = 1\n\n[widgets.fuel]\nmonitor = 3\n";
+        assert_eq!(
+            with_display(same, Some(3)).expect("edited"),
+            "[general]\nmonitor = 3\n\n[widgets.inputs]\nx = 1\n\n[widgets.fuel]\n"
+        );
+        // Windows line breaks.
+        let crlf = "[general]\r\nmonitor = 1\r\n[widgets.fuel]\r\nmonitor = 2\r\nx = 5\r\n";
+        assert_eq!(
+            with_display(crlf, None).expect("edited"),
+            "[general]\r\n[widgets.fuel]\r\nx = 5\r\n"
+        );
+        // The last line without a line break.
+        assert_eq!(
+            with_display("[widgets.fuel]\nx = 5\nmonitor = 2", Some(0)).expect("edited"),
+            "[widgets.fuel]\nx = 5\n\n[general]\nmonitor = 0\n"
+        );
+    }
+
+    #[test]
+    fn a_display_that_cannot_be_written_in_place_is_refused() {
+        for text in [
+            // An inline widget table, and dotted keys.
+            "[widgets]\nfuel = { x = 1, monitor = 2 }\n",
+            "[widgets]\nfuel.monitor = 2\n",
+            "widgets.fuel.monitor = 2\n",
+            // An inline general table without the key cannot take it; with it, the primary cannot remove it.
+            "general = { font = \"Arial\" }\n",
+        ] {
+            assert!(
+                matches!(with_display(text, Some(1)), Err(ConfigError::Unplaceable)),
+                "{text}"
+            );
+        }
+        assert!(matches!(
+            with_display("general = { monitor = 1 }\n", None),
+            Err(ConfigError::Unplaceable)
+        ));
+        // An inline general table with the key takes a new value in place.
+        assert_eq!(
+            with_display("general = { monitor = 1 }\n", Some(2)).expect("edited"),
+            "general = { monitor = 2 }\n"
+        );
+        assert!(matches!(
+            with_display("[general\n", Some(1)),
+            Err(ConfigError::Parse(_))
+        ));
+    }
+
+    #[test]
+    fn a_saved_display_replaces_the_file() {
+        let dir = std::env::temp_dir().join(format!("pitot-display-{}", std::process::id()));
+        fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("config.toml");
+        let own = DEFAULT_TOML.replace(
+            "[widgets.inputs]\nenabled = true\n",
+            "[widgets.inputs]\nenabled = true\nmonitor = 2\n",
+        );
+        fs::write(&path, own).expect("write");
+        save_display(&path, Some(3)).expect("saved");
+        let config = load_or_create(&path).expect("loads");
+        assert_eq!(config.general.monitor, Some(3));
+        assert_eq!(widget(&config, "inputs").monitor, None);
+        save_display(&path, None).expect("saved");
+        assert_eq!(fs::read_to_string(&path).expect("reads"), DEFAULT_TOML);
+        assert!(!path.with_extension("toml.tmp").exists());
+        fs::remove_dir_all(&dir).expect("cleans up");
     }
 }

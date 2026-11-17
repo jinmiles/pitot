@@ -26,6 +26,38 @@ start_in_tray = false
 Its widget switches write the widget's `enabled` into this file, changing only that value, by the same rules as
 moving widgets below.
 
+## Display
+
+The display the widgets show on, for every widget at once. The Pitot window's *Display* section sets it; it can
+also be edited here.
+
+```toml
+[general]
+monitor = 1
+```
+
+- `monitor`: a monitor's index, counting from 0 left to right, then top to bottom, by each monitor's top-left
+  corner (see [Format](#format)). Left out, which is the default and has no value of its own, the widgets show on
+  the primary display, and follow Windows when another display becomes the primary one.
+- A widget's own `monitor` (in its `[widgets.<name>]` table) puts that widget on another display and comes before
+  `[general] monitor`. It is for setups that split widgets over displays; the Pitot window does not set it.
+- A monitor that is not connected counts as left out: a widget whose own monitor is not connected shows on the
+  `[general]` one, and `[general] monitor` that is not connected falls back to the primary display. The log says
+  which monitors are missing once, when the widgets are laid out with a different set of missing ones.
+- `x` and `y` stay relative to the top-left corner of the widget's display. A widget that would reach past the
+  display's right or bottom edge, as when it was placed on a larger display, shows just inside it: moved left or
+  up as far as needed, and to the display's top-left corner when it is larger than the display. The file keeps
+  its numbers, so the widget goes back to its place on a display where it fits. *Move widgets* then moves it from
+  where it shows, and saves its place only once it is moved.
+- A change rebuilds the overlay windows and widgets on the new display, as other changes do (below).
+
+Choosing a display in the Pitot window writes `[general] monitor`, or removes it for *Primary display*, and
+removes every widget's own `monitor` key, so all widgets go to the chosen display. Only those lines change: a
+value changes in place, a new `monitor` goes on the line after `[general]` (a missing `[general]` table is added
+at the end), and a removed key's line goes with the comment on that line; every other line and comment stays. A
+`monitor` key that is not on a line of its own in a table with its own header (an inline table or a dotted key)
+cannot be removed this way; the window says so and changes nothing.
+
 ## Updates
 
 ```toml
@@ -169,7 +201,7 @@ made again at each new size and drawn whole; outside *Move widgets* nothing of t
 
 Clicks outside the handles still reach the windows below. A right click on a handle opens the tray menu, and
 choosing *Move widgets* again (or turning it off in the Pitot window) ends moving. The overlay's own write to the
-file does not trigger a reload. A widget's monitor is set in the file.
+file does not trigger a reload. Widgets move within their display; the [Display](#display) setting chooses it.
 
 ## Recording and replays
 
@@ -256,6 +288,7 @@ At every sim disconnect and at exit, the line also carries the data path's count
 ```toml
 [general]
 font = "Segoe UI"
+monitor = 1  # every widget's monitor, counted as below; leave out for the primary monitor
 start_in_tray = false  # true: do not open the Pitot window at start
 background_opacity = 82  # every widget's background, 0 (none) to 100 (opaque); 82 is each widget's opacity
 text_size = 100  # every widget's text and the rows and columns around it, 70 to 150 percent
@@ -263,7 +296,7 @@ check_updates = true  # false: the Pitot window does not look for updates
 
 [widgets.inputs]
 enabled = true
-monitor = 1     # count from the left, 0 is the leftmost; leave out for the primary monitor
+monitor = 1     # count from the left, 0 is the leftmost; leave out for [general] monitor
 x = 660         # physical pixels from the monitor's top-left corner
 y = 900
 width = 600
@@ -283,6 +316,7 @@ The pit widget keeps what it measures, the refueling speed by car and the pit la
 
 | Field | Range |
 |---|---|
+| `monitor` | 0 or more, a whole number; one that is not connected counts as left out ([Display](#display)) |
 | `background_opacity` | `[general]` only: 0 to 100, a whole number |
 | `text_size` | `[general]` only: 70 to 150, a whole number |
 | `rate_hz` | 0.1 to 120 |
@@ -291,7 +325,9 @@ The pit widget keeps what it measures, the refueling speed by car and the pit la
 | `shape` | `trackmap` only: `"circle"` (default) or `"outline"` |
 
 Monitors are counted left to right, then top to bottom, by their top-left corner. That order does not change
-when Windows renumbers displays.
+when Windows renumbers displays. The overlay and the Pitot window count them with the same function. The window
+numbers them from 1, so its *Display 1* is `monitor = 0`; its numbers follow this order, not the numbers Windows'
+display settings show.
 
 A configuration change rebuilds the overlay windows, widgets, and composition layers. The GPU device, the
 connection to the sim, and the data pipeline keep running, so reloading does not grow memory. A change of
