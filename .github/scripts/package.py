@@ -1,10 +1,19 @@
 """Packages the release binaries, each with the licenses of the code compiled into it.
 
-Usage: python .github/scripts/package.py <out dir> [--tag vX.Y.Z]
+Usage:
+    python .github/scripts/package.py version
+    python .github/scripts/package.py stage <out dir> [--tag vX.Y.Z]
+    python .github/scripts/package.py collect <out dir> --version <package version>
 
-Run after `cargo build --release --locked -p pitot -p pitot-bench`. With `--tag`, the tag must match the workspace
-version. Writes into the out dir one zip per package, the binaries published on their own with their license
-texts, and SHA256SUMS.txt over all of them.
+`version` prints the workspace version. `stage` runs after `cargo build --release --locked -p pitot -p pitot-bench`;
+with `--tag`, the tag must match the workspace version. It writes:
+
+- `<out>/pack/`: `pitot.exe`, its `THIRD-PARTY-LICENSES.txt`, and Pitot's own `LICENSE` from the repository root,
+  the folder the installer is packed from (`vpk pack --packDir`), so all three are installed side by side;
+- `<out>/release/`: `pitot-THIRD-PARTY-LICENSES.txt` (the same text) and the `pitot-bench` zip.
+
+`collect` runs after `vpk pack --outputDir <out>/velopack`. It copies what a release publishes from the installer's
+output into `<out>/release/` (see RELEASE_FILES) and writes `SHA256SUMS.txt` over every file there.
 """
 
 import argparse
@@ -18,10 +27,26 @@ import zipfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 TARGET = "x86_64-pc-windows-msvc"
-# Each zip and the binaries in it. `pitot` is the overlay and the Pitot window in one executable.
-PACKAGES = {"pitot": ["pitot"], "pitot-bench": ["pitot-bench"]}
-# Packages whose binary is also published on its own, next to the zips, and the name of its license text there.
-SINGLE = {"pitot": "pitot-THIRD-PARTY-LICENSES.txt"}
+# The installer's package id (`vpk pack --packId`), which names its files and the installation folder.
+PACK_ID = "Pitot"
+# `pitot` is the overlay and the Pitot window in one executable, installed by the installer. Other binaries ship
+# as a zip each.
+INSTALLED = "pitot"
+ZIPPED = ["pitot-bench"]
+INSTALLED_LICENSES = "THIRD-PARTY-LICENSES.txt"
+# Pitot's own license, installed next to the executable.
+PROJECT_LICENSE = ROOT / "LICENSE"
+RELEASE_LICENSES = "pitot-THIRD-PARTY-LICENSES.txt"
+# Files of the installer's output that a release publishes, by name for the package version `{v}`. The installer,
+# the update packages (the delta only when there was an earlier release to make it from), and the release feeds
+# that installed copies read. A file that does not exist is skipped unless it is required.
+RELEASE_FILES = [
+    (f"{PACK_ID}-win-Setup.exe", True),
+    (f"{PACK_ID}-{{v}}-full.nupkg", True),
+    (f"{PACK_ID}-{{v}}-delta.nupkg", False),
+    ("releases.win.json", True),
+    ("RELEASES", False),
+]
 LICENSE_PREFIXES = ("license", "licence", "copying", "notice", "unlicense")
 # License texts for crates whose package has no license file: `<crate>.txt` from the crate's repository, or the
 # canonical text of a license the crate offers.
@@ -36,6 +61,13 @@ def metadata():
         capture_output=True,
     ).stdout
     return json.loads(out)
+
+
+def workspace_version(meta):
+    versions = {p["version"] for p in meta["packages"] if p["id"] in meta["workspace_members"]}
+    if len(versions) != 1:
+        sys.exit(f"workspace crates have different versions: {sorted(versions)}")
+    return versions.pop()
 
 
 def linked_packages(meta, binary):
@@ -133,6 +165,15 @@ def licenses_text(binaries, packages):
     return "\n".join(lines) + "\n"
 
 
+def binary_licenses(meta, binaries):
+    linked = {}
+    for binary in binaries:
+        for package in linked_packages(meta, binary):
+            linked[package["id"]] = package
+    packages = sorted(linked.values(), key=lambda p: (p["name"], p["version"]))
+    return licenses_text(binaries, packages), len(packages)
+
+
 def sha256(path):
     digest = hashlib.sha256()
     with open(path, "rb") as f:
@@ -141,53 +182,81 @@ def sha256(path):
     return digest.hexdigest()
 
 
+def stage(out, tag):
+    meta = metadata()
+    version = workspace_version(meta)
+    if tag is not None and tag != f"v{version}":
+        sys.exit(f"tag {tag} does not match the workspace version {version}")
+    built = pathlib.Path(meta["target_directory"]) / "release"
+    pack, release = out / "pack", out / "release"
+    for folder in (pack, release):
+        shutil.rmtree(folder, ignore_errors=True)
+        folder.mkdir(parents=True)
+
+    exe = built / f"{INSTALLED}.exe"
+    if not exe.is_file():
+        sys.exit(f"{exe} is missing; build the release binaries first")
+    if not PROJECT_LICENSE.is_file():
+        sys.exit(f"{PROJECT_LICENSE} is missing; the installer installs Pitot's license next to {exe.name}")
+    licenses, count = binary_licenses(meta, [INSTALLED])
+    shutil.copyfile(exe, pack / exe.name)
+    shutil.copyfile(PROJECT_LICENSE, pack / PROJECT_LICENSE.name)
+    (pack / INSTALLED_LICENSES).write_bytes(licenses.encode("utf-8"))
+    # The same text, published on its own.
+    (release / RELEASE_LICENSES).write_bytes(licenses.encode("utf-8"))
+    print(f"{pack.name}/{exe.name}: {exe.stat().st_size} bytes, {count} crates")
+
+    for name in ZIPPED:
+        exe = built / f"{name}.exe"
+        if not exe.is_file():
+            sys.exit(f"{exe} is missing; build the release binaries first")
+        licenses, count = binary_licenses(meta, [name])
+        archive = release / f"{name}-{version}-windows-x64.zip"
+        with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as z:
+            z.write(exe, exe.name)
+            z.writestr("THIRD-PARTY-LICENSES.txt", licenses)
+        print(f"{archive.name}: {exe.name} {exe.stat().st_size} bytes, {count} crates")
+
+
+def collect(out, version):
+    built, release = out / "velopack", out / "release"
+    if not release.is_dir():
+        sys.exit(f"{release} is missing; stage first")
+    for pattern, required in RELEASE_FILES:
+        source = built / pattern.format(v=version)
+        if not source.is_file():
+            if required:
+                sys.exit(f"{source} is missing; pack the installer first")
+            continue
+        shutil.copyfile(source, release / source.name)
+    sums = []
+    for path in sorted(release.iterdir(), key=lambda p: p.name.lower()):
+        if path.name == "SHA256SUMS.txt":
+            continue
+        sums.append(f"{sha256(path)}  {path.name}")
+        print(f"{path.name}: {path.stat().st_size} bytes")
+    # Unix line endings, so `sha256sum -c` reads it on any system.
+    (release / "SHA256SUMS.txt").write_bytes(("\n".join(sums) + "\n").encode("utf-8"))
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("out", type=pathlib.Path)
-    parser.add_argument("--tag")
+    commands = parser.add_subparsers(dest="command", required=True)
+    commands.add_parser("version")
+    staging = commands.add_parser("stage")
+    staging.add_argument("out", type=pathlib.Path)
+    staging.add_argument("--tag")
+    collecting = commands.add_parser("collect")
+    collecting.add_argument("out", type=pathlib.Path)
+    collecting.add_argument("--version", required=True)
     args = parser.parse_args()
 
-    meta = metadata()
-    versions = {p["version"] for p in meta["packages"] if p["id"] in meta["workspace_members"]}
-    if len(versions) != 1:
-        sys.exit(f"workspace crates have different versions: {sorted(versions)}")
-    version = versions.pop()
-    if args.tag is not None and args.tag != f"v{version}":
-        sys.exit(f"tag {args.tag} does not match the workspace version {version}")
-
-    release = pathlib.Path(meta["target_directory"]) / "release"
-    args.out.mkdir(parents=True, exist_ok=True)
-    sums = []
-    for name, binaries in PACKAGES.items():
-        exes = [release / f"{binary}.exe" for binary in binaries]
-        for exe in exes:
-            if not exe.is_file():
-                sys.exit(f"{exe} is missing; build the release binaries first")
-        linked = {}
-        for binary in binaries:
-            for package in linked_packages(meta, binary):
-                linked[package["id"]] = package
-        packages = sorted(linked.values(), key=lambda p: (p["name"], p["version"]))
-        licenses = licenses_text(binaries, packages)
-        archive = args.out / f"{name}-{version}-windows-x64.zip"
-        with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as z:
-            for exe in exes:
-                z.write(exe, exe.name)
-            z.writestr("THIRD-PARTY-LICENSES.txt", licenses)
-        sums.append(f"{sha256(archive)}  {archive.name}")
-        sizes = ", ".join(f"{exe.name} {exe.stat().st_size} bytes" for exe in exes)
-        print(f"{archive.name}: {sizes}, {len(packages)} crates")
-        if name in SINGLE:
-            # The same bytes as in the zip.
-            single = [args.out / exe.name for exe in exes] + [args.out / SINGLE[name]]
-            for exe, copy in zip(exes, single):
-                shutil.copyfile(exe, copy)
-            single[-1].write_bytes(licenses.encode("utf-8"))
-            for path in single:
-                sums.append(f"{sha256(path)}  {path.name}")
-                print(f"{path.name}: {path.stat().st_size} bytes")
-    # Unix line endings, so `sha256sum -c` reads it on any system.
-    (args.out / "SHA256SUMS.txt").write_bytes(("\n".join(sums) + "\n").encode("utf-8"))
+    if args.command == "version":
+        print(workspace_version(metadata()))
+    elif args.command == "stage":
+        stage(args.out, args.tag)
+    else:
+        collect(args.out, args.version)
 
 
 if __name__ == "__main__":

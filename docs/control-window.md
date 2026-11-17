@@ -1,12 +1,17 @@
 # The Pitot window
 
-The Pitot window manages the overlay: it turns the whole overlay and each widget on and off. It is part of
+The Pitot window manages the overlay: it turns the whole overlay and each widget on and off, and updates an
+installed Pitot. It is part of
 `pitot.exe`, the one executable a release ships, but runs as a process of its own: started with `--window`,
 `pitot.exe` runs the window; without arguments it runs the overlay. The overlay opens the window by starting its
 own executable again with `--window`.
 
 ## What it shows
 
+- **Header**: *Pitot* and its version, small and dimmed beside it (the installed version when Pitot is installed,
+  else the version it was built as), whether the overlay runs, and *Quit Pitot* on the right. While a downloaded
+  update waits, an *Update to vX.Y.Z* button sits below it ([Updates](#updates)). Both stay in place; the
+  sections below them scroll when they do not fit.
 - **Overlay**: whether the overlay runs, with *Show widgets* (off is the tray menu's *Hide widgets*) and *Move
   widgets* (the tray menu's *Move widgets*, which places and resizes widgets with the mouse). A change on either
   side shows on the other at once. When no overlay runs, a *Start the overlay* row starts the overlay
@@ -35,12 +40,47 @@ own executable again with `--window`.
   [Moving and resizing widgets](configuration.md#moving-and-resizing-widgets) for the same rules). The overlay
   reloads the file as it does after any edit. Edits made elsewhere show when the window is activated again, or
   when the overlay reloads the file.
-- **Quit Pitot**: quits the overlay and closes the window.
+- **Updates**: a *Check for updates* switch for `[general] check_updates`, saved in place, which always says
+  under its label what a check does ("Checks GitHub for new Pitot versions when this window opens. No personal
+  data is sent."; [what the update check sends](releases.md#what-the-update-check-sends)), and one quiet line
+  below it about the updates ([Updates](#updates)).
+- **Quit Pitot** (in the header): quits the overlay and closes the window.
 
-A problem, such as a configuration file that does not parse, shows in red above *Quit Pitot*.
+A problem, such as a configuration file that does not parse, shows in red below the header.
 
 The look is plain for now. Colors and sizes are in `crates/control/src/style.rs`, and the layout is in
 `crates/control/src/panel.rs`, so a redesign changes those two files.
+
+## Updates
+
+Only a Pitot installed with its installer has updates ([installing and updating](releases.md#installing-updating-and-uninstalling)).
+Each time the window opens with *Check for updates* on, it looks for a newer release on a thread of its own and
+downloads it, then shows the button; the window stays usable meanwhile, and nothing restarts until the button is
+pressed. The line below the switch says where it is:
+
+| Line | When |
+|---|---|
+| *Checking for updates…* | The releases are being read |
+| *Downloading v0.1.5… 40%* | A newer version is downloading |
+| (the *Update to v0.1.5* button at the top) | It is downloaded and verified |
+| *Up to date* | No release is newer than the installed version |
+| *No updates found* | The releases list no installable version |
+| *Couldn't check for updates* | The releases could not be read: offline, GitHub's limit of 60 requests an hour without an account, an error |
+| *Couldn't download the update* | A download failed or did not match the size and SHA-256 its release lists |
+| *Not checking for updates* | *Check for updates* is off: nothing is sent over the network |
+| *Updates need the installed Pitot* | This `pitot.exe` does not run from an installation (a build, or a copied file) |
+| *Closing the overlay…*, then *Installing v0.1.5…* | The button was pressed |
+| *Couldn't install the update* | The installer could not be started; the overlay is started again |
+
+A problem never opens a dialog, and the next opening of the window tries again. Turning the switch on checks at
+once; turning it off hides a waiting update (its download stays and is used when the switch is on again).
+
+The button quits the overlay as *Quit Pitot* does, so it logs its counters, and waits for its process to end (at
+most 15 s). Then it starts the installer's updater, which waits for the window to close, installs the new version
+without a dialog, and starts Pitot again: the overlay, which opens the window again, also with
+`start_in_tray = true`. Until the window closes, it cannot be closed by hand, and the overlay's quit does not close
+it. See [how updates work](releases.md#how-updates-work) for the requests, the checks of a download, and the test
+option `PITOT_UPDATE_SOURCE`.
 
 ## Opening and closing
 
@@ -53,7 +93,7 @@ The look is plain for now. Colors and sizes are in `crates/control/src/style.rs`
 | Starting `pitot.exe --window` while the window is open | Brings the open window to the front; the second one exits at once |
 | The window's close button (X) or Alt+F4 | Closes the window; the overlay keeps running in the tray |
 | `WM_CLOSE` to the window, for example from another program | Closes the window |
-| The overlay quits (*Quit Pitot*, the tray's Quit, or `WM_CLOSE` to its windows) | The window closes too |
+| The overlay quits (*Quit Pitot*, the tray's Quit, or `WM_CLOSE` to its windows) | The window closes too, except while it installs an update |
 
 Closing the window ends its process, so nothing of it runs while it is closed. The window opens where it was
 last closed (kept in `%APPDATA%\Pitot\window.toml`), or centered on the primary display when that place is no
@@ -123,6 +163,19 @@ it. Compared with the overlay's own executable in 0.1.3, measured on the lab PC:
 
 GPUI's Windows manifest is in the executable: per-monitor DPI awareness (v2), which the overlay also sets at start,
 and version 6 of the common controls, which the overlay does not use.
+
+The window's updates (`velopack` with its HTTP client `ureq`, `rustls` with `ring`, and Mozilla's roots) added
+about 2.1 MiB to the executable (6.06 to 8.29 MB). For the overlay's process, compared with 0.1.4 on the lab PC
+(three alternating 60 s runs of the four reference widgets in a replay of the AI race, `start_in_tray`):
+
+- DLLs: `ws2_32.dll` (sockets) and `bcrypt.dll` (`BCryptGenRandom`) are delay-loaded like GPUI's, so they load in
+  the window's process only. One module more loads at start, `cryptbase.dll`: the TLS library's random numbers
+  import `SystemFunction036` from `advapi32.dll`, which the overlay imports itself, and Windows forwards that
+  function to `cryptbase.dll` when it loads the executable (48 to 49 modules).
+- The installer's start-up hook runs first in every process: outside an installation it checks two paths for
+  `Update.exe` and returns. The first log line comes 18 to 23 ms after the process starts, as before.
+- CPU 26.60 ms/s before and 26.72 ms/s after (pair differences -0.09 to +0.33 ms/s), private bytes at most 21.0,
+  18.6, 18.0 MB before and 20.3, 17.6, 18.0 MB after: the same within noise. The same 6 to 7 threads.
 
 The window's process, measured on the lab PC when it was still `pitot-control.exe` (i7-9700, Parsec virtual
 display, release build, `pitot-bench collect`, 60 s while open and idle, the overlay running a replay): 7.0 ms/s

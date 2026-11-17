@@ -1,7 +1,8 @@
 name: Release
 
 # A version tag on main publishes a release. Pull requests that touch the packaging build and package without
-# publishing, so a broken release shows up before the next tag.
+# publishing, so a broken release shows up before the next tag. Started by hand, it does the same for any branch,
+# optionally as another package version, for testing an update from one build to another without publishing.
 on:
   push:
     tags: ["v*"]
@@ -12,6 +13,11 @@ on:
       - Cargo.lock
       - README.md
   workflow_dispatch:
+    inputs:
+      pack_version:
+        description: "Package version of a dry run, such as 0.1.5-test.1 (empty: the workspace version)"
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -19,6 +25,8 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
+  # The installer's packaging tool, which must be the same version as the `velopack` crate in Cargo.lock.
+  VPK_VERSION: "1.2.161"
 
 jobs:
   build:
@@ -51,20 +59,84 @@ jobs:
       - name: Build
         run: cargo build --release --locked -p pitot -p pitot-bench
 
-      - name: Package
+      - name: Stage
         shell: bash
         run: |
           set -euo pipefail
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-            python .github/scripts/package.py dist --tag "$GITHUB_REF_NAME"
+            python .github/scripts/package.py stage dist --tag "$GITHUB_REF_NAME"
           else
-            python .github/scripts/package.py dist
+            python .github/scripts/package.py stage dist
           fi
+
+      - name: Package version
+        id: version
+        shell: bash
+        env:
+          REQUESTED: ${{ github.event.inputs.pack_version }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            version="${GITHUB_REF_NAME#v}"
+          elif [[ -n "${REQUESTED:-}" ]]; then
+            version="$REQUESTED"
+          else
+            version="$(python .github/scripts/package.py version)"
+          fi
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+            echo "::error::$version is not a version such as 1.2.3 or 1.2.3-test.1"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "package version $version"
+
+      - name: Install the packaging tool
+        shell: bash
+        run: |
+          set -euo pipefail
+          locked="$(cargo metadata --format-version 1 --locked \
+            | python -c 'import json, sys; print(*{p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "velopack"})')"
+          if [[ "$locked" != "$VPK_VERSION" ]]; then
+            echo "::error::vpk $VPK_VERSION does not match the velopack crate $locked"
+            exit 1
+          fi
+          dotnet tool install --global vpk --version "$VPK_VERSION"
+          dotnet tool list --global
+
+      # A delta package from the latest published release, when it has installer packages. Only for tags: a dry
+      # run's version may not be newer than the published one.
+      - name: Download the previous release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          vpk download github --repoUrl "https://github.com/${{ github.repository }}" --pre --token "$GH_TOKEN" \
+            --outputDir dist/velopack \
+            || echo "no earlier release with installer packages; only the full package is made"
+
+      - name: Pack the installer
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          # The product name, version, and authors of the installer, its updater, and the package; the x64 runtime,
+          # so the installer refuses a 32-bit Windows that could not run pitot.exe.
+          vpk pack --packId Pitot --packVersion "$VERSION" --packTitle Pitot --packAuthors "Woojin Kim" \
+            --mainExe pitot.exe --runtime win-x64 --packDir dist/pack --outputDir dist/velopack --noPortable
+          ls -l dist/velopack
+
+      - name: Collect
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: python .github/scripts/package.py collect dist --version "$VERSION"
 
       - uses: actions/upload-artifact@v7
         with:
           name: release
-          path: dist/
+          path: dist/release/
           retention-days: 7
 
   publish:
@@ -93,13 +165,14 @@ jobs:
             flags+=(--prerelease)
           fi
           cat > notes.md <<'EOF'
-          Windows 10/11 x64. Download `pitot.exe` and run it, or unzip the `pitot` zip; nothing is installed.
-          `pitot.exe` is the overlay and the Pitot window in one file. The binaries are not signed yet, so Windows
-          SmartScreen may warn on the first start ("More info", then "Run anyway"). They need the Microsoft Visual
-          C++ Redistributable (x64), which the sim installs. `THIRD-PARTY-LICENSES.txt` in each zip, and
-          `pitot-THIRD-PARTY-LICENSES.txt` for `pitot.exe` on its own, list the code compiled in, and
-          `SHA256SUMS.txt` has the checksums of the other files.
+          Windows 10/11 x64. Download `Pitot-win-Setup.exe` and run it: Pitot installs for your Windows user
+          (no administrator rights needed) and starts. After that, the Pitot window finds newer versions when it
+          opens and installs one when you press its Update button. The installer is not signed yet, so Windows
+          SmartScreen may warn ("More info", then "Run anyway"). Pitot needs the Microsoft Visual C++
+          Redistributable (x64), which the sim installs. The `.nupkg` files and `releases.win.json` are the
+          update packages and their list, for installed copies. `pitot-THIRD-PARTY-LICENSES.txt`, also installed
+          next to `pitot.exe`, lists the code compiled in; `pitot-bench` has its own in its zip. `SHA256SUMS.txt`
+          has the checksums of the other files.
           EOF
-          gh release create "$GITHUB_REF_NAME" dist/*.zip dist/pitot.exe dist/pitot-THIRD-PARTY-LICENSES.txt \
-            dist/SHA256SUMS.txt \
+          gh release create "$GITHUB_REF_NAME" dist/* \
             --verify-tag --title "Pitot $version" --notes-file notes.md --generate-notes "${flags[@]}"

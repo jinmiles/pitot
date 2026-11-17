@@ -127,6 +127,100 @@ impl Overlay {
     }
 }
 
+/// Pitot's version as the window shows it: the installed version when Pitot is installed, else the version it was
+/// built as.
+pub fn version_text(installed: Option<&str>) -> String {
+    format!("v{}", installed.unwrap_or(env!("CARGO_PKG_VERSION")))
+}
+
+/// Shown next to the *Check for updates* switch at all times: what a check asks for, from where, and when (the
+/// whole statement is in `docs/releases.md`, "What the update check sends").
+pub const UPDATE_DISCLOSURE: &str =
+    "Checks GitHub for new Pitot versions when this window opens. No personal data is sent.";
+
+/// Updates as the window knows them, from its start to the installer taking over.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Update {
+    /// Run from a copy that is not installed (a build, a copied executable): there is nothing to update.
+    NotInstalled,
+    /// `[general] check_updates = false`: nothing is asked.
+    Off,
+    Checking,
+    /// A newer release, being downloaded: `percent` from 0 to 100.
+    Downloading {
+        version: String,
+        percent: u8,
+    },
+    /// A newer release, downloaded and verified: the button installs it.
+    Ready {
+        version: String,
+    },
+    UpToDate,
+    /// The releases list no installable version.
+    NoneFound,
+    CheckFailed,
+    DownloadFailed,
+    /// The button was pressed: the overlay is quitting.
+    Closing {
+        version: String,
+    },
+    /// The installer takes over once this window closes.
+    Installing {
+        version: String,
+    },
+    InstallFailed,
+}
+
+impl Update {
+    /// One quiet line below the switch about where updates are; `None` while the button says it all.
+    pub fn line(&self) -> Option<String> {
+        let line = match self {
+            Self::NotInstalled => "Updates need the installed Pitot".to_owned(),
+            Self::Off => "Not checking for updates".to_owned(),
+            Self::Checking => "Checking for updates\u{2026}".to_owned(),
+            Self::Downloading { version, percent } => {
+                format!("Downloading v{version}\u{2026} {percent}%")
+            }
+            Self::Ready { .. } => return None,
+            Self::UpToDate => "Up to date".to_owned(),
+            Self::NoneFound => "No updates found".to_owned(),
+            Self::CheckFailed => "Couldn't check for updates".to_owned(),
+            Self::DownloadFailed => "Couldn't download the update".to_owned(),
+            Self::Closing { .. } => "Closing the overlay\u{2026}".to_owned(),
+            Self::Installing { version } => format!("Installing v{version}\u{2026}"),
+            Self::InstallFailed => "Couldn't install the update".to_owned(),
+        };
+        Some(line)
+    }
+
+    /// The install button's label, while there is something to install.
+    pub fn button(&self) -> Option<String> {
+        match self {
+            Self::Ready { version } => Some(format!("Update to v{version}")),
+            _ => None,
+        }
+    }
+
+    /// While the update is being installed: the overlay's quit must not close the window, and nothing else may
+    /// start.
+    pub fn installing(&self) -> bool {
+        matches!(self, Self::Closing { .. } | Self::Installing { .. })
+    }
+
+    /// Whether a check may start now: not while one runs, nor once a release waits or installs.
+    pub fn may_check(&self) -> bool {
+        matches!(
+            self,
+            Self::Off
+                | Self::UpToDate
+                | Self::NoneFound
+                | Self::CheckFailed
+                | Self::DownloadFailed
+                | Self::InstallFailed
+        )
+    }
+}
+
 /// Where the window opens: its top-left corner in screen coordinates, in the UI framework's pixels.
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -261,6 +355,86 @@ mod tests {
         assert_eq!(step(103, "pagedown", false), Some(95));
         assert_eq!(step(100, "x", false), None);
         assert_eq!(step(200, "left", false), Some(145), "clamped first");
+    }
+
+    #[test]
+    fn the_version_is_the_installed_one_when_there_is_one() {
+        assert_eq!(version_text(Some("0.1.5-test.2")), "v0.1.5-test.2");
+        assert_eq!(
+            version_text(None),
+            format!("v{}", env!("CARGO_PKG_VERSION")),
+            "a copy that is not installed shows its build"
+        );
+    }
+
+    #[test]
+    fn each_update_state_says_one_quiet_thing() {
+        let v = || "0.1.5".to_owned();
+        assert_eq!(
+            Update::NotInstalled.line().as_deref(),
+            Some("Updates need the installed Pitot")
+        );
+        assert_eq!(Update::NotInstalled.button(), None);
+        assert_eq!(
+            Update::Downloading {
+                version: v(),
+                percent: 40
+            }
+            .line()
+            .as_deref(),
+            Some("Downloading v0.1.5\u{2026} 40%")
+        );
+        let ready = Update::Ready { version: v() };
+        assert_eq!(ready.line(), None, "the button says it");
+        assert_eq!(ready.button().as_deref(), Some("Update to v0.1.5"));
+        assert_eq!(
+            Update::CheckFailed.line().as_deref(),
+            Some("Couldn't check for updates")
+        );
+        assert_eq!(
+            Update::Installing { version: v() }.line().as_deref(),
+            Some("Installing v0.1.5\u{2026}")
+        );
+        for state in [
+            Update::Checking,
+            Update::UpToDate,
+            Update::Closing { version: v() },
+            Update::InstallFailed,
+        ] {
+            assert!(state.line().is_some(), "{state:?}");
+            assert_eq!(state.button(), None, "{state:?}");
+        }
+    }
+
+    #[test]
+    fn checks_and_installs_do_not_overlap() {
+        let v = || "0.1.5".to_owned();
+        assert!(Update::Closing { version: v() }.installing());
+        assert!(Update::Installing { version: v() }.installing());
+        assert!(!Update::Ready { version: v() }.installing());
+        for idle in [
+            Update::Off,
+            Update::UpToDate,
+            Update::NoneFound,
+            Update::CheckFailed,
+            Update::DownloadFailed,
+            Update::InstallFailed,
+        ] {
+            assert!(idle.may_check(), "{idle:?}");
+        }
+        for busy in [
+            Update::NotInstalled,
+            Update::Checking,
+            Update::Downloading {
+                version: v(),
+                percent: 0,
+            },
+            Update::Ready { version: v() },
+            Update::Closing { version: v() },
+            Update::Installing { version: v() },
+        ] {
+            assert!(!busy.may_check(), "{busy:?}");
+        }
     }
 
     #[test]

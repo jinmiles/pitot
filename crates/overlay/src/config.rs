@@ -90,11 +90,14 @@ pub const DEFAULT_TOML: &str = r#"# Pitot overlay configuration. Changes apply w
 # graphs stay as they are. At 82 each widget uses its own opacity below. The Pitot window's slider saves it here.
 # text_size sets the widgets' text in percent, from 70 to 150, with the rows, columns, and spacing around it; the
 # widgets keep their width and height, so larger text fits fewer rows. The Pitot window's slider saves it here.
+# check_updates lets the Pitot window of an installed Pitot look for a newer release on GitHub when it opens and
+# download it; it installs only when you press its Update button. With false, nothing is sent over the network.
 [general]
 font = "Segoe UI"
 start_in_tray = false
 background_opacity = 82
 text_size = 100
+check_updates = true
 
 # Records each session while you drive into %APPDATA%\Pitot\captures, so a replay of it (in the session or
 # from a saved .rpy file) can show the widgets. The oldest recordings are deleted once the folder holds more
@@ -223,6 +226,9 @@ pub struct General {
     pub background_opacity: u8,
     /// The widgets' text size in percent, from [`MIN_TEXT_SIZE`] to [`MAX_TEXT_SIZE`]: see [`text_scale`].
     pub text_size: u8,
+    /// Whether the Pitot window of an installed Pitot looks for a newer release when it opens. The overlay itself
+    /// never reads it.
+    pub check_updates: bool,
 }
 
 impl Default for General {
@@ -232,6 +238,7 @@ impl Default for General {
             start_in_tray: false,
             background_opacity: DEFAULT_BACKGROUND_OPACITY,
             text_size: DEFAULT_TEXT_SIZE,
+            check_updates: true,
         }
     }
 }
@@ -801,6 +808,16 @@ pub fn with_text_size(text: &str, percent: u8) -> Result<String, ConfigError> {
     })
 }
 
+/// Returns `text` with `[general] check_updates` set to `on`. Only that value changes; a missing key goes on the
+/// line after the `[general]` header, and a missing table is added at the end. See [`with_fields`] for what cannot
+/// be edited.
+pub fn with_check_updates(text: &str, on: bool) -> Result<String, ConfigError> {
+    let fields = [("check_updates", on.to_string())];
+    with_fields(text, &["general"], &fields, |config| {
+        config.general.check_updates = on;
+    })
+}
+
 /// Returns `text` with the keys in `fields` of the table at `path` (`["widgets", name]`, `["general"]`) set to
 /// their TOML values. Only those values change, so comments and layout stay as they are. A missing key goes on the
 /// line after the table's header (`[widgets.<name>]`), and a missing table is added at the end. `expect` makes the
@@ -912,6 +929,11 @@ pub fn save_background_opacity(path: &Path, percent: u8) -> Result<(), ConfigErr
 /// Saves `[general] text_size` in the file at `path` (see [`with_text_size`]).
 pub fn save_text_size(path: &Path, percent: u8) -> Result<(), ConfigError> {
     save_edit(path, |text| with_text_size(text, percent))
+}
+
+/// Saves `[general] check_updates` in the file at `path` (see [`with_check_updates`]).
+pub fn save_check_updates(path: &Path, on: bool) -> Result<(), ConfigError> {
+    save_edit(path, |text| with_check_updates(text, on))
 }
 
 /// Rewrites the file at `path` with `edit`. Writes a temporary file next to it first and moves it over the old
@@ -1108,6 +1130,7 @@ mod tests {
                 "default backgrounds"
             );
             assert_eq!(general.text_size, DEFAULT_TEXT_SIZE, "default text");
+            assert!(!general.check_updates, "no network during a measurement");
         }
     }
 
@@ -1673,6 +1696,72 @@ mod tests {
             Some(460),
             "the widgets' boxes stay"
         );
+        assert!(!path.with_extension("toml.tmp").exists());
+        fs::remove_dir_all(&dir).expect("cleans up");
+    }
+
+    #[test]
+    fn update_checks_are_on_by_default_and_read() {
+        assert!(Config::default().general.check_updates);
+        assert!(Config::parse("").expect("parses").general.check_updates);
+        assert!(
+            Config::parse("[general]\nfont = \"Arial\"\n")
+                .expect("a file from before the setting")
+                .general
+                .check_updates
+        );
+        let off = Config::parse("[general]\ncheck_updates = false\n").expect("parses");
+        assert!(!off.general.check_updates);
+        assert!(matches!(
+            Config::parse("[general]\ncheck_updates = \"no\"\n"),
+            Err(ConfigError::Parse(_))
+        ));
+    }
+
+    #[test]
+    fn saving_update_checks_changes_only_their_value() {
+        let off = with_check_updates(DEFAULT_TOML, false).expect("edited");
+        assert!(!Config::parse(&off).expect("parses").general.check_updates);
+        let changed: Vec<(&str, &str)> = DEFAULT_TOML
+            .lines()
+            .zip(off.lines())
+            .filter(|(a, b)| a != b)
+            .collect();
+        assert_eq!(changed, [("check_updates = true", "check_updates = false")]);
+        assert_eq!(DEFAULT_TOML.lines().count(), off.lines().count());
+        assert_eq!(
+            with_check_updates(&off, true).expect("edited"),
+            DEFAULT_TOML,
+            "back on gives the same file"
+        );
+        // A file from before the setting: the key goes under the header, or the table at the end.
+        assert_eq!(
+            with_check_updates("# mine\n[general]\ntext_size = 120 # big\n", false)
+                .expect("edited"),
+            "# mine\n[general]\ncheck_updates = false\ntext_size = 120 # big\n"
+        );
+        assert_eq!(
+            with_check_updates("[widgets.fuel]\nx = 1\n", false).expect("edited"),
+            "[widgets.fuel]\nx = 1\n\n[general]\ncheck_updates = false\n"
+        );
+        assert!(matches!(
+            with_check_updates("general = { font = \"Arial\" }\n", false),
+            Err(ConfigError::Unplaceable)
+        ));
+    }
+
+    #[test]
+    fn saved_update_checks_replace_the_file() {
+        let dir = std::env::temp_dir().join(format!("pitot-check-updates-{}", std::process::id()));
+        fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("config.toml");
+        fs::write(&path, DEFAULT_TOML).expect("write");
+        save_check_updates(&path, false).expect("saved");
+        let config = load_or_create(&path).expect("loads");
+        assert!(!config.general.check_updates);
+        let mut expected = Config::default();
+        expected.general.check_updates = false;
+        assert_eq!(config, expected, "nothing else changed");
         assert!(!path.with_extension("toml.tmp").exists());
         fs::remove_dir_all(&dir).expect("cleans up");
     }

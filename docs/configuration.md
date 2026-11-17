@@ -26,6 +26,20 @@ start_in_tray = false
 Its widget switches write the widget's `enabled` into this file, changing only that value, by the same rules as
 moving widgets below.
 
+## Updates
+
+```toml
+[general]
+check_updates = true
+```
+
+- `check_updates`: with `true` (the default), the Pitot window of an installed Pitot looks for a newer release on
+  GitHub each time it opens and downloads it; it installs only when you press its *Update* button
+  ([Updates](control-window.md#updates), [how updates work](releases.md#how-updates-work)). With `false`, the
+  window sends nothing over the network. The overlay itself never reads this setting and never uses the
+  network; a change of only this value reloads without drawing anything again. The window's *Check for updates*
+  switch saves it here in place. The benchmark configurations set it to `false`.
+
 ## Background opacity
 
 How opaque the widgets' backgrounds are, for every widget at once. The Pitot window's *Background opacity* slider
@@ -245,6 +259,7 @@ font = "Segoe UI"
 start_in_tray = false  # true: do not open the Pitot window at start
 background_opacity = 82  # every widget's background, 0 (none) to 100 (opaque); 82 is each widget's opacity
 text_size = 100  # every widget's text and the rows and columns around it, 70 to 150 percent
+check_updates = true  # false: the Pitot window does not look for updates
 
 [widgets.inputs]
 enabled = true
