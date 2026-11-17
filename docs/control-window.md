@@ -9,8 +9,9 @@ own executable again with `--window`.
 ## What it shows
 
 - **Header**: *Pitot* and its version, small and dimmed beside it (the installed version when Pitot is installed,
-  else the version it was built as), and whether the overlay runs. While a downloaded update waits, an
-  *Update to vX.Y.Z* button sits below it ([Updates](#updates)).
+  else the version it was built as), whether the overlay runs, and *Quit Pitot* on the right. While a downloaded
+  update waits, an *Update to vX.Y.Z* button sits below it ([Updates](#updates)). Both stay in place; the
+  sections below them scroll when they do not fit.
 - **Overlay**: whether the overlay runs, with *Show widgets* (off is the tray menu's *Hide widgets*) and *Move
   widgets* (the tray menu's *Move widgets*, which places and resizes widgets with the mouse). A change on either
   side shows on the other at once. When no overlay runs, a *Start the overlay* row starts the overlay
@@ -43,9 +44,9 @@ own executable again with `--window`.
   under its label what a check does ("Checks GitHub for new Pitot versions when this window opens. No personal
   data is sent."; [what the update check sends](releases.md#what-the-update-check-sends)), and one quiet line
   below it about the updates ([Updates](#updates)).
-- **Quit Pitot**: quits the overlay and closes the window.
+- **Quit Pitot** (in the header): quits the overlay and closes the window.
 
-A problem, such as a configuration file that does not parse, shows in red above *Quit Pitot*.
+A problem, such as a configuration file that does not parse, shows in red below the header.
 
 The look is plain for now. Colors and sizes are in `crates/control/src/style.rs`, and the layout is in
 `crates/control/src/panel.rs`, so a redesign changes those two files.

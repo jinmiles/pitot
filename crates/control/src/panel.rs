@@ -441,19 +441,18 @@ impl Panel {
         cx.notify();
     }
 
-    fn header(&self) -> Div {
+    /// The title, the version, and the overlay's state, with *Quit Pitot* on the right. It stays in view while the
+    /// sections below it scroll.
+    fn header(&self, quit: Stateful<Div>) -> Div {
         let dot = if self.overlay.is_running() {
             style::running()
         } else {
             style::stopped()
         };
-        div()
+        let title = div()
             .flex()
             .flex_col()
             .gap_1()
-            .px(style::gutter())
-            .pt(style::gutter())
-            .pb(px(8.0))
             .child(
                 div()
                     .flex()
@@ -481,7 +480,16 @@ impl Panel {
                     .text_color(style::text_dim())
                     .child(div().size(px(8.0)).rounded_full().bg(dot))
                     .child(self.overlay.status()),
-            )
+            );
+        div()
+            .flex()
+            .items_start()
+            .justify_between()
+            .px(style::gutter())
+            .pt(style::gutter())
+            .pb(px(8.0))
+            .child(title)
+            .child(quit)
     }
 
     fn overlay_rows(&self, cx: &mut Context<Self>) -> Vec<Stateful<Div>> {
@@ -695,18 +703,14 @@ impl Render for Panel {
                 platform::send_to_overlay(OverlayCommand::Quit);
                 cx.quit();
             }));
-        div()
+        // The sections scroll when they do not fit; the header, the update button, and a problem stay above them.
+        let sections = div()
             .id("panel")
-            .size_full()
+            .flex_1()
+            .min_h(px(0.0))
             .flex()
             .flex_col()
             .overflow_y_scroll()
-            .bg(style::background())
-            .text_color(style::text())
-            .font_family(style::FONT)
-            .text_size(style::text_size())
-            .child(self.header())
-            .children(update_banner)
             .child(section("Overlay"))
             .children(overlay_rows)
             .child(section("Appearance"))
@@ -716,24 +720,35 @@ impl Render for Panel {
             .child(section("Updates"))
             .child(update_row)
             .children(update_status)
-            .when_some(self.note.clone(), |panel, note| {
-                panel.child(
+            .child(div().h(style::gutter()));
+        let top = div()
+            .flex()
+            .flex_col()
+            .pb(px(4.0))
+            .border_b_1()
+            .border_color(style::border())
+            .child(self.header(quit))
+            .children(update_banner)
+            .when_some(self.note.clone(), |top, note| {
+                top.child(
                     div()
                         .px(style::gutter())
-                        .pt(px(8.0))
+                        .pb(px(4.0))
                         .text_size(style::small_size())
                         .text_color(style::stopped())
                         .child(note),
                 )
-            })
-            .child(
-                div()
-                    .flex()
-                    .justify_end()
-                    .px(style::gutter())
-                    .py(style::gutter())
-                    .child(quit),
-            )
+            });
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .bg(style::background())
+            .text_color(style::text())
+            .font_family(style::FONT)
+            .text_size(style::text_size())
+            .child(top)
+            .child(sections)
     }
 }
 
@@ -792,6 +807,8 @@ fn switch_row(
             div()
                 .flex()
                 .flex_col()
+                .flex_1()
+                .min_w(px(0.0))
                 .child(label)
                 .when_some(detail, |text, detail| {
                     text.child(
