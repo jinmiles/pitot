@@ -133,6 +133,11 @@ pub fn version_text(installed: Option<&str>) -> String {
     format!("v{}", installed.unwrap_or(env!("CARGO_PKG_VERSION")))
 }
 
+/// Shown next to the *Check for updates* switch at all times: what a check asks for, from where, and when (the
+/// whole statement is in `docs/releases.md`, "What the update check sends").
+pub const UPDATE_DISCLOSURE: &str =
+    "Checks GitHub for new Pitot versions when this window opens. No personal data is sent.";
+
 /// Updates as the window knows them, from its start to the installer taking over.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Update {
@@ -167,7 +172,7 @@ pub enum Update {
 }
 
 impl Update {
-    /// One quiet line under the switch; `None` while the button says it all.
+    /// One quiet line below the switch about where updates are; `None` while the button says it all.
     pub fn line(&self) -> Option<String> {
         let line = match self {
             Self::NotInstalled => "Updates need the installed Pitot".to_owned(),

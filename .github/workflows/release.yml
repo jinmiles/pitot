@@ -121,8 +121,9 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
-          vpk pack --packId Pitot --packVersion "$VERSION" --packTitle Pitot \
-            --packAuthors Pitot --mainExe pitot.exe --packDir dist/pack --outputDir dist/velopack --noPortable
+          # The product name, version, and authors of the installer, its updater, and the package.
+          vpk pack --packId Pitot --packVersion "$VERSION" --packTitle Pitot --packAuthors "Woojin Kim" \
+            --mainExe pitot.exe --packDir dist/pack --outputDir dist/velopack --noPortable
           ls -l dist/velopack
 
       - name: Collect

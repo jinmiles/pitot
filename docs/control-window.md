@@ -1,12 +1,16 @@
 # The Pitot window
 
-The Pitot window manages the overlay: it turns the whole overlay and each widget on and off. It is part of
+The Pitot window manages the overlay: it turns the whole overlay and each widget on and off, and updates an
+installed Pitot. It is part of
 `pitot.exe`, the one executable a release ships, but runs as a process of its own: started with `--window`,
 `pitot.exe` runs the window; without arguments it runs the overlay. The overlay opens the window by starting its
 own executable again with `--window`.
 
 ## What it shows
 
+- **Header**: *Pitot* and its version, small and dimmed beside it (the installed version when Pitot is installed,
+  else the version it was built as), and whether the overlay runs. While a downloaded update waits, an
+  *Update to vX.Y.Z* button sits below it ([Updates](#updates)).
 - **Overlay**: whether the overlay runs, with *Show widgets* (off is the tray menu's *Hide widgets*) and *Move
   widgets* (the tray menu's *Move widgets*, which places and resizes widgets with the mouse). A change on either
   side shows on the other at once. When no overlay runs, a *Start the overlay* row starts the overlay
@@ -35,12 +39,47 @@ own executable again with `--window`.
   [Moving and resizing widgets](configuration.md#moving-and-resizing-widgets) for the same rules). The overlay
   reloads the file as it does after any edit. Edits made elsewhere show when the window is activated again, or
   when the overlay reloads the file.
+- **Updates**: a *Check for updates* switch for `[general] check_updates`, saved in place, which always says
+  under its label what a check does ("Checks GitHub for new Pitot versions when this window opens. No personal
+  data is sent."; [what the update check sends](releases.md#what-the-update-check-sends)), and one quiet line
+  below it about the updates ([Updates](#updates)).
 - **Quit Pitot**: quits the overlay and closes the window.
 
 A problem, such as a configuration file that does not parse, shows in red above *Quit Pitot*.
 
 The look is plain for now. Colors and sizes are in `crates/control/src/style.rs`, and the layout is in
 `crates/control/src/panel.rs`, so a redesign changes those two files.
+
+## Updates
+
+Only a Pitot installed with its installer has updates ([installing and updating](releases.md#installing-updating-and-uninstalling)).
+Each time the window opens with *Check for updates* on, it looks for a newer release on a thread of its own and
+downloads it, then shows the button; the window stays usable meanwhile, and nothing restarts until the button is
+pressed. The line below the switch says where it is:
+
+| Line | When |
+|---|---|
+| *Checking for updates…* | The releases are being read |
+| *Downloading v0.1.5… 40%* | A newer version is downloading |
+| (the *Update to v0.1.5* button at the top) | It is downloaded and verified |
+| *Up to date* | No release is newer than the installed version |
+| *No updates found* | The releases list no installable version |
+| *Couldn't check for updates* | The releases could not be read: offline, GitHub's limit of 60 requests an hour without an account, an error |
+| *Couldn't download the update* | A download failed or did not match the size and SHA-256 its release lists |
+| *Not checking for updates* | *Check for updates* is off: nothing is sent over the network |
+| *Updates need the installed Pitot* | This `pitot.exe` does not run from an installation (a build, or a copied file) |
+| *Closing the overlay…*, then *Installing v0.1.5…* | The button was pressed |
+| *Couldn't install the update* | The installer could not be started; the overlay is started again |
+
+A problem never opens a dialog, and the next opening of the window tries again. Turning the switch on checks at
+once; turning it off hides a waiting update (its download stays and is used when the switch is on again).
+
+The button quits the overlay as *Quit Pitot* does, so it logs its counters, and waits for its process to end (at
+most 15 s). Then it starts the installer's updater, which waits for the window to close, installs the new version
+without a dialog, and starts Pitot again: the overlay, which opens the window again, also with
+`start_in_tray = true`. Until the window closes, it cannot be closed by hand, and the overlay's quit does not close
+it. See [how updates work](releases.md#how-updates-work) for the requests, the checks of a download, and the test
+option `PITOT_UPDATE_SOURCE`.
 
 ## Opening and closing
 
@@ -53,7 +92,7 @@ The look is plain for now. Colors and sizes are in `crates/control/src/style.rs`
 | Starting `pitot.exe --window` while the window is open | Brings the open window to the front; the second one exits at once |
 | The window's close button (X) or Alt+F4 | Closes the window; the overlay keeps running in the tray |
 | `WM_CLOSE` to the window, for example from another program | Closes the window |
-| The overlay quits (*Quit Pitot*, the tray's Quit, or `WM_CLOSE` to its windows) | The window closes too |
+| The overlay quits (*Quit Pitot*, the tray's Quit, or `WM_CLOSE` to its windows) | The window closes too, except while it installs an update |
 
 Closing the window ends its process, so nothing of it runs while it is closed. The window opens where it was
 last closed (kept in `%APPDATA%\Pitot\window.toml`), or centered on the primary display when that place is no

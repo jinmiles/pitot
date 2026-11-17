@@ -10,7 +10,8 @@ cargo run -p pitot --release
 The overlay waits for the sim's shared memory and connects when the replay starts. It opens the
 [Pitot window](control-window.md) by starting its own executable again with `--window`
 (`cargo run -p pitot --release -- --window` opens the window alone). Quit from the window or the tray icon's
-menu.
+menu. A build run this way is not installed, so it has no updates ([releases](releases.md)); the start-up hook of
+the installer finds no installation and returns at once.
 
 ## Windows
 

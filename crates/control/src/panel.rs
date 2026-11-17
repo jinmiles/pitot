@@ -623,16 +623,29 @@ impl Panel {
         ))
     }
 
-    /// The update checks' switch, with what the last check found below its label.
+    /// The update checks' switch, which always says what a check sends and where.
     fn update_row(&self, cx: &mut Context<Self>) -> Stateful<Div> {
         let on = self.check_updates;
         switch_row(
             "check-updates",
             "Check for updates",
-            self.update.line().map(Into::into),
+            Some(model::UPDATE_DISCLOSURE.into()),
             on,
             !self.installing(),
             cx.listener(move |panel, _: &ClickEvent, _, cx| panel.set_check_updates(!on, cx)),
+        )
+    }
+
+    /// What the last check found, below the switch.
+    fn update_status(&self) -> Option<Div> {
+        let line = self.update.line()?;
+        Some(
+            div()
+                .mx(px(8.0))
+                .px(style::row_padding())
+                .text_size(style::small_size())
+                .text_color(style::text_dim())
+                .child(line),
         )
     }
 
@@ -665,6 +678,7 @@ impl Render for Panel {
         let widget_rows = self.widget_rows(cx);
         let update_banner = self.update_banner(cx);
         let update_row = self.update_row(cx);
+        let update_status = self.update_status();
         let quit = div()
             .id("quit")
             .px(px(14.0))
@@ -701,6 +715,7 @@ impl Render for Panel {
             .children(widget_rows)
             .child(section("Updates"))
             .child(update_row)
+            .children(update_status)
             .when_some(self.note.clone(), |panel, note| {
                 panel.child(
                     div()

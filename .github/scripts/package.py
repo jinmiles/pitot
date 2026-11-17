@@ -8,8 +8,8 @@ Usage:
 `version` prints the workspace version. `stage` runs after `cargo build --release --locked -p pitot -p pitot-bench`;
 with `--tag`, the tag must match the workspace version. It writes:
 
-- `<out>/pack/`: `pitot.exe` and its `THIRD-PARTY-LICENSES.txt`, the folder the installer is packed from
-  (`vpk pack --packDir`), so both are installed side by side;
+- `<out>/pack/`: `pitot.exe`, its `THIRD-PARTY-LICENSES.txt`, and Pitot's own `LICENSE` from the repository root,
+  the folder the installer is packed from (`vpk pack --packDir`), so all three are installed side by side;
 - `<out>/release/`: `pitot-THIRD-PARTY-LICENSES.txt` (the same text) and the `pitot-bench` zip.
 
 `collect` runs after `vpk pack --outputDir <out>/velopack`. It copies what a release publishes from the installer's
@@ -34,6 +34,8 @@ PACK_ID = "Pitot"
 INSTALLED = "pitot"
 ZIPPED = ["pitot-bench"]
 INSTALLED_LICENSES = "THIRD-PARTY-LICENSES.txt"
+# Pitot's own license, installed next to the executable.
+PROJECT_LICENSE = ROOT / "LICENSE"
 RELEASE_LICENSES = "pitot-THIRD-PARTY-LICENSES.txt"
 # Files of the installer's output that a release publishes, by name for the package version `{v}`. The installer,
 # the update packages (the delta only when there was an earlier release to make it from), and the release feeds
@@ -194,8 +196,11 @@ def stage(out, tag):
     exe = built / f"{INSTALLED}.exe"
     if not exe.is_file():
         sys.exit(f"{exe} is missing; build the release binaries first")
+    if not PROJECT_LICENSE.is_file():
+        sys.exit(f"{PROJECT_LICENSE} is missing; the installer installs Pitot's license next to {exe.name}")
     licenses, count = binary_licenses(meta, [INSTALLED])
     shutil.copyfile(exe, pack / exe.name)
+    shutil.copyfile(PROJECT_LICENSE, pack / PROJECT_LICENSE.name)
     (pack / INSTALLED_LICENSES).write_bytes(licenses.encode("utf-8"))
     # The same text, published on its own.
     (release / RELEASE_LICENSES).write_bytes(licenses.encode("utf-8"))
