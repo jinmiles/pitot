@@ -121,9 +121,10 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
-          # The product name, version, and authors of the installer, its updater, and the package.
+          # The product name, version, and authors of the installer, its updater, and the package; the x64 runtime,
+          # so the installer refuses a 32-bit Windows that could not run pitot.exe.
           vpk pack --packId Pitot --packVersion "$VERSION" --packTitle Pitot --packAuthors "Woojin Kim" \
-            --mainExe pitot.exe --packDir dist/pack --outputDir dist/velopack --noPortable
+            --mainExe pitot.exe --runtime win-x64 --packDir dist/pack --outputDir dist/velopack --noPortable
           ls -l dist/velopack
 
       - name: Collect

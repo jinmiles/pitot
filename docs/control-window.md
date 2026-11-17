@@ -164,6 +164,19 @@ it. Compared with the overlay's own executable in 0.1.3, measured on the lab PC:
 GPUI's Windows manifest is in the executable: per-monitor DPI awareness (v2), which the overlay also sets at start,
 and version 6 of the common controls, which the overlay does not use.
 
+The window's updates (`velopack` with its HTTP client `ureq`, `rustls` with `ring`, and Mozilla's roots) added
+about 2.1 MiB to the executable (6.06 to 8.29 MB). For the overlay's process, compared with 0.1.4 on the lab PC
+(three alternating 60 s runs of the four reference widgets in a replay of the AI race, `start_in_tray`):
+
+- DLLs: `ws2_32.dll` (sockets) and `bcrypt.dll` (`BCryptGenRandom`) are delay-loaded like GPUI's, so they load in
+  the window's process only. One module more loads at start, `cryptbase.dll`: the TLS library's random numbers
+  import `SystemFunction036` from `advapi32.dll`, which the overlay imports itself, and Windows forwards that
+  function to `cryptbase.dll` when it loads the executable (48 to 49 modules).
+- The installer's start-up hook runs first in every process: outside an installation it checks two paths for
+  `Update.exe` and returns. The first log line comes 18 to 23 ms after the process starts, as before.
+- CPU 26.60 ms/s before and 26.72 ms/s after (pair differences -0.09 to +0.33 ms/s), private bytes at most 21.0,
+  18.6, 18.0 MB before and 20.3, 17.6, 18.0 MB after: the same within noise. The same 6 to 7 threads.
+
 The window's process, measured on the lab PC when it was still `pitot-control.exe` (i7-9700, Parsec virtual
 display, release build, `pitot-bench collect`, 60 s while open and idle, the overlay running a replay): 7.0 ms/s
 CPU (0.087% of all cores), 22.4 MB private bytes. The window shows about 0.3 s after the process starts (0.4 s

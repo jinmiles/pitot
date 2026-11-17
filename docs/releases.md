@@ -60,7 +60,8 @@ The workflow then:
 - downloads the latest published release's package (`vpk download github --pre`), so `vpk pack` can make a delta
   package from it; the first release with an installer has none, and only the full package is made,
 - packs the installer and the update packages: `vpk pack` with package id `Pitot`, the tag's version, title
-  (product name) `Pitot`, authors `Woojin Kim`, main executable `pitot.exe`, and the staged folder, without a
+  (product name) `Pitot`, authors `Woojin Kim`, main executable `pitot.exe`, runtime `win-x64` (the installer
+  refuses 32-bit Windows), and the staged folder, without a
   portable zip,
 - collects the published files and writes `SHA256SUMS.txt` (`package.py collect`), and publishes a GitHub release
   named `Pitot X.Y.Z` with them, short notes on installing, and the pull requests merged since the previous
