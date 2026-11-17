@@ -18,7 +18,8 @@ is pushed. Nothing is built on a developer machine. Pitot ships as an installer 
   its own, so an update never interrupts a session. `check_updates = false` in `[general]`
   ([configuration](configuration.md#updates)) stops the checks.
 - **Uninstall**: *Settings > Apps > Installed apps > Pitot > Uninstall*. This stops Pitot and removes
-  `%LocalAppData%\Pitot`, the shortcuts, and the entry in Settings.
+  `%LocalAppData%\Pitot`, the shortcuts, and the entry in Settings. The installer's own logs in
+  `%LocalAppData%\velopack` stay.
 
 The settings and everything Pitot writes for you stay in `%APPDATA%\Pitot`, outside the installation:
 `config.toml`, `window.toml` (where the Pitot window opens), the logs, `captures`, `tracks`, and `pit.toml`.
@@ -27,11 +28,14 @@ not installed copies of Pitot share it.
 
 | Path | What it holds |
 |---|---|
-| `%LocalAppData%\Pitot\current\pitot.exe` | The overlay and, with `--window`, the Pitot window |
+| `%LocalAppData%\Pitot\current\pitot.exe` | The overlay and, with `--window`, the Pitot window; the shortcuts start it |
+| `%LocalAppData%\Pitot\Pitot.exe` | A small launcher the installer adds, which starts `current\pitot.exe` |
 | `%LocalAppData%\Pitot\current\LICENSE` | Pitot's license (MIT) |
 | `%LocalAppData%\Pitot\current\THIRD-PARTY-LICENSES.txt` | The licenses of the code compiled into `pitot.exe` |
 | `%LocalAppData%\Pitot\Update.exe` | The installer's updater and uninstaller |
-| `%LocalAppData%\Pitot\packages` | The installed version's package and a downloaded update until it is installed |
+| `%LocalAppData%\Pitot\packages` | The newest package: the installed version's, or a downloaded update until it is installed |
+| `%LocalAppData%\velopack` | Logs of the installer, the updater, and the uninstaller (`velopack.log`, `velopack_Pitot.log`) |
+| `HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\Pitot` | The entry in Settings > Apps |
 | `%APPDATA%\Pitot` | Settings, logs, recordings: untouched by installs, updates, and uninstalls |
 
 A `pitot.exe` that does not run from an installation, such as `target\release\pitot.exe` from a build, runs as
@@ -60,9 +64,9 @@ The workflow then:
 - downloads the latest published release's package (`vpk download github --pre`), so `vpk pack` can make a delta
   package from it; the first release with an installer has none, and only the full package is made,
 - packs the installer and the update packages: `vpk pack` with package id `Pitot`, the tag's version, title
-  (product name) `Pitot`, authors `Woojin Kim`, main executable `pitot.exe`, runtime `win-x64` (the installer
-  refuses 32-bit Windows), and the staged folder, without a
-  portable zip,
+  (product name) `Pitot`, authors `Woojin Kim`, main executable `pitot.exe`, runtime `win-x64` (so the installer
+  refuses 32-bit Windows), and the staged folder, without a portable zip. The installer and its updater carry
+  that product name, version, and company name in their file properties,
 - collects the published files and writes `SHA256SUMS.txt` (`package.py collect`), and publishes a GitHub release
   named `Pitot X.Y.Z` with them, short notes on installing, and the pull requests merged since the previous
   release. Versions before 1.0 are marked as pre-releases.
@@ -156,7 +160,8 @@ covers what GitHub does with them. The Pitot project runs no server and receives
 
 On the PC, the downloaded packages are kept in `%LocalAppData%\Pitot\packages`, where the installer's library
 also writes a random id in `.betaId`, for staged roll-outs on other kinds of release servers; GitHub releases do
-not use it, and it is never sent. Uninstalling removes the folder.
+not use it, and it is never sent. Uninstalling removes the folder. The updater writes what it does, with the
+paths of the files it changes, to `%LocalAppData%\velopack\velopack_Pitot.log`, which stays on the PC.
 
 To turn the check off, switch *Check for updates* off in the Pitot window, or set `check_updates = false` in
 `%APPDATA%\Pitot\config.toml`. The window then sends nothing at all. A `pitot.exe` that is not installed never
