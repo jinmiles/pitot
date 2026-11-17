@@ -1,5 +1,5 @@
-//! What the window shows and what clicks do: the overlay's switches, the background opacity and text size
-//! sliders, one switch per widget, updates, and Quit.
+//! What the window shows and what clicks do: the overlay's switches, the display the widgets show on, the
+//! background opacity and text size sliders, one switch per widget, updates, and Quit.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -120,6 +120,13 @@ pub struct Panel {
     overlay: Overlay,
     /// Per widget of [`model::widgets`], whether it is enabled in `config.toml`.
     enabled: Vec<bool>,
+    /// The connected displays in Pitot's order, as of the last look: when the window opened or was activated, or
+    /// the file changed.
+    displays: Vec<model::Display>,
+    /// `[general] monitor`.
+    monitor: Option<usize>,
+    /// How many widgets have a `monitor` of their own.
+    own_displays: usize,
     /// The sliders of [`Setting::ALL`], in its order.
     sliders: [Slider; 2],
     /// `[general] check_updates`.
@@ -173,6 +180,9 @@ impl Panel {
         let mut panel = Self {
             overlay,
             enabled: model::enabled(&defaults),
+            displays: Vec::new(),
+            monitor: defaults.general.monitor,
+            own_displays: 0,
             sliders,
             check_updates: defaults.general.check_updates,
             update: if updates.updater.is_some() {
@@ -197,7 +207,17 @@ impl Panel {
         self.update.installing()
     }
 
+    /// Reads `config.toml`, and lists the displays again, which may have changed too.
     fn load_config(&mut self) {
+        self.displays = platform::displays()
+            .into_iter()
+            .map(|monitor| model::Display {
+                name: monitor.name,
+                width: monitor.rect.width,
+                height: monitor.rect.height,
+                primary: monitor.primary,
+            })
+            .collect();
         let Some(path) = config::config_file() else {
             self.note = Some("No APPDATA folder: the configuration cannot be found.".into());
             return;
@@ -205,6 +225,8 @@ impl Panel {
         match config::load_or_create(&path) {
             Ok(config) => {
                 self.enabled = model::enabled(&config);
+                self.monitor = config.general.monitor;
+                self.own_displays = model::own_displays(&config);
                 self.check_updates = config.general.check_updates;
                 // A moving slider keeps its own value until it is saved.
                 for setting in Setting::ALL {
@@ -359,6 +381,50 @@ impl Panel {
             Err(e) => self.note = Some(e.into()),
         }
         cx.notify();
+    }
+
+    /// Puts every widget on display `choice` (`None`: the primary display): writes `[general] monitor` and removes
+    /// the widgets' own in place. The overlay sees the file change, reloads it, and moves the widgets.
+    fn set_display(&mut self, choice: Option<usize>, cx: &mut Context<Self>) {
+        if !model::display_changes(choice, self.monitor, self.own_displays) {
+            return;
+        }
+        let saved = config::config_file()
+            .ok_or_else(|| "No APPDATA folder: the configuration cannot be found.".to_owned())
+            .and_then(|path| config::save_display(&path, choice).map_err(|e| e.to_string()));
+        match saved {
+            Ok(()) => self.load_config(),
+            Err(e) => self.note = Some(e.into()),
+        }
+        cx.notify();
+    }
+
+    /// The Display section: a note while widgets have a display of their own, then a row per choice.
+    fn display_rows(&self, cx: &mut Context<Self>) -> (Option<Div>, Vec<Stateful<Div>>) {
+        let note = model::own_displays_note(self.own_displays).map(|note| {
+            div()
+                .mx(px(8.0))
+                .px(style::row_padding())
+                .pb(px(4.0))
+                .text_size(style::small_size())
+                .text_color(style::text_dim())
+                .child(note)
+        });
+        let rows = model::display_rows(&self.displays, self.monitor)
+            .into_iter()
+            .enumerate()
+            .map(|(index, row)| {
+                let choice = row.choice;
+                choice_row(
+                    ("display", index),
+                    row,
+                    cx.listener(move |panel, _: &ClickEvent, _, cx| {
+                        panel.set_display(choice, cx);
+                    }),
+                )
+            })
+            .collect();
+        (note, rows)
     }
 
     fn slider(&self, setting: Setting) -> &Slider {
@@ -682,6 +748,7 @@ impl Panel {
 impl Render for Panel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let overlay_rows = self.overlay_rows(cx);
+        let (display_note, display_rows) = self.display_rows(cx);
         let slider_rows = Setting::ALL.map(|setting| self.slider_row(setting, window, cx));
         let widget_rows = self.widget_rows(cx);
         let update_banner = self.update_banner(cx);
@@ -713,6 +780,9 @@ impl Render for Panel {
             .overflow_y_scroll()
             .child(section("Overlay"))
             .children(overlay_rows)
+            .child(section("Display"))
+            .children(display_note)
+            .children(display_rows)
             .child(section("Appearance"))
             .children(slider_rows)
             .child(section("Widgets"))
@@ -820,6 +890,51 @@ fn switch_row(
                 }),
         )
         .child(switch(on, usable))
+}
+
+/// One of a set of choices: a label, a line of detail, and a round mark on the right, filled for the chosen one,
+/// whose row is tinted too. A row that is not `usable` is dimmed and does nothing.
+fn choice_row(
+    id: impl Into<ElementId>,
+    choice: model::DisplayRow,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> Stateful<Div> {
+    let chosen = choice.chosen;
+    let mark = div()
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .size(style::slider_knob())
+        .rounded_full()
+        .border_2()
+        .border_color(if chosen {
+            style::accent()
+        } else {
+            style::switch_off()
+        })
+        .when(chosen, |mark| {
+            mark.child(div().size(px(8.0)).rounded_full().bg(style::accent()))
+        });
+    row(id, choice.usable, on_click)
+        .when(chosen, |row| row.bg(style::row_chosen()))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_w(px(0.0))
+                .child(choice.label)
+                .when(!choice.detail.is_empty(), |text| {
+                    text.child(
+                        div()
+                            .text_size(style::small_size())
+                            .text_color(style::text_dim())
+                            .child(choice.detail),
+                    )
+                }),
+        )
+        .child(mark)
 }
 
 /// A clickable row with a label in the accent color and an optional line of detail.

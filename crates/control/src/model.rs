@@ -17,6 +17,106 @@ pub fn enabled(config: &Config) -> Vec<bool> {
         .collect()
 }
 
+/// A connected display as the window lists it, in Pitot's order (`pitot_overlay::platform::monitors`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Display {
+    /// The monitor's own name, where Windows provides one.
+    pub name: Option<String>,
+    /// Physical pixels.
+    pub width: i32,
+    pub height: i32,
+    pub primary: bool,
+}
+
+/// A row of the Display section.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DisplayRow {
+    pub label: String,
+    pub detail: String,
+    /// What a click saves as `[general] monitor`: `None` for the primary display.
+    pub choice: Option<usize>,
+    /// The file's choice, highlighted.
+    pub chosen: bool,
+    /// Whether a click does anything: not for a saved display that is not connected.
+    pub usable: bool,
+}
+
+/// How the window numbers the display at `index` of Pitot's order: from 1, as Windows numbers its displays, where
+/// `config.toml` counts from 0.
+pub fn display_number(index: usize) -> usize {
+    index + 1
+}
+
+/// The Display section's rows: the primary display, which follows Windows' choice, then every connected display in
+/// Pitot's order, then the saved display when it is not connected. The row of `saved` (`[general] monitor`) is
+/// chosen.
+pub fn display_rows(displays: &[Display], saved: Option<usize>) -> Vec<DisplayRow> {
+    let primary = displays.iter().position(|d| d.primary);
+    let mut rows = Vec::with_capacity(displays.len() + 2);
+    rows.push(DisplayRow {
+        label: "Primary display (follow Windows)".to_owned(),
+        detail: primary.map_or_else(String::new, |index| {
+            let mut now = format!("Now Display {}", display_number(index));
+            if let Some(name) = &displays[index].name {
+                now.push_str(&format!(" \u{b7} {name}"));
+            }
+            now
+        }),
+        choice: None,
+        chosen: saved.is_none(),
+        usable: true,
+    });
+    for (index, display) in displays.iter().enumerate() {
+        let mut detail: Vec<String> = Vec::with_capacity(3);
+        detail.extend(display.name.clone());
+        detail.push(format!("{} \u{d7} {}", display.width, display.height));
+        if display.primary {
+            detail.push("Primary".to_owned());
+        }
+        rows.push(DisplayRow {
+            label: format!("Display {}", display_number(index)),
+            detail: detail.join(" \u{b7} "),
+            choice: Some(index),
+            chosen: saved == Some(index),
+            usable: true,
+        });
+    }
+    if let Some(index) = saved.filter(|&i| i >= displays.len()) {
+        rows.push(DisplayRow {
+            label: format!("Display {} (not connected)", display_number(index)),
+            detail: "Using the primary display".to_owned(),
+            choice: Some(index),
+            chosen: true,
+            usable: false,
+        });
+    }
+    rows
+}
+
+/// How many widgets have a `monitor` of their own in `config`, enabled or not: choosing a display removes them.
+pub fn own_displays(config: &Config) -> usize {
+    config
+        .widgets()
+        .filter(|(_, widget)| widget.monitor.is_some())
+        .count()
+}
+
+/// The note above the displays while `own` widgets have a display of their own.
+pub fn own_displays_note(own: usize) -> Option<String> {
+    match own {
+        0 => None,
+        1 => Some("1 widget has its own display. Choosing a display moves it too.".to_owned()),
+        n => Some(format!(
+            "{n} widgets have their own display. Choosing a display moves them too."
+        )),
+    }
+}
+
+/// Whether choosing `choice` changes the file, which holds `saved` and `own` widgets' own displays.
+pub fn display_changes(choice: Option<usize>, saved: Option<usize>, own: usize) -> bool {
+    choice != saved || own > 0
+}
+
 /// What a percent slider covers and how it moves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Range {
@@ -435,6 +535,113 @@ mod tests {
         ] {
             assert!(!busy.may_check(), "{busy:?}");
         }
+    }
+
+    /// The lab PC's displays: three monitors and a virtual one, the primary leftmost.
+    fn lab_displays() -> Vec<Display> {
+        let display = |name: Option<&str>, width, height, primary| Display {
+            name: name.map(str::to_owned),
+            width,
+            height,
+            primary,
+        };
+        vec![
+            display(Some("DELL P2419H"), 1920, 1080, true),
+            display(Some("DELL P2419H"), 1920, 1080, false),
+            display(None, 1080, 1920, false),
+            display(Some("Parsec Virtual Display"), 1920, 1080, false),
+        ]
+    }
+
+    #[test]
+    fn the_display_section_lists_every_display_and_the_choice() {
+        let displays = lab_displays();
+        let rows = display_rows(&displays, None);
+        let labels: Vec<&str> = rows.iter().map(|r| r.label.as_str()).collect();
+        assert_eq!(
+            labels,
+            [
+                "Primary display (follow Windows)",
+                "Display 1",
+                "Display 2",
+                "Display 3",
+                "Display 4"
+            ]
+        );
+        assert_eq!(rows[0].detail, "Now Display 1 \u{b7} DELL P2419H");
+        assert_eq!(
+            rows[1].detail,
+            "DELL P2419H \u{b7} 1920 \u{d7} 1080 \u{b7} Primary"
+        );
+        assert_eq!(rows[3].detail, "1080 \u{d7} 1920", "no name");
+        assert_eq!(
+            rows[4].detail,
+            "Parsec Virtual Display \u{b7} 1920 \u{d7} 1080"
+        );
+        let choices: Vec<Option<usize>> = rows.iter().map(|r| r.choice).collect();
+        assert_eq!(choices, [None, Some(0), Some(1), Some(2), Some(3)]);
+        assert!(rows.iter().all(|r| r.usable));
+        let chosen = |rows: &[DisplayRow]| -> Vec<bool> { rows.iter().map(|r| r.chosen).collect() };
+        assert_eq!(chosen(&rows), [true, false, false, false, false], "primary");
+        // `monitor = 3` is the fourth display.
+        let virtual_display = display_rows(&displays, Some(3));
+        assert_eq!(chosen(&virtual_display), [false, false, false, false, true]);
+        assert_eq!(virtual_display.len(), 5, "no extra row");
+    }
+
+    #[test]
+    fn a_saved_display_that_is_not_connected_says_so() {
+        let displays = lab_displays();
+        let rows = display_rows(&displays, Some(5));
+        assert_eq!(rows.len(), 6);
+        let missing = rows.last().expect("a row");
+        assert_eq!(missing.label, "Display 6 (not connected)");
+        assert_eq!(missing.detail, "Using the primary display");
+        assert!(missing.chosen && !missing.usable);
+        assert_eq!(missing.choice, Some(5));
+        assert!(
+            rows[..5].iter().all(|r| !r.chosen && r.usable),
+            "the others are choices"
+        );
+        // No displays known (not yet listed): only the primary and the saved one.
+        let none = display_rows(&[], Some(0));
+        assert_eq!(none.len(), 2);
+        assert_eq!(none[0].detail, "");
+        assert_eq!(none[1].label, "Display 1 (not connected)");
+        // A primary without a name says only its number.
+        let unnamed = vec![Display {
+            name: None,
+            width: 2560,
+            height: 1440,
+            primary: true,
+        }];
+        assert_eq!(display_rows(&unnamed, None)[0].detail, "Now Display 1");
+    }
+
+    #[test]
+    fn widgets_with_their_own_display_are_counted_and_moved() {
+        assert_eq!(own_displays(&Config::default()), 0);
+        let config = Config::parse(
+            "[general]\nmonitor = 3\n[widgets.relative]\nmonitor = 3\n[widgets.wind]\nenabled = false\nmonitor = 1\n",
+        )
+        .expect("parses");
+        assert_eq!(own_displays(&config), 2, "also a widget that is off");
+        assert_eq!(own_displays_note(0), None);
+        assert_eq!(
+            own_displays_note(1).as_deref(),
+            Some("1 widget has its own display. Choosing a display moves it too.")
+        );
+        assert_eq!(
+            own_displays_note(2).as_deref(),
+            Some("2 widgets have their own display. Choosing a display moves them too.")
+        );
+        // The same choice writes only while widgets have their own.
+        assert!(!display_changes(Some(3), Some(3), 0));
+        assert!(display_changes(Some(3), Some(3), 2));
+        assert!(!display_changes(None, None, 0));
+        assert!(display_changes(None, Some(3), 0));
+        assert!(display_changes(Some(0), None, 0));
+        assert_eq!(display_number(0), 1);
     }
 
     #[test]

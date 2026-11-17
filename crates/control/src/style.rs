@@ -28,6 +28,11 @@ pub fn row_pressed() -> Rgba {
     rgb(0x002A_313A)
 }
 
+/// The chosen row of a set of choices, a dark shade of the accent.
+pub fn row_chosen() -> Rgba {
+    rgb(0x0019_2A40)
+}
+
 /// The same blue as the overlay's move handles.
 pub fn accent() -> Rgba {
     rgb(0x003B_82F6)

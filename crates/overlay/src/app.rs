@@ -153,9 +153,12 @@ struct Slot {
     window: usize,
     /// Screen position of the window's (the monitor's) top-left corner.
     origin: (i32, i32),
-    /// Position in the window, as configured.
+    /// Position in the window: as configured, kept inside the monitor ([`config::clamp_position`]), then as moved.
     x: i32,
     y: i32,
+    /// Where the widget was laid out or last saved, so a click in *Move widgets* that moves nothing saves nothing,
+    /// also for a widget the layout moved inside its monitor.
+    placed: (i32, i32),
     interval: Duration,
     next_due: Instant,
     /// The widget must be fully redrawn, after creation, a rebuild, or a reset.
@@ -170,6 +173,8 @@ struct Slot {
 struct Layout {
     windows: Vec<OverlayWindow>,
     slots: Vec<Slot>,
+    /// The monitors the configuration names that are not connected, in order: their widgets went elsewhere.
+    missing: Vec<usize>,
     /// The trackers the widgets share, such as the clock that times gaps for the standings and the relative.
     shared: Shared,
     /// The text scale the widgets are laid out at ([`config::text_scale`]).
@@ -235,16 +240,20 @@ impl Slot {
 
 impl Layout {
     /// Makes every enabled widget of the registry, with its variables resolved in `vars` (the pipeline's set), laid
-    /// out at text scale `scale`.
+    /// out at text scale `scale`, each on its monitor of `monitors` (in the order of [`platform::monitors`]) and
+    /// inside it.
     fn build(
         config: &Config,
         monitors: &[Monitor],
         vars: &VarSet,
         scale: f32,
     ) -> Result<Self, platform::PlatformError> {
-        let rects: Vec<(i32, i32)> = monitors.iter().map(|m| (m.rect.x, m.rect.y)).collect();
-        let order = config::monitor_order(&rects);
         let primary = monitors.iter().position(|m| m.primary).unwrap_or(0);
+        let general = config.general.monitor;
+        let mut missing: Vec<usize> = general
+            .filter(|&i| i >= monitors.len())
+            .into_iter()
+            .collect();
         let mut windows: Vec<OverlayWindow> = Vec::new();
         let mut window_monitors: Vec<usize> = Vec::new();
         let mut slots = Vec::new();
@@ -273,14 +282,22 @@ impl Layout {
                 if scaled { scale } else { 1.0 },
                 false,
             );
-            let monitor = widget_config
-                .monitor
-                .and_then(|i| order.get(i).copied())
-                .unwrap_or(primary);
+            if let Some(index) = widget_config.monitor
+                && index >= monitors.len()
+                && !missing.contains(&index)
+            {
+                missing.push(index);
+            }
+            let monitor =
+                config::resolve_monitor(widget_config.monitor, general, monitors.len(), primary);
+            // Only without any monitor.
+            let Some(rect) = monitors.get(monitor).map(|m| m.rect) else {
+                continue;
+            };
             let window = match window_monitors.iter().position(|&m| m == monitor) {
                 Some(index) => index,
                 None => {
-                    windows.push(OverlayWindow::create(monitors[monitor].rect)?);
+                    windows.push(OverlayWindow::create(rect)?);
                     window_monitors.push(monitor);
                     windows.len() - 1
                 }
@@ -288,6 +305,22 @@ impl Layout {
             let interval = widget_config
                 .rate_hz
                 .map_or(widget.interval(), |hz| Duration::from_secs_f32(1.0 / hz));
+            // Placed on a larger monitor, a widget would be cut off or out of sight; the file keeps its numbers.
+            let (x, y) = config::clamp_position(
+                widget_config.x,
+                widget_config.y,
+                size,
+                (rect.width, rect.height),
+            );
+            if (x, y) != (widget_config.x, widget_config.y) {
+                info!(
+                    widget = name,
+                    monitor,
+                    x,
+                    y,
+                    "widget shown inside its monitor, away from its configured place"
+                );
+            }
             slots.push(Slot {
                 name,
                 widget,
@@ -295,9 +328,10 @@ impl Layout {
                 scaled,
                 text_box,
                 window,
-                origin: (monitors[monitor].rect.x, monitors[monitor].rect.y),
-                x: widget_config.x,
-                y: widget_config.y,
+                origin: (rect.x, rect.y),
+                x,
+                y,
+                placed: (x, y),
                 interval,
                 next_due: now,
                 stale: true,
@@ -305,9 +339,11 @@ impl Layout {
                 resized: false,
             });
         }
+        missing.sort_unstable();
         Ok(Self {
             windows,
             slots,
+            missing,
             shared,
             scale,
         })
@@ -504,12 +540,15 @@ fn save_drag(config: &mut Config, slot: &mut Slot) -> bool {
     let Some(widget) = config.widget_mut(slot.name) else {
         return false;
     };
-    let position = ((slot.x, slot.y) != (widget.x, widget.y)).then_some((slot.x, slot.y));
+    let position = ((slot.x, slot.y) != slot.placed).then_some((slot.x, slot.y));
     let size = resized.then_some((width, height));
     if position.is_none() && size.is_none() {
         return false;
     }
-    (widget.x, widget.y) = (slot.x, slot.y);
+    if position.is_some() {
+        (widget.x, widget.y) = (slot.x, slot.y);
+        slot.placed = (slot.x, slot.y);
+    }
     if resized {
         (widget.width, widget.height) = (Some(width), Some(height));
     }
@@ -652,6 +691,7 @@ pub fn run(launch: Launch) -> Result<(), Box<dyn std::error::Error>> {
     view.set_telemetry_folders(config::telemetry_dirs(&config.telemetry, documents.clone()));
     let scale = config::text_scale(config.general.text_size);
     let mut layout = Layout::build(&config, &monitors, view.var_set(), scale)?;
+    log_missing(&[], &layout.missing, monitors.len());
     let tray = Tray::create()?;
     // A Pitot window open from before learns that the overlay runs now.
     platform::notify_control(ControlEvent::State {
@@ -791,6 +831,12 @@ pub fn run(launch: Launch) -> Result<(), Box<dyn std::error::Error>> {
                         platform::notify_control(ControlEvent::ConfigChanged);
                     }
                     Ok((fresh, Reload::Everything)) => {
+                        let monitors = platform::monitors();
+                        if monitors.is_empty() {
+                            // Windows can list none while displays change; the next change of the file applies.
+                            warn!("no monitors found: keeping the previous configuration");
+                            continue;
+                        }
                         if fresh.telemetry != config.telemetry {
                             view.set_telemetry_folders(config::telemetry_dirs(
                                 &fresh.telemetry,
@@ -801,8 +847,9 @@ pub fn run(launch: Launch) -> Result<(), Box<dyn std::error::Error>> {
                         scene = None;
                         let moving = handles.take().is_some();
                         let scale = config::text_scale(previews.text_size(&fresh));
-                        layout =
-                            Layout::build(&fresh, &platform::monitors(), view.var_set(), scale)?;
+                        let missing = std::mem::take(&mut layout.missing);
+                        layout = Layout::build(&fresh, &monitors, view.var_set(), scale)?;
+                        log_missing(&missing, &layout.missing, monitors.len());
                         config = fresh;
                         // New windows go above the old handles, so the handles are made again.
                         if moving {
@@ -953,6 +1000,18 @@ pub fn run(launch: Launch) -> Result<(), Box<dyn std::error::Error>> {
     platform::notify_control(ControlEvent::Close);
     drop(pipeline);
     Ok(())
+}
+
+/// Says once which monitors the configuration names that are not connected, when they differ from the previous
+/// layout's: the widgets meant for them show on the `[general] monitor`, or on the primary monitor.
+fn log_missing(before: &[usize], now: &[usize], connected: usize) {
+    if now != before && !now.is_empty() {
+        warn!(
+            missing = ?now,
+            connected,
+            "monitor not connected: its widgets show on the general monitor or the primary one"
+        );
+    }
 }
 
 /// Logs the data path's counters since start: ticks read, ticks missed before they could be read, torn reads,
