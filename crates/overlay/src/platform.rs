@@ -12,7 +12,7 @@ use std::time::Duration;
 
 pub use link::{
     ControlEvent, ControlLink, OverlayCommand, WINDOW_FLAG, activate_control, notify_control,
-    open_control, overlay_running, send_to_overlay, start_overlay,
+    open_control, overlay_running, quit_overlay_and_wait, send_to_overlay, start_overlay,
 };
 use link::{LINK_MESSAGE, TRAY_CLASS, register_class};
 

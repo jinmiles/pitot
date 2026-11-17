@@ -1,9 +1,10 @@
 //! What the window shows and what clicks do: the overlay's switches, the background opacity and text size
-//! sliders, one switch per widget, and Quit.
+//! sliders, one switch per widget, updates, and Quit.
 
 use std::cell::Cell;
 use std::rc::Rc;
 
+use futures::channel::mpsc::UnboundedSender;
 use gpui::{
     App, Bounds, ClickEvent, Context, DispatchPhase, Div, ElementId, Entity, FocusHandle,
     IntoElement, KeyDownEvent, KeyUpEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
@@ -12,9 +13,11 @@ use gpui::{
 };
 use pitot_overlay::config;
 use pitot_overlay::platform::{self, ControlEvent, ControlLink, OverlayCommand};
+use velopack::UpdateInfo;
 
-use crate::model::{self, Overlay};
+use crate::model::{self, Overlay, Update};
 use crate::style;
+use crate::updates::{self, Event, Updater};
 
 /// How a slider is being moved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,19 +110,33 @@ struct Slider {
     focus: FocusHandle,
 }
 
+/// The window's part in updates: the installation, if it runs from one, and where update threads send news.
+pub struct Updates {
+    pub updater: Option<Updater>,
+    pub events: UnboundedSender<Event>,
+}
+
 pub struct Panel {
     overlay: Overlay,
     /// Per widget of [`model::widgets`], whether it is enabled in `config.toml`.
     enabled: Vec<bool>,
     /// The sliders of [`Setting::ALL`], in its order.
     sliders: [Slider; 2],
+    /// `[general] check_updates`.
+    check_updates: bool,
+    update: Update,
+    /// What the update button installs, once downloaded.
+    pending: Option<Box<UpdateInfo>>,
+    updates: Updates,
+    /// The version shown in the header.
+    version: SharedString,
     /// The last problem, such as a configuration file that does not parse.
     note: Option<SharedString>,
     _activation: Subscription,
 }
 
 impl Panel {
-    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(window: &mut Window, cx: &mut Context<Self>, updates: Updates) -> Self {
         let activation = cx.observe_window_activation(window, |panel, window, cx| {
             let active = window.is_window_active();
             // The widgets are always on top; the window goes above them while it is used.
@@ -152,15 +169,32 @@ impl Panel {
             focus: cx.focus_handle(),
         };
         let sliders = Setting::ALL.map(|setting| slider(setting, cx));
+        let installed = updates.updater.as_ref().map(Updater::version);
         let mut panel = Self {
             overlay,
             enabled: model::enabled(&defaults),
             sliders,
+            check_updates: defaults.general.check_updates,
+            update: if updates.updater.is_some() {
+                Update::Off
+            } else {
+                Update::NotInstalled
+            },
+            pending: None,
+            updates,
+            version: model::version_text(installed.as_deref()).into(),
             note: None,
             _activation: activation,
         };
         panel.load_config();
+        // Once per opening of the window.
+        panel.follow_check_setting();
         panel
+    }
+
+    /// Whether an update is being installed: the window stays open until the installer takes over.
+    pub fn installing(&self) -> bool {
+        self.update.installing()
     }
 
     fn load_config(&mut self) {
@@ -171,6 +205,7 @@ impl Panel {
         match config::load_or_create(&path) {
             Ok(config) => {
                 self.enabled = model::enabled(&config);
+                self.check_updates = config.general.check_updates;
                 // A moving slider keeps its own value until it is saved.
                 for setting in Setting::ALL {
                     let slider = self.slider_mut(setting);
@@ -190,12 +225,94 @@ impl Panel {
             ControlEvent::State { hidden, moving } => {
                 self.overlay = Overlay::Running { hidden, moving };
             }
-            ControlEvent::ConfigChanged => self.load_config(),
+            ControlEvent::ConfigChanged => {
+                self.load_config();
+                self.follow_check_setting();
+            }
+            // The overlay quits for the update; the window closes once the installer waits for it.
+            ControlEvent::Close if self.installing() => self.overlay = Overlay::NotRunning,
             ControlEvent::Close => return true,
             ControlEvent::Activate => {}
         }
         cx.notify();
         false
+    }
+
+    /// Takes news from an update thread. Returns `true` when the window should close.
+    pub fn on_update(&mut self, event: Event, cx: &mut Context<Self>) -> bool {
+        match event {
+            Event::State(state) => {
+                // A check that went on after checks were turned off shows nothing; an install always shows.
+                let installs = state.installing() || state == Update::InstallFailed;
+                if !self.check_updates && !installs {
+                    return false;
+                }
+                self.update = state;
+            }
+            Event::Ready(update) => {
+                if !self.check_updates {
+                    return false;
+                }
+                self.update = Update::Ready {
+                    version: update.TargetFullRelease.Version.clone(),
+                };
+                self.pending = Some(update);
+            }
+            Event::Quit => return true,
+        }
+        cx.notify();
+        false
+    }
+
+    /// Starts a check when `[general] check_updates` is on and none runs, and shows that checks are off when it is
+    /// off. With checks off, nothing is sent over the network.
+    fn follow_check_setting(&mut self) {
+        let Some(updater) = self.updates.updater.clone() else {
+            return;
+        };
+        if !self.check_updates {
+            if !self.update.installing() {
+                self.update = Update::Off;
+                self.pending = None;
+            }
+            return;
+        }
+        if !self.update.may_check() {
+            return;
+        }
+        self.update = Update::Checking;
+        let events = self.updates.events.clone();
+        updates::check_and_download(updater, move |event| {
+            let _ = events.unbounded_send(event);
+        });
+    }
+
+    fn set_check_updates(&mut self, on: bool, cx: &mut Context<Self>) {
+        let saved = config::config_file()
+            .ok_or_else(|| "No APPDATA folder: the configuration cannot be found.".to_owned())
+            .and_then(|path| config::save_check_updates(&path, on).map_err(|e| e.to_string()));
+        match saved {
+            Ok(()) => self.load_config(),
+            Err(e) => self.note = Some(e.into()),
+        }
+        self.follow_check_setting();
+        cx.notify();
+    }
+
+    /// The update button: quits the overlay, installs the downloaded update, and starts Pitot again on it.
+    fn install_update(&mut self, cx: &mut Context<Self>) {
+        let (Some(updater), Some(update)) = (self.updates.updater.clone(), self.pending.take())
+        else {
+            return;
+        };
+        self.update = Update::Closing {
+            version: update.TargetFullRelease.Version.clone(),
+        };
+        let events = self.updates.events.clone();
+        updates::install(updater, update, move |event| {
+            let _ = events.unbounded_send(event);
+        });
+        cx.notify();
     }
 
     /// Sends `command`; an overlay that does not answer is not running any more.
@@ -339,9 +456,21 @@ impl Panel {
             .pb(px(8.0))
             .child(
                 div()
-                    .text_size(style::title_size())
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .child("Pitot"),
+                    .flex()
+                    .items_baseline()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_size(style::title_size())
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .child("Pitot"),
+                    )
+                    .child(
+                        div()
+                            .text_size(style::small_size())
+                            .text_color(style::text_dim())
+                            .child(self.version.clone()),
+                    ),
             )
             .child(
                 div()
@@ -361,7 +490,7 @@ impl Panel {
                 switch_row(
                     "show",
                     "Show widgets",
-                    Some("Off hides every widget until you turn it on again"),
+                    Some("Off hides every widget until you turn it on again".into()),
                     !hidden,
                     true,
                     // A click flips the switch: hidden widgets show.
@@ -370,7 +499,7 @@ impl Panel {
                 switch_row(
                     "move",
                     "Move widgets",
-                    Some("Drag widgets with the mouse; their places are saved"),
+                    Some("Drag widgets with the mouse; their places are saved".into()),
                     moving,
                     true,
                     cx.listener(move |panel, _: &ClickEvent, _, cx| panel.set_moving(!moving, cx)),
@@ -379,7 +508,8 @@ impl Panel {
             Overlay::NotRunning | Overlay::Starting => vec![button_row(
                 "start",
                 "Start the overlay",
-                self.overlay == Overlay::NotRunning,
+                None,
+                self.overlay == Overlay::NotRunning && !self.installing(),
                 cx.listener(|panel, _: &ClickEvent, _, cx| panel.start_overlay(cx)),
             )],
         }
@@ -481,6 +611,31 @@ impl Panel {
             .child(slider)
     }
 
+    /// The install button, while a downloaded update waits.
+    fn update_banner(&self, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
+        let label = self.update.button()?;
+        Some(button_row(
+            "update",
+            label,
+            Some("Restarts the overlay and this window".into()),
+            true,
+            cx.listener(|panel, _: &ClickEvent, _, cx| panel.install_update(cx)),
+        ))
+    }
+
+    /// The update checks' switch, with what the last check found below its label.
+    fn update_row(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+        let on = self.check_updates;
+        switch_row(
+            "check-updates",
+            "Check for updates",
+            self.update.line().map(Into::into),
+            on,
+            !self.installing(),
+            cx.listener(move |panel, _: &ClickEvent, _, cx| panel.set_check_updates(!on, cx)),
+        )
+    }
+
     fn widget_rows(&self, cx: &mut Context<Self>) -> Vec<Stateful<Div>> {
         model::widgets()
             .iter()
@@ -508,6 +663,8 @@ impl Render for Panel {
         let overlay_rows = self.overlay_rows(cx);
         let slider_rows = Setting::ALL.map(|setting| self.slider_row(setting, window, cx));
         let widget_rows = self.widget_rows(cx);
+        let update_banner = self.update_banner(cx);
+        let update_row = self.update_row(cx);
         let quit = div()
             .id("quit")
             .px(px(14.0))
@@ -535,12 +692,15 @@ impl Render for Panel {
             .font_family(style::FONT)
             .text_size(style::text_size())
             .child(self.header())
+            .children(update_banner)
             .child(section("Overlay"))
             .children(overlay_rows)
             .child(section("Appearance"))
             .children(slider_rows)
             .child(section("Widgets"))
             .children(widget_rows)
+            .child(section("Updates"))
+            .child(update_row)
             .when_some(self.note.clone(), |panel, note| {
                 panel.child(
                     div()
@@ -607,7 +767,7 @@ fn section(title: &'static str) -> Div {
 fn switch_row(
     id: impl Into<ElementId>,
     label: &'static str,
-    detail: Option<&'static str>,
+    detail: Option<SharedString>,
     on: bool,
     usable: bool,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
@@ -630,16 +790,28 @@ fn switch_row(
         .child(switch(on, usable))
 }
 
-/// A clickable row with a single label in the accent color.
+/// A clickable row with a label in the accent color and an optional line of detail.
 fn button_row(
     id: impl Into<ElementId>,
-    label: &'static str,
+    label: impl Into<SharedString>,
+    detail: Option<SharedString>,
     usable: bool,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> Stateful<Div> {
-    row(id, usable, on_click)
-        .text_color(style::accent())
-        .child(label)
+    row(id, usable, on_click).child(
+        div()
+            .flex()
+            .flex_col()
+            .child(div().text_color(style::accent()).child(label.into()))
+            .when_some(detail, |text, detail| {
+                text.child(
+                    div()
+                        .text_size(style::small_size())
+                        .text_color(style::text_dim())
+                        .child(detail),
+                )
+            }),
+    )
 }
 
 fn row(

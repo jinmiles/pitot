@@ -94,6 +94,9 @@ struct Rescaled {
 #[derive(Debug, PartialEq, Eq)]
 enum Reload {
     Nothing,
+    /// Only settings the overlay does not use while it runs, such as `[general] check_updates`: the configuration
+    /// is taken, and nothing is drawn again.
+    Unused,
     /// Only the look the Pitot window's sliders set, `[general] background_opacity` and `text_size`: the widgets
     /// are laid out at the text size and redraw; windows and layers stay.
     Appearance,
@@ -108,6 +111,10 @@ fn compare(current: &Config, fresh: &mut Config, previews: &mut Previews, now: I
         return Reload::Nothing;
     }
     let mut rest = fresh.clone();
+    rest.general.check_updates = current.general.check_updates;
+    if rest == *current {
+        return Reload::Unused;
+    }
     rest.general.background_opacity = current.general.background_opacity;
     rest.general.text_size = current.general.text_size;
     if rest == *current {
@@ -570,9 +577,17 @@ fn load_config() -> Config {
     })
 }
 
+/// How the overlay's process was started.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Launch {
+    /// Started again by the installer after the Pitot window installed an update: the window opens again, also
+    /// with `[general] start_in_tray`, since it was open when the update was chosen.
+    pub after_update: bool,
+}
+
 /// The overlay process, one per Windows session: logging, then [`run`]. A second start opens the Pitot window
 /// instead and exits at once.
-pub fn main() -> ExitCode {
+pub fn main(launch: Launch) -> ExitCode {
     // Checked before logging starts, so a second launch leaves the running overlay's log alone.
     let instance = platform::SingleInstance::acquire();
     if matches!(instance, Ok(None)) {
@@ -583,7 +598,10 @@ pub fn main() -> ExitCode {
     if let Err(e) = &instance {
         warn!("cannot check for a running overlay: {e}");
     }
-    let code = match run() {
+    if launch.after_update {
+        info!("started again after an update");
+    }
+    let code = match run(launch) {
         Ok(()) => {
             info!("exiting");
             ExitCode::SUCCESS
@@ -599,7 +617,7 @@ pub fn main() -> ExitCode {
 }
 
 /// Runs the overlay until Quit is chosen from the tray icon.
-pub fn run() -> Result<(), Box<dyn std::error::Error>> {
+pub fn run(launch: Launch) -> Result<(), Box<dyn std::error::Error>> {
     platform::enable_dpi_awareness();
     let mut config = load_config();
     let watch = config::config_dir().and_then(|dir| DirectoryWatch::new(&dir).ok());
@@ -640,7 +658,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         hidden: false,
         moving: false,
     });
-    if !config.general.start_in_tray
+    if (launch.after_update || !config.general.start_in_tray)
         && let Err(e) = platform::open_control()
     {
         warn!("cannot open the Pitot window: {e}");
@@ -761,6 +779,11 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 });
                 match reloaded {
                     Ok((_, Reload::Nothing)) => {}
+                    Ok((fresh, Reload::Unused)) => {
+                        config = fresh;
+                        info!("configuration reloaded: nothing the widgets use");
+                        platform::notify_control(ControlEvent::ConfigChanged);
+                    }
                     Ok((fresh, Reload::Appearance)) => {
                         // Applied below, before the frame: the background redraws, the text lays the widgets out.
                         config = fresh;
@@ -1115,6 +1138,33 @@ mod tests {
             Reload::Nothing
         );
         assert_eq!(previews.text_size(&with(120)), 120);
+    }
+
+    #[test]
+    fn turning_update_checks_off_draws_nothing_again() {
+        let now = Instant::now();
+        let current = Config::default();
+        let mut fresh = Config::default();
+        fresh.general.check_updates = false;
+        assert_eq!(
+            compare(&current, &mut fresh, &mut Previews::default(), now),
+            Reload::Unused
+        );
+        // With a change the widgets use, that change decides.
+        let mut fresh = Config::default();
+        fresh.general.check_updates = false;
+        fresh.general.background_opacity = 40;
+        assert_eq!(
+            compare(&current, &mut fresh, &mut Previews::default(), now),
+            Reload::Appearance
+        );
+        let mut fresh = Config::default();
+        fresh.general.check_updates = false;
+        fresh.widget_mut("fuel").expect("fuel").enabled = false;
+        assert_eq!(
+            compare(&current, &mut fresh, &mut Previews::default(), now),
+            Reload::Everything
+        );
     }
 
     /// A widget with a smallest size, for the box rules.

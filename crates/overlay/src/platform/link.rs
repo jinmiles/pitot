@@ -12,8 +12,10 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::{
-    ERROR_CLASS_ALREADY_EXISTS, GetLastError, HWND, LPARAM, LRESULT, WPARAM,
+    CloseHandle, ERROR_CLASS_ALREADY_EXISTS, GetLastError, HWND, LPARAM, LRESULT, WAIT_OBJECT_0,
+    WPARAM,
 };
+use windows::Win32::System::Threading::{OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject};
 use windows::Win32::UI::WindowsAndMessaging::{
     AllowSetForegroundWindow, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
     FindWindowExW, FindWindowW, GWL_EXSTYLE, GetForegroundWindow, GetMessageW, GetWindowLongPtrW,
@@ -173,6 +175,42 @@ pub fn overlay_running() -> bool {
 /// Sends `command` to the running overlay. Returns `false` when no overlay runs.
 pub fn send_to_overlay(command: OverlayCommand) -> bool {
     find_overlay().is_some_and(|hwnd| post(hwnd, command.encode()))
+}
+
+/// Asks the running overlay to quit, as *Quit Pitot* does (it logs its counters and closes), and waits up to
+/// `timeout` for its process to end. Returns `true` once no overlay runs, also when none ran, and `false` when it
+/// still runs after `timeout`. Blocks the calling thread; the Pitot window calls it before an update replaces the
+/// executable.
+pub fn quit_overlay_and_wait(timeout: Duration) -> bool {
+    let Some(hwnd) = find_overlay() else {
+        return true;
+    };
+    let mut pid = 0;
+    // SAFETY: reads the owner of a window found above into a local.
+    unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+    // SAFETY: opens the overlay's process for waiting only, before it is asked to quit, so the id still names it.
+    // Failure (an id of 0 from a window that went away) is handled below.
+    let process = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, pid) };
+    // A window that went away has quit already, or is quitting.
+    let _ = post(hwnd, OverlayCommand::Quit.encode());
+    match process {
+        Ok(handle) => {
+            let millis = u32::try_from(timeout.as_millis()).unwrap_or(u32::MAX - 1);
+            // SAFETY: waits on the process handle opened above; the wait ends at the timeout at the latest.
+            let ended = unsafe { WaitForSingleObject(handle, millis) } == WAIT_OBJECT_0;
+            // SAFETY: closes the handle opened above, once.
+            let _ = unsafe { CloseHandle(handle) };
+            ended
+        }
+        // Without a handle, the tray window going away is the sign.
+        Err(_) => {
+            let until = Instant::now() + timeout;
+            while overlay_running() && Instant::now() < until {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            !overlay_running()
+        }
+    }
 }
 
 /// Tells the Pitot window, if it is open, about `event`. Returns whether it was told.

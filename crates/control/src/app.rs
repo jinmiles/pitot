@@ -10,8 +10,9 @@ use pitot_overlay::platform::{self, ControlLink, SingleInstance};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 use crate::model::Placement;
-use crate::panel::Panel;
+use crate::panel::{Panel, Updates};
 use crate::style;
+use crate::updates::Updater;
 
 /// Opens the Pitot window and runs until it closes. A second start brings the open window to the front instead.
 pub fn run() {
@@ -26,6 +27,12 @@ pub fn run() {
         let _ = sender.unbounded_send(event);
     })
     .ok();
+    // News from the update threads, which `Updates` starts.
+    let (update_sender, mut update_events) = futures::channel::mpsc::unbounded();
+    let updates = Updates {
+        updater: Updater::installed(),
+        events: update_sender,
+    };
 
     Application::new().run(move |cx: &mut App| {
         let (bounds, display_id) = initial_bounds(cx);
@@ -48,11 +55,17 @@ pub fn run() {
             if let Some(hwnd) = hwnd(window) {
                 ControlLink::set_window(hwnd);
             }
-            window.on_window_should_close(cx, |window, _| {
+            let panel = cx.new(|cx| Panel::new(window, cx, updates));
+            let closing = panel.clone();
+            window.on_window_should_close(cx, move |window, cx| {
+                // Closing while the overlay quits for an update would leave neither running.
+                if closing.read(cx).installing() {
+                    return false;
+                }
                 save_placement(window);
                 true
             });
-            cx.new(|cx| Panel::new(window, cx))
+            panel
         });
         let Ok(handle) = opened else {
             cx.quit();
@@ -75,6 +88,25 @@ pub fn run() {
                         close
                     })
                     .unwrap_or(true);
+                if close {
+                    let _ = cx.update(|cx| cx.quit());
+                    break;
+                }
+            }
+        })
+        .detach();
+        cx.spawn(async move |cx| {
+            while let Some(event) = update_events.next().await {
+                let close = handle
+                    .update(cx, |panel, window, cx| {
+                        let close = panel.on_update(event, cx);
+                        if close {
+                            save_placement(window);
+                        }
+                        close
+                    })
+                    .unwrap_or(true);
+                // The installer waits for this process to exit.
                 if close {
                     let _ = cx.update(|cx| cx.quit());
                     break;

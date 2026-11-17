@@ -1,12 +1,14 @@
 # Pitot configuration for benchmarks: the input trace alone, at its default position and rate. Every field is
 # spelled out, so a change of defaults does not change the benchmark. Widgets go on the primary monitor. The
-# Pitot window does not open (start_in_tray), so only the overlay is measured.
+# Pitot window does not open (start_in_tray), so only the overlay is measured, and would not check for updates
+# (check_updates) if it did.
 
 [general]
 font = "Segoe UI"
 start_in_tray = true
 background_opacity = 82
 text_size = 100
+check_updates = false
 
 [widgets.status]
 enabled = false

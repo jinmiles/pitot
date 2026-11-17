@@ -1,6 +1,6 @@
 [package]
 name = "pitot-control"
-description = "The Pitot window: turns the overlay and each widget on and off."
+description = "The Pitot window: turns the overlay and each widget on and off, and updates an installed Pitot."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -18,3 +18,7 @@ gpui = { version = "0.2.2", default-features = false, features = ["windows-manif
 # Both already in gpui's tree: a channel from the link thread to the UI, and the window's HWND.
 futures = "0.3"
 raw-window-handle = "0.6"
+# Finds, downloads, verifies, and installs updates of an installed Pitot from its GitHub releases, in the window's
+# process only. Blocking HTTP (ureq, rustls with ring, Mozilla's roots), no async runtime. The same pinned version
+# as the executable's start-up hook.
+velopack = { version = "=1.2.161", default-features = false }

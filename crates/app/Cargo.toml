@@ -11,3 +11,8 @@ publish.workspace = true
 pitot-overlay = { path = "../overlay" }
 # The Pitot window, which only a process started with --window runs.
 pitot-control = { path = "../control" }
+
+[target."cfg(windows)".dependencies]
+# The installer's start-up hook. Pinned to the version of the `vpk` tool the release workflow packs with, which
+# must match it.
+velopack = { version = "=1.2.161", default-features = false }
