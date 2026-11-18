@@ -89,7 +89,7 @@ pub fn run() {
                     })
                     .unwrap_or(true);
                 if close {
-                    let _ = cx.update(|cx| cx.quit());
+                    cx.update(|cx| cx.quit());
                     break;
                 }
             }
@@ -108,7 +108,7 @@ pub fn run() {
                     .unwrap_or(true);
                 // The installer waits for this process to exit.
                 if close {
-                    let _ = cx.update(|cx| cx.quit());
+                    cx.update(|cx| cx.quit());
                     break;
                 }
             }
