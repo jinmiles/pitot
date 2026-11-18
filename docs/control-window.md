@@ -191,11 +191,11 @@ Direct2D; the overlay's GPUI is measured at the next release):
   Windows commits when it maps the executable. Nearly all of it (128 KB) is one lookup table of the OpenEXR
   decoder, which GPUI links in through the `image` crate's default formats; GPUI 0.2.2 offers no way to leave
   them out. Thread-local storage grows by 0.3 KB per thread.
+- CPU: the same within noise, 31.23 ms/s before and 31.41 ms/s after (means of six alternating 60 s runs of
+  the four reference widgets in a replay; the differences of the pairs ranged from -0.32 to +1.04 ms/s).
 
 The numbers above were measured with GPUI 0.2.2. The window moved to GPUI 0.3.12 after 0.1.5; its numbers, and the
 overlay's with it, are measured again at the next release.
-- CPU: the same within noise, 31.23 ms/s before and 31.41 ms/s after (means of six alternating 60 s runs of
-  the four reference widgets in a replay; the differences of the pairs ranged from -0.32 to +1.04 ms/s).
 
 GPUI's Windows manifest is in the executable: per-monitor DPI awareness (v2), which the overlay also sets at start,
 and version 6 of the common controls, which the overlay does not use.
