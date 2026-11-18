@@ -1,7 +1,7 @@
 # Wind widget
 
 Shows the wind as one value, its speed in km/h, and, on a dial that turns with the car, where the air flows
-relative to it. Updates at 5 Hz by default.
+relative to it. Updates at 10 Hz by default.
 
 - **Dial**: the car's nose is at the top (orange mark). The arrow runs from the side the wind comes from to the
   side it blows to: pointing down is a headwind, up a tailwind, sideways a crosswind. `N` and the ticks of the

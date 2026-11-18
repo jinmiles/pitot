@@ -38,7 +38,7 @@ x = 24
 y = 260
 width = 760
 height = 560
-rate_hz = 2.0
+rate_hz = 10.0
 opacity = 0.82
 
 [widgets.fuel]

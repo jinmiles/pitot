@@ -577,7 +577,7 @@ impl Widget for TiresWidget {
     }
 
     fn interval(&self) -> Duration {
-        Duration::from_millis(200)
+        Duration::from_millis(100)
     }
 
     fn update(&mut self, view: &mut View, now: Instant, redraw: &mut [Redraw; MAX_LAYERS]) {

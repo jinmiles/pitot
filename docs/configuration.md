@@ -301,7 +301,7 @@ x = 660         # physical pixels from the monitor's top-left corner
 y = 900
 width = 600
 height = 120
-rate_hz = 60.0  # update rate; leave out for the widget's own rate
+rate_hz = 60.0  # updates per second, 10 to 120; leave out for the widget's own rate
 opacity = 0.82  # background opacity, 0 to 1, at the default background_opacity
 ```
 
@@ -319,7 +319,7 @@ The pit widget keeps what it measures, the refueling speed by car and the pit la
 | `monitor` | 0 or more, a whole number; one that is not connected counts as left out ([Display](#display)) |
 | `background_opacity` | `[general]` only: 0 to 100, a whole number |
 | `text_size` | `[general]` only: 70 to 150, a whole number |
-| `rate_hz` | 0.1 to 120 |
+| `rate_hz` | 10 to 120; from 0.1 to below 10 it reads and is raised to 10 ([Update rates](#update-rates)) |
 | `opacity` | 0 to 1 |
 | `width`, `height` | 16 to 8192 |
 | `shape` | `trackmap` only: `"circle"` (default) or `"outline"` |
@@ -333,3 +333,15 @@ A configuration change rebuilds the overlay windows, widgets, and composition la
 connection to the sim, and the data pipeline keep running, so reloading does not grow memory. A change of
 `background_opacity` alone only redraws the widgets, and a change of `text_size` (with or without
 `background_opacity`) lays the widgets out again in their windows and layers and makes the text again.
+
+## Update rates
+
+Every widget updates at least 10 times per second. By default the input trace updates 60 times per second, the
+fuel widget 30, and every other widget 10; the status panel, which has no `rate_hz` in the default file, every
+100 ms. An update reads the latest data and redraws only what changed, so a widget whose values stand still
+draws nothing.
+
+Earlier versions allowed rates down to 0.1, and their files can hold one, such as `rate_hz = 2.0` in the
+standings' table. Such a file still reads, with its value kept as written, and the widget updates 10 times per
+second instead; `pitot.log` says so once for each such widget each time the widgets are made (at start, and when a
+change to the file makes them again). A value below 0.1 or above 120 is an error, as before.

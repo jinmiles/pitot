@@ -1,6 +1,6 @@
 # Standings widget
 
-The session's order grouped by class, fastest class first (by `CarClassRelSpeed`), updated at 2 Hz by default.
+The session's order grouped by class, fastest class first (by `CarClassRelSpeed`), updated at 10 Hz by default.
 
 ## Where the values come from
 
@@ -71,13 +71,13 @@ iRating change, interval, places gained, maker, and tires.
 - **Sector times**: the session info's `SplitTimeInfo` gives where sectors start. At each update the overlay reads
   every car's lap distance and interpolates, by distance, when it crossed a sector start since the previous update.
   A car on pit road, out of the world, unseen for 5 s, or skipping a sector restarts its timing. At the default
-  2 Hz, a car moves about half a percent of a lap between updates, so the interpolation assumes a steady speed over
-  that stretch.
+  10 Hz, a car moves about a tenth of a percent of a lap between updates, so the interpolation assumes a steady
+  speed over that stretch.
 
 ## Live race order and gaps
 
 The overlay follows every car's progress, `CarIdxLapCompleted` plus `CarIdxLapDistPct`, at each update of the
-standings (2 Hz by default) or the relative (10 Hz), whichever comes first, in every session and from before the
+standings or the relative (both 10 Hz by default), whichever comes first, in every session and from before the
 green flag, so the first gaps are ready at the start. The relative uses the same clock for its gaps on track
 ([relative.md](relative.md)); the standings use it only in a race, so practice and qualifying are unchanged.
 
@@ -102,11 +102,12 @@ green flag, so the first gaps are ready at the start. The relative uses the same
   the car ahead is the time since the car ahead passed the spot where this car is now; the gap to the class leader
   the same with the leader. A car more than a lap behind shows whole laps, `+1L`. For a finisher, the gap is taken
   at its finish. Until the car ahead has passed the spot since the overlay connected, the gap falls back to the
-  `CarIdxF2Time` difference, and so it does when updates are more than 5 s apart (a rate below 0.2 Hz). Practice
-  and qualifying keep the best-lap order and gaps.
+  `CarIdxF2Time` difference, and so it does when updates are more than 5 s apart (after the widgets were hidden,
+  for example). Practice and qualifying keep the best-lap order and gaps.
 
 Checked against the AI race capture (41 cars, 3 classes, 10 minutes, about 4 laps), replayed through the overlay's
-code at 2 Hz:
+code at 2 Hz, the default before the 10 Hz minimum (at 10 Hz the observations are closer together, so the
+interpolation spans shorter stretches):
 
 - At each of 186 line crossings, the live class position matched the class position at the line from crossing
   times (186 of 186), and the results' class position for that lap at all 146 crossings after the start. At the
