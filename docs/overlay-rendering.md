@@ -114,7 +114,10 @@ that both use GPUI, and left for a later change.
 
 The data and session threads are the overlay's own ([pipeline](overlay-pipeline.md)). On GPUI's thread one task,
 the scheduler, sleeps until something wakes it (`wake.rs`): a reason bit is set and the task is woken, without a
-lock or an allocation on the waking side; GPUI's executor then posts one message to its thread. It wakes for:
+lock or an allocation on the waking side; GPUI's executor then posts one message to its thread. Each widget has its
+own interval, `config::update_interval`: the configured `rate_hz`, else the widget's own `interval()`, and never
+longer than 100 ms, so every widget updates at least 10 times per second
+([update rates](configuration.md#update-rates)). The scheduler wakes for:
 
 - **ticks**: while the sim is connected and a shown widget is due by the next tick, the data thread wakes it once
   for the next tick it publishes, so updates follow the data (the 60 Hz input trace updates on every tick, a 10 Hz
@@ -143,7 +146,7 @@ shows, whether or not anything changed. Going headless when nothing shows stops 
 Every widget is one line of `crates/overlay/src/widgets/list.rs` ([the list](widgets.md)):
 
 ```rust
-wind: WindWidget = Spec::new("Wind", 1460, 370).size(200, 170).rate(5.0).on(),
+wind: WindWidget = Spec::new("Wind", 1460, 370).size(200, 170).rate(10.0).on(),
 ```
 
 `wind` is the module (`widgets/wind.rs`) and the widget's `[widgets.wind]` table; `WindWidget` is the type in that
@@ -152,7 +155,7 @@ primary monitor), size, and update rate, and `.on()` when it is on by default. F
 declarations, the defaults and the names the configuration accepts, the Pitot window's switches, the widgets the
 scheduler makes for a configuration (`Layout::build`, in the list's order), and the variables the pipeline
 registers. The `status` widget is a small panel with the connection state, tick, car count, and session, shown in
-every display state.
+every display state and updated every 100 ms.
 
 Each widget type implements `Register` next to its `Widget` implementation:
 
@@ -257,8 +260,8 @@ not `docs/configuration.md` or the benchmark configurations. `list.rs` and `docs
 
 What checks the new widget without more code:
 
-- `cargo test -p pitot-overlay`: names and labels are unique, rates are in range, every widget is made from its
-  defaults, a resized widget equals the widget made at that size (and keeps its layers inside it), its default
+- `cargo test -p pitot-overlay`: names and labels are unique, default rates are 10 to 120 Hz, every widget is made
+  from its defaults with its own interval at most 100 ms, a resized widget equals the widget made at that size (and keeps its layers inside it), its default
   size lays out at every text size without being raised past its smallest, `docs/widgets.md`
   has its row in the list's order, the default file and the defaults agree, and the benchmark configurations still
   turn on exactly the four reference widgets.

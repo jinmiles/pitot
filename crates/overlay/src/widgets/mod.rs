@@ -335,8 +335,9 @@ mod tests {
             assert!(!labels[..i].contains(&spec.label), "{} twice", spec.label);
             assert!(!spec.label.is_empty(), "{} has a label", spec.name);
             assert!(
-                spec.rate_hz.is_none_or(|r| (0.1..=120.0).contains(&r)),
-                "{}: a rate the configuration accepts",
+                spec.rate_hz
+                    .is_none_or(|r| (config::MIN_RATE_HZ..=config::MAX_RATE_HZ).contains(&r)),
+                "{}: a rate of 10 to 120 Hz",
                 spec.name
             );
         }
@@ -384,6 +385,12 @@ mod tests {
             if let (Some(width), Some(height)) = (spec.width, spec.height) {
                 assert_eq!(widget.size(), (width, height), "{}", spec.name);
             }
+            // Its own interval is what it runs at without a configured rate: at least 10 times per second.
+            assert!(
+                widget.interval() <= std::time::Duration::from_millis(100),
+                "{}: updates at least 10 times per second",
+                spec.name
+            );
         }
         let config = SPECS[0].defaults();
         let cx = Build {

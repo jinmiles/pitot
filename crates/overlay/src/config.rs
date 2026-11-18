@@ -5,7 +5,7 @@ use std::fmt;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use serde::de::{self, DeserializeOwned, Deserializer, MapAccess, Visitor};
 use serde::{Deserialize, Serialize};
@@ -87,6 +87,7 @@ pub const DEFAULT_TOML: &str = r#"# Pitot overlay configuration. Changes apply w
 # [general] monitor and removes the widgets' own.
 # *Move widgets* in the tray menu places and resizes widgets with the mouse and saves their x, y, width, and
 # height here. The Pitot window turns widgets on and off and saves their `enabled` here.
+# `rate_hz` is how many times per second a widget updates, from 10 to 120. A lower value is raised to 10.
 
 # The Pitot window opens when the overlay starts. With start_in_tray = true, only the tray icon shows; clicking
 # it opens the window.
@@ -146,7 +147,7 @@ x = 24
 y = 260
 width = 760
 height = 560
-rate_hz = 2.0
+rate_hz = 10.0
 opacity = 0.82
 
 [widgets.fuel]
@@ -175,7 +176,7 @@ x = 800
 y = 24
 width = 400
 height = 200
-rate_hz = 5.0
+rate_hz = 10.0
 opacity = 0.82
 
 [widgets.wind]
@@ -184,7 +185,7 @@ x = 1460
 y = 370
 width = 200
 height = 170
-rate_hz = 5.0
+rate_hz = 10.0
 opacity = 0.82
 
 # Wear and carcass temperatures are from the last pit stall visit: the sim updates them only there. In replays,
@@ -195,7 +196,7 @@ x = 1680
 y = 370
 width = 220
 height = 170
-rate_hz = 5.0
+rate_hz = 10.0
 opacity = 0.82
 
 # The track map. shape = "circle" places the cars around a circle by lap distance, from the first moment of a
@@ -295,6 +296,27 @@ pub fn background_alpha(base: f32, percent: u8) -> f32 {
     } else {
         base + (1.0 - base) * (p - d) / (max - d)
     }
+}
+
+/// The slowest a widget updates, in updates per second. A `rate_hz` below it still reads (files from before it
+/// can have 1 or 2), and the widget updates at this rate instead: see [`update_interval`].
+pub const MIN_RATE_HZ: f32 = 10.0;
+
+/// The fastest `rate_hz`.
+pub const MAX_RATE_HZ: f32 = 120.0;
+
+/// The smallest `rate_hz` the file may hold. Values from it to [`MIN_RATE_HZ`] are raised to that.
+const LOWEST_RATE_HZ: f32 = 0.1;
+
+/// How often a widget updates: every `1 / rate_hz` seconds when a rate is configured, else every `own` (the
+/// widget's own interval), and at least [`MIN_RATE_HZ`] times per second either way.
+pub fn update_interval(rate_hz: Option<f32>, own: Duration) -> Duration {
+    let slowest = Duration::from_secs_f64(1.0 / f64::from(MIN_RATE_HZ));
+    rate_hz
+        .map_or(own, |hz| {
+            Duration::from_secs_f64(1.0 / f64::from(hz.max(MIN_RATE_HZ)))
+        })
+        .min(slowest)
 }
 
 /// Recording sessions for replays.
@@ -716,7 +738,9 @@ impl Config {
         }
         for (widget, c) in self.widgets() {
             let invalid = |field| Err(ConfigError::Invalid { widget, field });
-            if c.rate_hz.is_some_and(|r| !(0.1..=120.0).contains(&r)) {
+            if c.rate_hz
+                .is_some_and(|r| !(LOWEST_RATE_HZ..=MAX_RATE_HZ).contains(&r))
+            {
                 return invalid("rate_hz");
             }
             if !(0.0..=1.0).contains(&c.opacity) {
@@ -1125,7 +1149,7 @@ mod tests {
     }
 
     /// The first ten widgets' defaults as they were before the registry: on, in this order, at these places,
-    /// sizes, and rates.
+    /// sizes, and rates (the rates since raised to at least [`MIN_RATE_HZ`]).
     #[test]
     fn the_first_widgets_keep_their_defaults() {
         type Defaults = (&'static str, i32, i32, Option<(u32, u32)>, Option<f32>);
@@ -1133,12 +1157,12 @@ mod tests {
             ("status", 24, 24, None, None),
             ("inputs", 660, 900, Some((600, 120)), Some(60.0)),
             ("relative", 1460, 560, Some((460, 300)), Some(10.0)),
-            ("standings", 24, 260, Some((760, 560)), Some(2.0)),
+            ("standings", 24, 260, Some((760, 560)), Some(10.0)),
             ("fuel", 1460, 900, Some((420, 150)), Some(30.0)),
             ("pit", 800, 240, Some((400, 280)), Some(10.0)),
-            ("sectors", 800, 24, Some((400, 200)), Some(5.0)),
-            ("wind", 1460, 370, Some((200, 170)), Some(5.0)),
-            ("tires", 1680, 370, Some((220, 170)), Some(5.0)),
+            ("sectors", 800, 24, Some((400, 200)), Some(10.0)),
+            ("wind", 1460, 370, Some((200, 170)), Some(10.0)),
+            ("tires", 1680, 370, Some((220, 170)), Some(10.0)),
             ("trackmap", 1460, 24, Some((440, 330)), Some(10.0)),
         ];
         let config = Config::default();
@@ -1346,6 +1370,59 @@ mod tests {
             error.to_string().contains("line"),
             "parse errors carry a location: {error}"
         );
+    }
+
+    /// Rates below the minimum, which files from before it can hold, still read and run at the minimum; rates
+    /// outside the range stay errors.
+    #[test]
+    fn rates_below_the_minimum_read_and_are_raised() {
+        let tenth = Duration::from_millis(100);
+        for (hz, interval) in [
+            (0.1, tenth),
+            (1.0, tenth),
+            (2.0, tenth),
+            (9.9, tenth),
+            (10.0, tenth),
+            (30.0, Duration::from_secs_f64(1.0 / 30.0)),
+            (120.0, Duration::from_secs_f64(1.0 / 120.0)),
+        ] {
+            let text = format!("[widgets.standings]\nrate_hz = {hz:?}\n");
+            let config = Config::parse(&text).expect("reads");
+            let standings = widget(&config, "standings");
+            assert_eq!(standings.rate_hz, Some(hz), "the file's value is kept");
+            let own = Duration::from_millis(500);
+            assert_eq!(update_interval(standings.rate_hz, own), interval, "{hz}");
+        }
+        for hz in [0.05, 0.0, -1.0, 121.0] {
+            assert!(
+                matches!(
+                    Config::parse(&format!("[widgets.standings]\nrate_hz = {hz:?}\n")),
+                    Err(ConfigError::Invalid {
+                        widget: "standings",
+                        field: "rate_hz"
+                    })
+                ),
+                "{hz}"
+            );
+        }
+        // Without a configured rate, the widget's own interval, at most a tenth of a second.
+        let own = Duration::from_millis(50);
+        assert_eq!(update_interval(None, own), own);
+        assert_eq!(update_interval(None, Duration::from_millis(250)), tenth);
+        // The defaults run at what they say.
+        for (name, w) in Config::default().widgets() {
+            if let Some(hz) = w.rate_hz {
+                assert!(
+                    hz >= MIN_RATE_HZ,
+                    "{name}: a default of at least the minimum"
+                );
+                assert_eq!(
+                    update_interval(w.rate_hz, Duration::MAX),
+                    Duration::from_secs_f64(1.0 / f64::from(hz)),
+                    "{name}"
+                );
+            }
+        }
     }
 
     #[test]

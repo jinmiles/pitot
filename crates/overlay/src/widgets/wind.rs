@@ -209,7 +209,7 @@ impl Widget for WindWidget {
     }
 
     fn interval(&self) -> Duration {
-        Duration::from_millis(200)
+        Duration::from_millis(100)
     }
 
     fn update(&mut self, view: &mut View, _now: Instant, redraw: &mut [Redraw; MAX_LAYERS]) {

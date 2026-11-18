@@ -1,6 +1,6 @@
 # Tire widget
 
-The player's four tires laid out like the car (front on top, left on the left), updated five times a second by
+The player's four tires laid out like the car (front on top, left on the left), updated ten times a second by
 default. Each tire shows three columns, the left, middle, and right of the tread as seen from behind the car:
 
 - carcass temperature in °C (`LFtempCL`, `LFtempCM`, `LFtempCR` and the other corners) on a color swatch: blue below
@@ -36,8 +36,8 @@ So the numbers describe the tires at the last stop, not now:
 Live telemetry has no surface temperatures, but the sim's own telemetry files (`.ibt`) do, every tick. While the
 sim plays a replay, the widget shows from those files the replayed moment's surface temperatures, tread, and
 hot pressure (in kPa, in place of the distance), with `Replay` in the header. The files are found and read as in
-[Sim replays](overlay-pipeline.md#the-sims-telemetry-files): five samples a second, so the widget's default rate
-is 5 Hz.
+[Sim replays](overlay-pipeline.md#the-sims-telemetry-files): five samples a second, so at the widget's default
+10 Hz each sample shows within a tenth of a second of its moment.
 
 - With a capture of the session, the moment is the capture's, and the other widgets show the player's view as
   recorded, whichever car the camera follows; so does this one.
