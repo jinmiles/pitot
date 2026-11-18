@@ -5,7 +5,8 @@
 //!   is late. Neither step locks or allocates.
 //! - When `sessionInfoUpdate` changes, the data thread copies the text and hands it to the session thread,
 //!   which parses it and passes the result to the render thread.
-//! - The render thread owns a [`View`] and calls [`View::poll`] once per frame.
+//! - The render thread owns a [`View`] and calls [`View::poll`] once per update. Both threads wake it through
+//!   [`View::wake`]: every message they send, and each tick while it asks for ticks ([`Wake::arm_ticks`]).
 //!
 //! Buffers are created per connection, so per-car arrays are sized from the sim's `CarIdx*` length. They reach
 //! the render thread over a channel only when the connection changes.
@@ -29,6 +30,8 @@ mod wire;
 pub(crate) use vars::var_group;
 pub use vars::{VarGroup, Vars, resolve_var};
 pub use wire::{InputSample, SampleRing, SeqBuffer};
+
+pub use crate::wake::Wake;
 
 #[cfg(all(test, windows))]
 pub(crate) use ibt::tests as ibt_test;
@@ -86,6 +89,23 @@ mod threads {
         Display, InputSample, SAMPLE_CAPACITY, SampleRing, SeqBuffer, VarGroup, Vars,
         ready_session_buffer,
     };
+    use crate::wake::{Wake, reason};
+
+    /// The channel to the render thread, which wakes it with each message.
+    #[derive(Debug, Clone)]
+    struct ToRender {
+        sender: Sender<Message>,
+        wake: Arc<Wake>,
+    }
+
+    impl ToRender {
+        /// Sends `message` and wakes the render thread. Fails only once the render thread's view is gone.
+        fn send(&self, message: Message) -> Result<(), Gone> {
+            let sent = self.sender.send(message).map_err(|_| Gone);
+            self.wake.signal(reason::MESSAGE);
+            sent
+        }
+    }
 
     /// Least time between two searches for a capture during one replay.
     const SEARCH_INTERVAL: Duration = Duration::from_secs(10);
@@ -208,7 +228,12 @@ mod threads {
             let recorder = recording.map(Recorder::start).transpose()?;
             let stop = Arc::new(AtomicBool::new(false));
             let stats = Arc::new(PipelineStats::default());
-            let (to_render, from_threads) = mpsc::channel();
+            let (sender, from_threads) = mpsc::channel();
+            let wake = Arc::new(Wake::new());
+            let to_render = ToRender {
+                sender,
+                wake: Arc::clone(&wake),
+            };
             let (to_session, session_jobs) = mpsc::channel::<Job>();
             let to_session_from_view = to_session.clone();
             let to_session_on_drop = to_session.clone();
@@ -255,6 +280,7 @@ mod threads {
                 tires: None,
                 tire_search: None,
                 messages: from_threads,
+                wake,
                 connection: None,
                 snapshot: Snapshot::new(),
                 session: None,
@@ -298,7 +324,7 @@ mod threads {
     /// exits.
     fn session_loop(
         jobs: &Receiver<Job>,
-        to_render: &Sender<Message>,
+        to_render: &ToRender,
         recycle: &Sender<Vec<u8>>,
         to_data: &Sender<Option<Found>>,
         stats: &PipelineStats,
@@ -378,7 +404,7 @@ mod threads {
     }
 
     struct DataChannels {
-        to_render: Sender<Message>,
+        to_render: ToRender,
         to_session: Sender<Job>,
         recycled: Receiver<Vec<u8>>,
         found: Receiver<Option<Found>>,
@@ -604,6 +630,7 @@ mod threads {
                             Ok(Some(shown)) => {
                                 replay.showing = true;
                                 connection = Some(shown);
+                                channels.to_render.wake.tick();
                                 continue;
                             }
                             Ok(None) => {}
@@ -639,6 +666,7 @@ mod threads {
                     }
                     current.publish(&snapshot);
                     current.samples.push(sample(&snapshot, &vars, missed));
+                    channels.to_render.wake.tick();
                     let update = reader.session_info_update();
                     if update != session_update
                         && let Ok(Some(copied)) = reader.copy_session_info(&mut session_text)
@@ -706,6 +734,8 @@ mod threads {
         /// When the tire samples were last asked for.
         tire_search: Option<Instant>,
         messages: Receiver<Message>,
+        /// How the data and session threads wake the render thread.
+        wake: Arc<Wake>,
         connection: Option<Arc<Connection>>,
         snapshot: Snapshot,
         session: Option<Arc<SessionInfo>>,
@@ -787,6 +817,11 @@ mod threads {
 
         pub fn vars(&self) -> &Vars {
             &self.vars
+        }
+
+        /// The render thread's wake-up, which the data and session threads signal.
+        pub fn wake(&self) -> &Arc<Wake> {
+            &self.wake
         }
 
         /// Every variable the pipeline requests: [`Vars`] and each widget's group.

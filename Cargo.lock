@@ -3548,12 +3548,16 @@ dependencies = [
 name = "pitot-overlay"
 version = "0.1.5"
 dependencies = [
+ "futures",
+ "gpui-pre",
+ "gpui-pre-platform",
+ "lyon",
  "pitot-irsdk",
+ "raw-window-handle",
  "serde",
  "toml 1.2.1+spec-1.1.0",
  "tracing",
  "windows",
- "windows-numerics",
  "zstd",
 ]
 

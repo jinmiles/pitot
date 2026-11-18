@@ -7,8 +7,12 @@ rust-version.workspace = true
 publish.workspace = true
 license.workspace = true
 
+[features]
+# Counts the overlay process's heap allocations and logs them at exit (see `pitot_overlay::alloc_count`).
+alloc-count = ["pitot-overlay/alloc-count"]
+
 [dependencies]
-# The overlay. Its library never depends on the window's UI framework.
+# The overlay: its widgets draw with GPUI, which runs in the overlay's process too.
 pitot-overlay = { path = "../overlay" }
 # The Pitot window, which only a process started with --window runs.
 pitot-control = { path = "../control" }
