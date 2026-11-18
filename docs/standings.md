@@ -142,3 +142,8 @@ Live race order and gaps, same setup but the AI race capture replayed at 4x so t
 (runs of the same build differ by up to 3 MB; the gap history is 0.17 MB for 72 cars). The gaps now change on every
 update, so the gap columns of the rows shown are drawn twice a second instead of once a lap. At 4x, passes and line
 crossings, which redraw whole rows, come four times as often as in a race.
+
+These runs were at 2 Hz. At the 10 Hz default (#181), same setup with the AI race capture at 1x, `pitot-bench
+collect` for 60 s after 20 s, three pairs: four widgets 31.71 ms/s before and 30.43 after, all ten widgets 37.83
+and 35.10 (no increase measured; the PC was busy with other builds, and the race is not yet under way in that
+stretch). The race under way at 10 Hz is measured with the next release.
