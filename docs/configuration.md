@@ -154,9 +154,9 @@ text_size = 100
   size in widget pixels (a box made small at a smaller text size) lays the widget out at its smallest, and what
   reaches past the box's edge is cut there.
 - A change lays every widget out again in its box, keeping what it follows of the session (fuel use, lap times,
-  gaps), and makes the text formats and glyph atlas again at the new size: about 3 ms, and 7 to 14 ms with the
-  redraw of every widget, on the lab PC. Windows, layers, and the GPU device stay. While the value does not change,
-  nothing more is made or drawn.
+  gaps), and draws every widget again; GPUI lays out and rasterizes the text at the new size as it draws. The
+  windows stay, except that a box made of text takes its new size. While the value does not change, nothing more is
+  made or drawn.
 
 While the slider moves, the window sends each value to the overlay, which lays the widgets out at it at once;
 releasing the slider saves it here in place, as the background opacity slider does (above).
@@ -196,8 +196,8 @@ at another text size they are in widget pixels, so a drag stops at the smallest 
 | `tires` | 140 x 110 | larger tire blocks: their third line from 54 px a block, the sets and pit lap in the header from 200 px |
 | `trackmap` | 200 x 150 | a larger map, with the same dots and road (a box smaller than the default thins them) |
 
-A size below the smallest in the file is raised to it too. While a widget is resized, its composition surfaces are
-made again at each new size and drawn whole; outside *Move widgets* nothing of this runs.
+A size below the smallest in the file is raised to it too. While a widget is resized, its window takes each new
+size and is drawn whole; outside *Move widgets* nothing of this runs.
 
 Clicks outside the handles still reach the windows below. A right click on a handle opens the tray menu, and
 choosing *Move widgets* again (or turning it off in the Pitot window) ends moving. The overlay's own write to the
@@ -329,7 +329,7 @@ when Windows renumbers displays. The overlay and the Pitot window count them wit
 numbers them from 1, so its *Display 1* is `monitor = 0`; its numbers follow this order, not the numbers Windows'
 display settings show.
 
-A configuration change rebuilds the overlay windows, widgets, and composition layers. The GPU device, the
-connection to the sim, and the data pipeline keep running, so reloading does not grow memory. A change of
-`background_opacity` alone only redraws the widgets, and a change of `text_size` (with or without
-`background_opacity`) lays the widgets out again in their windows and layers and makes the text again.
+A configuration change closes the widget windows and makes the widgets again; their windows open as they show.
+The connection to the sim and the data pipeline keep running. A change of `background_opacity` alone only redraws
+the widgets, and a change of `text_size` (with or without `background_opacity`) lays the widgets out again in their
+windows and redraws them.

@@ -5,8 +5,11 @@
 #![cfg(all(windows, feature = "alloc-check"))]
 
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::Mutex;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::task::{Context, Waker};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -106,14 +109,24 @@ fn pipeline_does_not_allocate_per_tick() {
 
     let mut row = [0u8; ROW];
     let mut samples = 0usize;
-    fn cycle(publisher: &mut Publisher, view: &mut View, row: &mut [u8; ROW], n: u32) -> usize {
-        row[0..8].copy_from_slice(&f64::from(n).to_le_bytes());
-        publisher.publish(row).expect("publishes");
-        // Give the data thread time to read the tick, as the sim's 60 Hz would.
-        thread::sleep(Duration::from_millis(4));
-        view.poll();
-        view.drain_samples(|_| {})
-    }
+    // The scheduler's side of the wake-up: a waiting task that asks for every tick, as it does while a widget is
+    // due by the next tick. Waking it from the data thread must not allocate either.
+    let woken = Arc::new(Woken(AtomicUsize::new(0)));
+    let waker = Waker::from(Arc::clone(&woken));
+    let cycle =
+        |publisher: &mut Publisher, view: &mut View, row: &mut [u8; ROW], n: u32| -> usize {
+            let wake = Arc::clone(view.wake());
+            let mut waiting = wake.wait();
+            let _ = Pin::new(&mut waiting).poll(&mut Context::from_waker(&waker));
+            wake.arm_ticks(true);
+            row[0..8].copy_from_slice(&f64::from(n).to_le_bytes());
+            publisher.publish(row).expect("publishes");
+            // Give the data thread time to read the tick, as the sim's 60 Hz would.
+            thread::sleep(Duration::from_millis(4));
+            let _ = Pin::new(&mut waiting).poll(&mut Context::from_waker(&waker));
+            view.poll();
+            view.drain_samples(|_| {})
+        };
     // Warm-up includes the first session info parse.
     for n in 0..120 {
         samples += cycle(&mut publisher, &mut view, &mut row, n);
@@ -136,12 +149,30 @@ fn pipeline_does_not_allocate_per_tick() {
         "the pipeline kept up: {} samples",
         samples - before
     );
+    assert!(
+        woken.0.load(Ordering::Relaxed) >= 590,
+        "ticks woke the waiting task: {}",
+        woken.0.load(Ordering::Relaxed)
+    );
     assert_eq!(
         ALLOCATIONS.load(Ordering::Relaxed),
         0,
-        "allocations across the data thread and view"
+        "allocations across the data thread, its wake-ups, and view"
     );
     drop(pipeline);
+}
+
+/// Counts wake-ups of a task; an `Arc` waker wakes and clones without allocating.
+struct Woken(AtomicUsize);
+
+impl std::task::Wake for Woken {
+    fn wake(self: Arc<Self>) {
+        self.0.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.0.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 const SESSION_INFO: &[u8] = b"WeekendInfo:\n TrackID: 1\n SubSessionID: 4242\n";

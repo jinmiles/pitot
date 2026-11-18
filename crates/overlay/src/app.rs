@@ -748,7 +748,7 @@ impl Overlay {
         }
     }
 
-    /// Takes tray and Pitot window commands. Returns whether something changed that the window should hear.
+    /// Takes tray and Pitot window commands, and tells the Pitot window the state they leave.
     fn take_commands(&mut self) {
         while let Some(command) = platform::take_tray_command() {
             match command {
@@ -855,7 +855,7 @@ impl Overlay {
         }
     }
 
-    /// Reloads the configuration file once its writes settled. Returns `Err` to stop the overlay.
+    /// Reloads the configuration file once its writes settled: see [`compare`] for what a change redoes.
     fn reload(&mut self, cx: &mut App) {
         if !self.reload_at.is_some_and(|at| Instant::now() >= at) {
             return;
@@ -927,14 +927,14 @@ impl Overlay {
             });
             for slot in &mut self.layout.slots {
                 let rect = slot.screen_rect();
-                if let Some(window) = slot.window.as_mut() {
-                    if rect != window.rect {
-                        window.rect = rect;
-                        plan.actions.push(Action::Place {
-                            hwnd: window.hwnd,
-                            rect,
-                        });
-                    }
+                if let Some(window) = slot.window.as_mut()
+                    && rect != window.rect
+                {
+                    window.rect = rect;
+                    plan.actions.push(Action::Place {
+                        hwnd: window.hwnd,
+                        rect,
+                    });
                 }
             }
             // The smallest box a drag may give a widget changes with the text.

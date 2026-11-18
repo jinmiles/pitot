@@ -474,7 +474,7 @@ impl Canvas<'_> {
         // The line box is the font's ascent and descent, centered in the rectangle as DirectWrite centers a
         // paragraph; glyph positions are relative to the baseline.
         let line = f32::from(layout.ascent + layout.descent) / self.logical;
-        // On a whole pixel, as the glyph atlas drew numbers, so text stays sharp.
+        // On a whole pixel, so text stays as sharp as it was before GPUI drew it.
         let baseline =
             (rect.y + (rect.h - line) / 2.0 + f32::from(layout.ascent) / self.logical).round();
         let origin = self.at(x, baseline);

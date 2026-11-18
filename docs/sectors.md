@@ -49,9 +49,12 @@ that sector.
 ## Drawing
 
 Rows and text buffers are allocated when the widget is created and reused, so updates do not allocate (checked by
-the `alloc-check` test). Only the rows that changed are drawn again. Digits come from the glyph atlas.
+the `alloc-check` test). An update that changes nothing shown draws nothing; a change draws the widget's window
+again whole.
 
 ## Cost
+
+Cost numbers on this page were measured with the overlay's earlier Direct2D renderer, before the widgets were drawn with GPUI (#183); they are measured again at the next release.
 
 Lab PC (Parsec virtual display, the four reference widgets plus this one, release build), the home PC capture of
 an online practice session replayed at 1x, `pitot-bench collect` for 60 s after a 12 s warm-up, two runs each,

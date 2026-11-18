@@ -103,8 +103,8 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 - Source: https://github.com/tabler/tabler-icons
 - License: MIT
 - Used in: `crates/overlay/src/widgets/inputs.rs`
-- Ported: the geometry of the `steering-wheel` outline icon (rim, hub, and three spokes), drawn with Direct2D
-  circles and lines and rotated by the steering angle; the center marker on the rim is our own addition
+- Ported: the geometry of the `steering-wheel` outline icon (rim, hub, and three spokes), drawn as circles and
+  lines and rotated by the steering angle; the center marker on the rim is our own addition
 
 ```text
 MIT License

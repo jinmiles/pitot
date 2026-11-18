@@ -32,6 +32,13 @@ so the overlay does not cover the screen, copy the configuration and the plan to
 ignores, add `monitor = <n>` to each widget, and point the copied plan at the copied configuration. Keep the
 monitor's resolution and scaling the same as the primary monitor's, and note the change with the results.
 
+## The renderer
+
+Since #183 the overlay draws its widgets with GPUI: a window per widget, GPUI's own display-refresh thread while
+any widget shows, and none of it with no widget shown ([rendering](overlay-rendering.md)). Series measured before
+that measured the Direct2D renderer and are not comparable with later ones; performance is measured at each
+release.
+
 ## Before an official run
 
 - Run on the machine the official results come from, with the fixed conditions of the project plan: power plan,
