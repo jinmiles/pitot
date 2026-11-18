@@ -75,7 +75,7 @@ impl Widget for StatusWidget {
     }
 
     fn interval(&self) -> Duration {
-        Duration::from_millis(250)
+        Duration::from_millis(100)
     }
 
     fn update(&mut self, view: &mut View, _now: Instant, redraw: &mut [Redraw; MAX_LAYERS]) {

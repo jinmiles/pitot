@@ -302,9 +302,15 @@ impl Layout {
                     windows.len() - 1
                 }
             };
-            let interval = widget_config
-                .rate_hz
-                .map_or(widget.interval(), |hz| Duration::from_secs_f32(1.0 / hz));
+            let interval = config::update_interval(widget_config.rate_hz, widget.interval());
+            if let Some(hz) = widget_config.rate_hz.filter(|&hz| hz < config::MIN_RATE_HZ) {
+                info!(
+                    widget = name,
+                    rate_hz = hz,
+                    min_hz = config::MIN_RATE_HZ,
+                    "widget updates at the minimum rate, above its configured rate"
+                );
+            }
             // Placed on a larger monitor, a widget would be cut off or out of sight; the file keeps its numbers.
             let (x, y) = config::clamp_position(
                 widget_config.x,

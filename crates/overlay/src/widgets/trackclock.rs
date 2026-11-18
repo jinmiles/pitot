@@ -1,7 +1,7 @@
 //! The [`RaceClock`] shared by the standings and the relative, kept up to date from the view.
 //!
 //! Whichever of the two widgets updates first observes the latest tick for both, so the checkpoint history is kept
-//! once and each widget gains the other's observations (the standings run at 2 Hz, the relative at 10 Hz).
+//! once and each widget gains the other's observations (both run at 10 Hz by default, each on its own timer).
 
 use std::cell::RefCell;
 use std::rc::Rc;

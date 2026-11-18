@@ -1,7 +1,7 @@
 # Sectors widget
 
 The player's lap sector by sector: each sector's time against the player's best, the class's best this session,
-and the cars directly ahead and behind in class order. Updated at 5 Hz by default.
+and the cars directly ahead and behind in class order. Updated at 10 Hz by default.
 
 ## Layout
 
@@ -28,7 +28,7 @@ neighbour on that side (the class leader has no car ahead). Before the session i
 - **Sector times** are timed by the overlay, like the standings' sector columns: at each update it reads every
   car's lap distance (`CarIdxLapDistPct`) and interpolates, by distance, when the car crossed a sector start since
   the previous update. A car on pit road, out of the world, unseen for 5 s, or skipping a sector restarts its
-  timing. At the default 5 Hz a car moves about a fifth of a percent of a lap between updates.
+  timing. At the default 10 Hz a car moves about a tenth of a percent of a lap between updates.
 - **Best times** are the best the overlay timed since the session started (`SessionNum` changed) or the overlay
   connected. Laps driven before that are not known: the session's results have lap times, not sector times.
 - **Class order** comes from the session's results (`ClassPosition`), else from `CarIdxClassPosition`.
