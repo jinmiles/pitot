@@ -121,15 +121,15 @@ takes the focus, it goes back behind that window.
 
 ## How it reaches the overlay
 
-The two processes talk through window messages, so the overlay carries no part of the window's UI framework and
-spends nothing on it per tick or frame.
+The two processes talk through window messages, so neither runs the other's code and the overlay spends nothing on
+the window per tick or frame. Both draw with GPUI, each with its own app in its own process.
 
 - The overlay's tray icon belongs to a hidden top-level window of class `PitotTray`. The Pitot window finds it by
   class and posts it a message (`WM_APP + 2`) with a command and a value in its parameters: hello (answer with
   the state), hide or show the widgets, start or end moving, quit, the background opacity or text size while its
   slider moves (a percent), and the background opacity or text size the window just saved. A percent out of a
-  setting's range is brought into it. The overlay handles it on its message-loop thread between frames, as it
-  handles the tray menu.
+  setting's range is brought into it. The overlay handles it on GPUI's thread, whose message loop dispatches the
+  tray window's messages, as it handles the tray menu.
 - The Pitot window owns a message-only window of class `PitotControlLink` on a thread of its own. The overlay
   posts it the state (widgets hidden, moving) after every change and after a hello, a note after each
   configuration reload, a request to come to the front, and a close when the overlay quits.
@@ -142,9 +142,9 @@ spends nothing on it per tick or frame.
   closed mid-move does not hold it for ever.
 - The text size slider works the same way (at most 17 messages for a drag across the track). For each new value
   the overlay lays every widget out again in its box through `Widget::resize`, which keeps what the widget follows
-  of the session, makes the text formats and the glyph atlas again, and redraws every widget once: 7 to 14 ms in
-  all on the lab PC, of which about 3 ms is the text. Cheap enough to follow the slider at every step, so the
-  slider previews as it moves rather than only on release.
+  of the session, and redraws every widget once; GPUI lays out and rasterizes the text at the new size as it draws.
+  Cheap enough to follow the slider at every step, so the slider previews as it moves rather than only on
+  release.
 - Each process is single-instance through a named mutex (`Local\PitotOverlay`, `Local\PitotControl`).
 
 The message-handling code of both ends is in `crates/overlay/src/platform/link.rs`, so the window's crate has no
@@ -154,14 +154,15 @@ The message-handling code of both ends is in `crates/overlay/src/platform/link.r
 
 The overlay's own work is unchanged: messages from the window arrive only when the user acts, and the overlay
 answers with one posted message. Moving the background opacity slider redraws every shown widget once per new
-value, as showing hidden widgets does, and moving the text size slider also lays the widgets out and makes the
-text again (above); nothing is drawn or made while a slider does not move. The benchmark configurations set `start_in_tray = true`, so measurements of the
+value, as showing hidden widgets does, and moving the text size slider also lays the widgets out again (above);
+nothing is drawn or made while a slider does not move. The benchmark configurations set `start_in_tray = true`, so measurements of the
 overlay do not include the window, which would otherwise run as a child process of the overlay.
 
 The window is built with [GPUI](https://www.gpui.rs/) (Apache-2.0), the UI framework of the Zed editor, which
-draws with Direct3D 11 and DirectWrite and runs its own task executors. That is why it runs in a process of its
-own: the overlay's process never starts GPUI, its executors, or its windows. While open, the window wakes with the
-display's refresh to check whether anything needs drawing, and draws only when something changed.
+draws with Direct3D 11 and DirectWrite and runs its own task executors. It runs in a process of its own, so closing
+it ends everything it started. The overlay draws its widgets with GPUI too, since #183
+([rendering](overlay-rendering.md)); before that its process never started GPUI. While open, the window wakes with
+the display's refresh to check whether anything needs drawing, and draws only when something changed.
 
 GPUI comes from crates.io as `gpui-pre` 0.3.12 with `gpui-pre-platform` 0.3.12, pinned exactly (`=0.3.12`) as
 gpui-kit pins them. They are snapshots of Zed's `gpui` crates (`zed-industries/zed` at `d2a4fb6`, Apache-2.0, with
@@ -174,7 +175,8 @@ bytecode; debug builds compile them at run time with `d3dcompiler_47.dll`, which
 `runtime_shaders` feature that gpui-kit enables only changes macOS.
 
 The overlay and the window are one executable, so the overlay's process maps the window's code without running
-it. Compared with the overlay's own executable in 0.1.3, measured on the lab PC:
+it. Compared with the overlay's own executable in 0.1.3, measured on the lab PC (when the overlay still drew with
+Direct2D; the overlay's GPUI is measured at the next release):
 
 - DLLs: the system DLLs that only GPUI imports (`comctl32.dll` for `TaskDialogIndirect`, `dwmapi.dll`, and
   `icuuc.dll`, which also loads `icu.dll`) are delay-loaded (`crates/app/build.rs`), so they load on first use,

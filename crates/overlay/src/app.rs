@@ -254,6 +254,9 @@ struct Slot {
     text_box: bool,
     /// Screen position of the widget's monitor's top-left corner.
     origin: (i32, i32),
+    /// The widget's monitor, in screen pixels, and its scale (DPI / 96): the window never shows outside it.
+    monitor: ScreenRect,
+    monitor_scale: f32,
     /// Position on the monitor: as configured, kept inside the monitor ([`config::clamp_position`]), then as moved.
     x: i32,
     y: i32,
@@ -451,7 +454,7 @@ impl Layout {
             let monitor =
                 config::resolve_monitor(widget_config.monitor, general, monitors.len(), primary);
             // Only without any monitor.
-            let Some(rect) = monitors.get(monitor).map(|m| m.rect) else {
+            let Some((rect, dpi)) = monitors.get(monitor).map(|m| (m.rect, m.dpi)) else {
                 continue;
             };
             let interval = widget_config
@@ -484,6 +487,8 @@ impl Layout {
                 scaled,
                 text_box,
                 origin: (rect.x, rect.y),
+                monitor: rect,
+                monitor_scale: dpi.max(1) as f32 / 96.0,
                 x,
                 y,
                 placed: (x, y),
@@ -671,19 +676,23 @@ enum Windowing {
 /// A Win32 call on a widget window, made between GPUI's updates.
 #[derive(Debug, Clone, Copy)]
 enum Action {
-    /// Style a new window as an overlay window, place it, and show it when shown.
+    /// Style a new, hidden window as an overlay window and place it, still hidden; then show it when it is where it
+    /// belongs on `monitor`.
     Ready {
         hwnd: isize,
         rect: ScreenRect,
-        show: bool,
+        monitor: ScreenRect,
     },
     Place {
         hwnd: isize,
         rect: ScreenRect,
     },
+    /// Show a window, only when it is where it belongs on `monitor`, or hide it.
     Show {
         hwnd: isize,
         show: bool,
+        rect: ScreenRect,
+        monitor: ScreenRect,
     },
 }
 
@@ -952,14 +961,18 @@ impl Overlay {
         }
     }
 
-    /// Opens a window for each widget that has none, hidden; it is styled, placed, and shown after the update.
-    fn open_windows(&mut self, cx: &mut App, plan: &mut Plan) {
+    /// Opens a window for each shown widget that has none, hidden; after the update it is styled and placed while
+    /// still hidden, and shown once it is where it belongs. A widget gets its window when it first shows: GPUI keeps
+    /// asking windows that never showed to paint, at every display refresh.
+    fn open_windows(&mut self, cx: &mut App, plan: &mut Plan, shown: Shown, display: Display) {
         for slot in &mut self.layout.slots {
-            if slot.window.is_some() {
+            if slot.window.is_some()
+                || !shown.visible(slot.painted.widget.borrow().as_ref(), display)
+            {
                 continue;
             }
             let rect = slot.screen_rect();
-            match open_widget_window(cx, &slot.painted, rect) {
+            match open_widget_window(cx, &slot.painted, rect, slot.monitor_scale) {
                 Ok(window) => {
                     slot.window = Some(window);
                     slot.stale = true;
@@ -972,7 +985,7 @@ impl Overlay {
                 plan.actions.push(Action::Ready {
                     hwnd: window.hwnd,
                     rect: window.rect,
-                    show: false,
+                    monitor: slot.monitor,
                 });
             }
         }
@@ -1039,7 +1052,7 @@ impl Overlay {
                     pending = true;
                 }
                 Windowing::Changing => pending = true,
-                Windowing::Windowed => self.open_windows(cx, &mut plan),
+                Windowing::Windowed => self.open_windows(cx, &mut plan, shown, display),
             }
         } else if self.windowing == Windowing::Windowed {
             let since = *self.unseen_since.get_or_insert(now);
@@ -1067,6 +1080,8 @@ impl Overlay {
                 plan.actions.push(Action::Show {
                     hwnd: window.hwnd,
                     show: visible,
+                    rect: window.rect,
+                    monitor: slot.monitor,
                 });
                 if visible {
                     slot.stale = true;
@@ -1141,20 +1156,57 @@ impl Overlay {
     fn apply(&mut self, plan: &mut Plan) {
         for action in plan.actions.drain(..) {
             match action {
-                Action::Ready { hwnd, rect, show } => {
+                Action::Ready {
+                    hwnd,
+                    rect,
+                    monitor,
+                } => {
+                    // Still hidden: styled and placed before it ever shows.
                     if let Err(e) = platform::style_widget_window(hwnd) {
                         warn!("widget window not made an overlay window: {e}");
+                        continue;
                     }
-                    platform::place_widget_window(hwnd, rect, show);
+                    platform::place_widget_window(hwnd, rect, false);
+                    let placed = platform::widget_window_rect(hwnd);
+                    if placed != rect || !within(placed, monitor) {
+                        warn!(
+                            ?placed,
+                            ?rect,
+                            "widget window not where it belongs; not shown"
+                        );
+                        continue;
+                    }
+                    platform::show_widget_window(hwnd, true);
                     for slot in &mut self.layout.slots {
                         if let Some(window) = slot.window.as_mut().filter(|w| w.hwnd == hwnd) {
                             window.ready = true;
-                            window.shown = show;
+                            window.shown = true;
                         }
                     }
                 }
                 Action::Place { hwnd, rect } => platform::place_widget_window(hwnd, rect, false),
-                Action::Show { hwnd, show } => platform::show_widget_window(hwnd, show),
+                Action::Show {
+                    hwnd,
+                    show: true,
+                    rect,
+                    monitor,
+                } => {
+                    // Shown only where it belongs: on its monitor, at its place.
+                    if !within(platform::widget_window_rect(hwnd), monitor) {
+                        platform::place_widget_window(hwnd, rect, false);
+                    }
+                    let placed = platform::widget_window_rect(hwnd);
+                    if within(placed, monitor) {
+                        platform::show_widget_window(hwnd, true);
+                    } else {
+                        warn!(
+                            ?placed,
+                            ?monitor,
+                            "widget window outside its monitor; not shown"
+                        );
+                    }
+                }
+                Action::Show { hwnd, .. } => platform::show_widget_window(hwnd, false),
             }
         }
         if plan.handles
@@ -1172,19 +1224,37 @@ impl Overlay {
     }
 }
 
-/// Opens a widget's GPUI window, hidden: a transparent popup that is never focused, at `rect` on its monitor.
+/// Whether `rect` lies within `monitor`.
+fn within(rect: ScreenRect, monitor: ScreenRect) -> bool {
+    rect.width > 0
+        && rect.height > 0
+        && rect.x >= monitor.x
+        && rect.y >= monitor.y
+        && rect.x + rect.width <= monitor.x + monitor.width
+        && rect.y + rect.height <= monitor.y + monitor.height
+}
+
+/// Opens a widget's GPUI window, hidden: a transparent popup that is never focused, for `rect` on the monitor of
+/// scale `scale` (DPI / 96). Its bounds and display are given in GPUI's logical pixels of that monitor, so a window
+/// GPUI showed by itself would show there too; the scheduler shows it only after placing it in physical pixels.
 fn open_widget_window(
     cx: &mut App,
     painted: &Rc<Painted>,
     rect: ScreenRect,
+    scale: f32,
 ) -> Result<WidgetWindow, String> {
-    // GPUI takes bounds in logical pixels; the window is placed again in physical pixels once it exists, so the
-    // DPI used here only sizes its first frame.
+    let logical = |v: i32| px(v as f32 / scale);
+    let bounds = Bounds::new(
+        point(logical(rect.x), logical(rect.y)),
+        size(logical(rect.width), logical(rect.height)),
+    );
+    let display_id = cx
+        .displays()
+        .into_iter()
+        .find(|display| display.bounds().contains(&bounds.center()))
+        .map(|display| display.id());
     let options = WindowOptions {
-        window_bounds: Some(WindowBounds::Windowed(Bounds::new(
-            point(px(rect.x as f32), px(rect.y as f32)),
-            size(px(rect.width as f32), px(rect.height as f32)),
-        ))),
+        window_bounds: Some(WindowBounds::Windowed(bounds)),
         titlebar: None,
         focus: false,
         show: false,
@@ -1192,7 +1262,7 @@ fn open_widget_window(
         is_movable: false,
         is_resizable: false,
         is_minimizable: false,
-        display_id: None,
+        display_id,
         window_background: WindowBackgroundAppearance::Transparent,
         // Overlay windows are never active; GPUI would draw them at most 30 times a second otherwise.
         inactive_frame_interval: None,
@@ -1352,6 +1422,8 @@ pub fn run(launch: Launch) -> Result<(), Box<dyn std::error::Error>> {
 
     // Headless until a widget shows: no GPU device and no display-refresh thread while nothing is drawn.
     let scheduled = Rc::clone(&overlay);
+    // The first pass lays the widgets out and opens the windows of those shown.
+    wake.signal(reason::TIMER);
     gpui_platform::application()
         .with_quit_mode(QuitMode::Explicit)
         .with_windowing(WindowingRequest::Headless)

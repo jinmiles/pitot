@@ -462,6 +462,18 @@ pub fn place_widget_window(raw: isize, rect: ScreenRect, show: bool) {
     }
 }
 
+/// Where a widget window is, in physical pixels, shown or not.
+pub fn widget_window_rect(raw: isize) -> ScreenRect {
+    let rect = window_rect(hwnd_of(raw));
+    let (width, height) = size_of_rect(rect);
+    ScreenRect {
+        x: rect.left,
+        y: rect.top,
+        width,
+        height,
+    }
+}
+
 /// Shows a widget window without activating it, or hides it. Call it while GPUI's app is not borrowed.
 pub fn show_widget_window(raw: isize, show: bool) {
     let command = if show { SW_SHOWNOACTIVATE } else { SW_HIDE };

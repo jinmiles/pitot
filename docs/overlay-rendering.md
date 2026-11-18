@@ -13,89 +13,130 @@ The overlay waits for the sim's shared memory and connects when the replay start
 menu. A build run this way is not installed, so it has no updates ([releases](releases.md)); the start-up hook of
 the installer finds no installation and returns at once.
 
+## GPUI
+
+The widgets are drawn with [GPUI](https://www.gpui.rs/), the same UI framework as the Pitot window: `gpui-pre` and
+`gpui-pre-platform` 0.3.12 ([control-window.md](control-window.md#cost) says where they come from). GPUI
+owns the Direct3D 11 device, DirectWrite, the glyph atlas, and the window thread's message loop. The overlay's own
+code calls none of Direct3D, Direct2D, DirectWrite, or DirectComposition: `render.rs` turns the widgets' drawing
+into GPUI quads, paths, and glyphs, and `platform.rs` keeps the Win32 parts GPUI has no option for (window styles,
+the tray icon, move handles).
+
+The overlay and the Pitot window are still two processes of one executable, each with its own GPUI app; the link
+between them is unchanged ([control-window.md](control-window.md)). Running both in one process is possible now
+that both use GPUI, and left for a later change.
+
 ## Windows
 
-- One window per monitor that has widgets, created over the monitor's bounds in physical pixels (the process is
-  per-monitor DPI aware, so monitors left of or above the primary one, at negative coordinates, work).
-- Extended styles `WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOREDIRECTIONBITMAP | WS_EX_TOPMOST |
-  WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW`: click-through, no redirection surface, always on top, never activated,
-  and not shown in the taskbar. Only a layered window with `WS_EX_TRANSPARENT` is left out of mouse hit
-  testing, so clicks reach the windows below, also those of other processes (answering `WM_NCHITTEST` with
-  `HTTRANSPARENT` passes them only to windows of the same thread). The layer is set to full opacity once,
-  which a layered window needs before it shows; DirectComposition still draws the content.
-- A tray icon owned by a hidden window (class `PitotTray`, which the Pitot window finds to send it commands). A
-  left click opens the [Pitot window](control-window.md); a right click opens the menu: *Open Pitot*, *Move
-  widgets* (checked while moving), *Hide widgets* (checked while the widgets are hidden; hidden widgets are not
-  updated or drawn), *Reload configuration*, and *Quit Pitot*. Windows 11 shows new tray icons in the
+- One GPUI window per widget, sized to the widget's box and placed at its position on its monitor in physical
+  pixels (the process is per-monitor DPI aware, so monitors left of or above the primary one, at negative
+  coordinates, work). A window is made when its widget first shows: hidden, with its bounds and display in GPUI's
+  logical pixels of that monitor. Before it shows, the overlay styles it and places it in physical pixels, reads
+  its rectangle back, and shows it only when it lies where it belongs on its monitor. GPUI keeps asking windows
+  that never showed to paint at every display refresh (tens of thousands of `WM_PAINT` a second for one such
+  window on the lab PC), so a widget that never shows has no window.
+- GPUI makes the window a borderless popup (`WindowKind::PopUp`) with a transparent background: its composition
+  swap chain has per-pixel alpha, and text is antialiased in grayscale, as on any transparent GPUI window. The
+  overlay then sets, on the window's handle (`raw-window-handle`): the style `WS_POPUP`, without the caption GPUI's
+  frameless windows keep (which gives them the desktop's shadow and rounded corners), square corners
+  (`DWMWA_WINDOW_CORNER_PREFERENCE`), and the extended styles `WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST |
+  WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW`: click-through, always on top, never activated, and not in the taskbar. Only a
+  layered window with `WS_EX_TRANSPARENT` is left out of mouse hit testing, so clicks reach the windows below, also
+  those of other processes. The layer is set to full opacity once, which a layered window needs before it shows;
+  GPUI's swap chain still draws the content. GPUI is told the windows are never focused and never to slow their
+  frames down for being inactive (`inactive_frame_interval: None`).
+- Win32 calls on GPUI's windows (styles, placement, showing) run between GPUI's updates: their window procedures
+  run GPUI's handlers, which borrow GPUI's app, and calling them inside an update panics.
+- Moving a widget moves its window; resizing it resizes the window, and GPUI draws it at the new size. Hiding a
+  widget hides its window. A widget shown once keeps its window while any widget shows.
+- With no widget shown for 2 s (the sim off, in the garage, *Hide widgets*), every widget window closes and GPUI
+  goes headless (`App::request_windowing`), which releases its GPU device and stops its display-refresh thread.
+  The overlay starts headless and becomes windowed again when a widget is to show; making the device and the
+  windows takes a frame or two.
+- A tray icon owned by a hidden window (class `PitotTray`, which the Pitot window finds to send it commands; never
+  shown). GPUI's message loop (`GetMessageW` for the whole thread) dispatches its messages, as it does the move
+  handles'. A left click opens the [Pitot window](control-window.md); a right click opens the menu: *Open Pitot*,
+  *Move widgets* (checked while moving), *Hide widgets* (checked while the widgets are hidden; hidden widgets are
+  not updated or drawn), *Reload configuration*, and *Quit Pitot*. Windows 11 shows new tray icons in the
   hidden-icons area next to the clock until they are pinned.
-- While moving widgets, each widget gets a move handle: a small layered top-level window over it, tinted at
-  28% opacity with a thin frame and a grip of dots at the bottom right, that never takes the focus. Only the
-  handles take the mouse, so clicks elsewhere still pass through. The handle answers `WM_SETCURSOR` with the
-  move or resize cursor for the spot under the pointer, and captures the mouse while the button is held.
-  Dragging the inside moves the handle and the widget's composition visuals (no redraw). Dragging an edge or a
-  corner resizes the handle, within its monitor and down to the widget's `min_size()`; the app calls the
-  widget's `resize`, gives its layers new composition surfaces at the new size (`Renderer::resize_layer`, once
-  per batch of mouse messages, since a surface cannot change its size), and draws them whole. Releasing the button
-  saves what changed ([configuration](configuration.md#moving-and-resizing-widgets)). The overlay windows
-  themselves stay click-through. Outside move mode no handle exists, and widgets keep the surfaces they were made
-  with.
-- `WM_CLOSE` to any of these windows quits like Quit, so tools that close apps the usual way (End task, the
-  benchmark runner) end the overlay cleanly and its exit line with the data counters is written. The Pitot
-  window, if open, closes with it.
+- While moving widgets, each widget gets a move handle: a small layered top-level window over its window, tinted
+  at 28% opacity with a thin frame and a grip of dots at the bottom right, that never takes the focus. Only the
+  handles take the mouse, so clicks elsewhere still pass through. The handle answers `WM_SETCURSOR` with the move
+  or resize cursor for the spot under the pointer, and captures the mouse while the button is held. Dragging the
+  inside moves the handle and the widget's window. Dragging an edge or a corner resizes the handle, within its
+  monitor and down to the widget's `min_size()`; the app calls the widget's `resize`, resizes its window, and GPUI
+  draws it. Releasing the button saves what changed ([configuration](configuration.md#moving-and-resizing-widgets)).
+  The widget windows themselves stay click-through. The handles are made after the widget windows, so they are
+  above them.
+- `WM_CLOSE` to the tray window or to a widget window quits like Quit, so tools that close apps the usual way (End
+  task, the benchmark runner) end the overlay cleanly and its exit line with the data counters is written. The
+  Pitot window, if open, closes with it.
 
-## Rendering
+## Drawing
 
-- One D3D11 device (hardware, falling back to WARP), shared by Direct2D, DirectWrite, and a DirectComposition
-  desktop device.
-- Each window has a composition target and a root visual. Each widget has its own visual and surface (a
-  `Layer`), positioned in the window by offset. Moving or hiding a widget changes the visual tree only.
-- A redraw passes the smallest update rectangle to `IDCompositionSurface::BeginDraw`, clips to it, clears it to
-  transparent, and draws in layer pixels.
-- The device commits only when something was drawn or a visibility changed.
-- Widgets draw through `Canvas` (rectangles, lines, text) and never touch COM directly. All rendering `unsafe` is
-  in the `render` module and all windowing `unsafe` in `platform`, each block with a `// SAFETY:` comment.
-- `[general] text_size` ([configuration](configuration.md#text-size)) sets a text scale, `text_size / 100`. The
-  text formats and the glyph atlas are made at `TEXT_SIZES` times the scale, and a widget that scales with the text
-  (`Widget::scales_with_text`, every widget but the input trace) is given its box divided by the scale through
-  `Widget::resize` and draws in those widget pixels: the canvas maps each coordinate to layer pixels, so a whole
-  widget pixel lands on a whole layer pixel and edges sharp at the default stay sharp, and a one pixel line keeps a
-  pixel. Text sizes are asked for in widget pixels and pick the same of `TEXT_SIZES` as before. At a scale other
-  than 1, text whose box reaches past the layer is not drawn, and a number from the atlas wider than its box is not
-  drawn rather than drawn with glyphs missing; at 1 nothing of this runs, so the default draws exactly as before.
-  A change of the scale resizes every widget, makes the formats and atlas again, empties the layout cache, and
-  redraws; nothing is made per frame while it stays.
+- Each widget window's root view is one `canvas` element over the whole window. Its paint draws the widget's
+  layers bottom to top, each clipped to its rectangle (`Window::with_content_mask`), through `Canvas`
+  (rectangles, lines, circles, paths, and text). Widgets never touch GPUI directly.
+- GPUI draws whole windows: when a widget's update reports any change, the scheduler notifies its view
+  (`cx.notify()`), and GPUI draws that window again, every layer of it, at its next display refresh. Windows of
+  widgets that did not change are not drawn. There are no partial updates; a `Redraw::Area` from a widget only
+  says that something changed.
+- `Canvas::fill` and `fill_background` are GPUI quads, as are level and upright lines (so they stay as sharp as
+  fills). Other lines and polylines (`Canvas::stroke`, `polyline`) are GPUI paths with lyon's tessellation, flat
+  ends for lines and round joins and ends for polylines. Circles are round quads: a border for a stroke, a fill
+  for a disk.
+- `[general] text_size` ([configuration](configuration.md#text-size)) sets a text scale, `text_size / 100`. A widget
+  that scales with the text (`Widget::scales_with_text`, every widget but the input trace) is given its box divided
+  by the scale through `Widget::resize` and draws in those widget pixels: the canvas maps each coordinate to screen
+  pixels so a whole widget pixel lands on a whole screen pixel and edges sharp at the default stay sharp, a one
+  pixel line keeps a pixel, and then to GPUI's logical pixels at the window's DPI. Text sizes are asked for in
+  widget pixels and pick the next of `TEXT_SIZES` (12, 14, 18, 26) up, times the scale. At a scale other than 1,
+  text whose box reaches past the layer is not drawn, and a number (digits, signs, separators, units) wider than its
+  box is not drawn rather than drawn with digits missing. A change of the scale resizes every widget and redraws.
 - Backgrounds (a widget's panel, a band behind its content) are drawn with `Canvas::fill_background`, which
   scales the color's own alpha by `[general] background_opacity` ([configuration](configuration.md#background-opacity));
   everything else uses `Canvas::fill` and stays as it is. A change of the value redraws every widget once.
-- A rendering error, such as device loss, drops the renderer, waits 500 ms, rebuilds the device, every window
-  target, and every layer, and redraws all widgets.
-- A configuration change keeps the device and rebuilds only window targets and layers. Recreating the D3D11
-  device each time leaked about 4.6 MB of driver memory per reload.
+- GPUI handles device loss itself (its display-refresh thread checks the device and rebuilds what it draws with).
+- A configuration change closes the widget windows and makes the widgets again; their windows open as they show.
+- `pitot` built with `--features alloc-count` counts the process's heap allocations (Rust code only) and logs them
+  at exit, also per widget update and per paint ([below](#development-measurement)).
 
 ## Text
 
-- Numbers, signs, separators, and units (`0-9 . , : + - / # % k L` and space) come from a glyph atlas built per
-  text size when the device is created: each glyph is rendered once in white, and drawing it is a colored
-  `FillOpacityMask` from the atlas, with no DirectWrite work per frame.
-- Stable text without digits (names, labels) uses an `IDWriteTextLayout` cached per string, size, alignment, and
-  box, created on first use and drawn with `DrawTextLayout`. A string drawn in more than one box (an arrow in two
-  columns, `PIT` in two widgets) keeps a layout for each. The cache is cleared past 512 layouts.
-- Text that mixes digits with letters (a tick counter, "46.0 laps") changes too often to cache and is drawn with
-  `DrawText` directly. Caching it filled the cache every couple of minutes and made private bytes swing between
-  16 and 23.5 MB; drawn directly, they stay flat.
-- Text is clipped to its box, so long names do not run into the next column.
+- Text is laid out by GPUI's text system (DirectWrite underneath), in Segoe UI semibold, one line per call, and
+  painted glyph by glyph (`Window::paint_glyph`) from GPUI's glyph atlas. GPUI keeps the layouts of the last frame
+  and reuses them for text that did not change, and rasterizes each glyph once per size.
+- Text is vertically centered in its box by the font's ascent and descent, as DirectWrite centers a paragraph, on a
+  whole screen pixel; left, centered, or right in it; and clipped to it, so long names do not run into the next
+  column. `Canvas::fits` measures with the same layout.
 
 ## Schedule
 
-The render thread sleeps in `MsgWaitForMultipleObjectsEx` on a high-resolution waitable timer
-(`CREATE_WAITABLE_TIMER_HIGH_RESOLUTION`; `timeBeginPeriod` is never called). It wakes when the next widget is due
-or a window message arrives. Each widget has its own interval, says whether it needs a full or partial redraw or
-none, and is hidden outside its display states (most widgets show only while driving).
+The data and session threads are the overlay's own ([pipeline](overlay-pipeline.md)). On GPUI's thread one task,
+the scheduler, sleeps until something wakes it (`wake.rs`): a reason bit is set and the task is woken, without a
+lock or an allocation on the waking side; GPUI's executor then posts one message to its thread. It wakes for:
 
-Only shown widgets set the timer. A hidden widget keeps its last due time, so it draws at once when it appears.
-With no widget shown, the thread wakes once per second while the sim is not running, and four times per second
-while it is connected (in the garage, for example), so widgets appear within a quarter second of getting in the
-car.
+- **ticks**: while the sim is connected and a shown widget is due by the next tick, the data thread wakes it once
+  for the next tick it publishes, so updates follow the data (the 60 Hz input trace updates on every tick, a 10 Hz
+  widget on every sixth). Each wake disarms the next, so a tick wakes the scheduler only when it asked for it.
+- **its timer**: a window timer on the tray window (`SetTimer`, about 16 ms resolution, no thread of its own, never
+  `timeBeginPeriod`): the next due widget when ticks do not drive it, 50 ms after the next tick as a fallback when
+  they do, once per second with the sim off and no widget shown, four times per second while connected with none
+  shown (so widgets appear promptly when the driver gets in the car), the reload of a changed file, and the 2 s
+  before going headless.
+- **messages**: connection changes, session info, and tire samples from the data and session threads.
+- **commands**: the tray menu and the Pitot window; drags of move handles; changes in the configuration directory,
+  which a thread of its own waits on (the directory also holds the log, so only a changed `config.toml` reloads).
+
+Each pass takes those, polls the pipeline, updates each shown widget that is due (with 4 ms of slack, as ticks come
+a little early or late), notifies GPUI of the widgets that changed, and leaves Win32 calls on windows for after
+GPUI's update. Hidden widgets are not updated; they keep their last due time, so they draw at once when they
+appear.
+
+GPUI draws on its own schedule: while it is windowed, a display-refresh thread waits for each composition
+(`DwmFlush`) and invalidates every GPUI window, and GPUI draws the windows that were notified and presents them.
+That thread and the paint messages it causes wake the process at the display's refresh rate whenever any widget
+shows, whether or not anything changed. Going headless when nothing shows stops them.
 
 ## Widgets
 
@@ -109,7 +150,7 @@ wind: WindWidget = Spec::new("Wind", 1460, 370).size(200, 170).rate(5.0).on(),
 module; the `Spec` is its label in the Pitot window, its default place (physical pixels from the top-left of the
 primary monitor), size, and update rate, and `.on()` when it is on by default. From the list come the module
 declarations, the defaults and the names the configuration accepts, the Pitot window's switches, the widgets the
-render thread makes for a configuration (`Layout::build`, in the list's order), and the variables the pipeline
+scheduler makes for a configuration (`Layout::build`, in the list's order), and the variables the pipeline
 registers. The `status` widget is a small panel with the connection state, tick, car count, and session, shown in
 every display state.
 
@@ -223,30 +264,26 @@ What checks the new widget without more code:
   turn on exactly the four reference widgets.
 - `cargo test -p pitot-overlay --features alloc-check --test alloc_check`:
   `every_widget_and_the_histories_do_not_allocate_per_update` makes every widget of the list and updates them
-  through a light race of three cars, counting allocations; with a render device it draws them too, at their
-  default size, their smallest, twice the default, and at the largest and smallest text sizes. A widget whose work
+  through a light race of three cars, counting allocations, at their default size, their smallest, twice the
+  default, and at the largest and smallest text sizes. Drawing is GPUI's and allocates there, so the test does not
+  draw; `pitot --features alloc-count` measures what drawing allocates in the running overlay. A widget whose work
   needs other data adds its own test there.
 
 A widget on by default joins the benchmark's measured set unless `benchmarks/pitot/four.toml` and `inputs.toml`
 turn it off; the benchmark test fails until both do (then copy them to the `*.local.toml` files with `monitor` set).
 Such a widget may also get a section in `DEFAULT_TOML`, at the end.
 
-The rules for every widget stay: no allocation per update or draw after warm-up, a redraw only of what changed,
-its own update rate, `visible()` for the display states it shows in, its background through
-`Canvas::fill_background` (at the alpha of its `opacity`), and no logging per update.
+The rules for every widget stay: no allocation per update after warm-up (its own drawing code should not allocate
+either; GPUI does, as it draws), a redraw only when something it shows changed, its own update rate, `visible()`
+for the display states it shows in, its background through `Canvas::fill_background` (at the alpha of its
+`opacity`), and no logging per update.
 
 ## Development measurement
 
-Lab PC (i7-9700, RTX 3090), release build, replaying the public AI race capture at 60 Hz with the status widget
-updating at 4 Hz. Measured over 15 s with the process CPU time counter, not with `pitot-bench`:
+Performance is measured with `pitot-bench` at each release, on the release build. For development:
 
-- CPU 31 ms over 15.0 s: 0.21% of one core, 0.026% of all eight cores
-- Private bytes 12.1 MB
-- 7 threads
-
-These are development numbers; official numbers come from `pitot-bench` runs on the home PC.
-
-## Not yet
-
-- Widget placement is a built-in default until the configuration file exists.
-- The binary is a console application for now, so errors are visible during development.
+- `cargo build -p pitot --features alloc-count` builds the overlay with a counting allocator. At exit it logs
+  `allocations at exit` with the total and the rate per second of the whole process, the rate on GPUI's thread,
+  and the allocations during widget updates and paints with their counts and the allocations per paint. It counts
+  Rust's heap only: Direct3D, DirectWrite, and the driver allocate natively and are not counted.
+- Wake-ups per thread can be read without ETW from the PDH counter `\Thread(pitot*)\Context Switches/sec`.

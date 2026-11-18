@@ -45,11 +45,11 @@ jobs:
           cargo test -p pitot-irsdk --features alloc-check --test alloc_check
           cargo test -p pitot-overlay --features alloc-check --test alloc_check
 
-      # pitot-bench must not depend on pitot-overlay; pitot-irsdk depends on neither. Only the Pitot window
-      # (pitot-control) uses the GPUI framework (the `gpui-pre` crates), and only the executable (pitot) links the
-      # window in; the overlay library stays free of both, so the overlay process never starts GPUI. The installer's
-      # library (velopack) is used only by the executable's start-up hook and the window's updates, so nothing in
-      # the overlay's library can reach the network, and it brings no async runtime of its own.
+      # pitot-bench must not depend on pitot-overlay; pitot-irsdk depends on neither, and neither uses the GPUI
+      # framework (the `gpui-pre` crates). The overlay library draws its widgets with GPUI, but never depends on the
+      # Pitot window (pitot-control), which only the executable (pitot) links in. The installer's library (velopack)
+      # is used only by the executable's start-up hook and the window's updates, so nothing in the overlay's library
+      # can reach the network. Besides GPUI's own executor, the overlay brings no async runtime.
       - name: Dependency direction
         shell: bash
         run: |
@@ -68,6 +68,6 @@ jobs:
           }
           check pitot-bench pitot-overlay pitot-control pitot gpui-pre velopack
           check pitot-irsdk pitot-bench pitot-overlay pitot-control pitot gpui-pre velopack
-          check pitot-overlay pitot-control pitot gpui-pre velopack
+          check pitot-overlay pitot-control pitot velopack tokio async-std smol async-io async-executor mio
           check pitot-control pitot
           check velopack tokio async-std smol async-io async-executor mio
