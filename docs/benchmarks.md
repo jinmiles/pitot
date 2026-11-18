@@ -30,7 +30,18 @@ target/release/pitot-bench report bench-results/tier-a-race/series/<series-id>.j
 The configurations put widgets on the primary monitor. To run on another monitor, for example a virtual display
 so the overlay does not cover the screen, copy the configuration and the plan to `*.local.toml` files, which git
 ignores, add `monitor = <n>` to each widget, and point the copied plan at the copied configuration. Keep the
-monitor's resolution and scaling the same as the primary monitor's, and note the change with the results.
+monitor's resolution and scaling the same as the primary monitor's, and note the change with the results. When
+`four.toml` or `inputs.toml` changes, make the local copies again.
+
+## Changes to the reference set
+
+The reference set follows the widgets' default rates, so series measured with an earlier `four.toml` ran some
+widgets at other rates. Compare a series only with series of the same set:
+
+| Change | Before | Since |
+|---|---|---|
+| Every widget at least 10 Hz (#181) | standings at 2 Hz | standings at 10 Hz |
+| Fuel widget at 30 Hz by default (#149) | fuel at 1 Hz | fuel at 30 Hz |
 
 ## Before an official run
 

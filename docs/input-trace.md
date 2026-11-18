@@ -37,4 +37,4 @@ lines so it stays sharp at any size and angle.
 
 The trace is the most expensive widget at 60 Hz. Setting `rate_hz = 30` halves the screen updates and costs about
 a third of the CPU, still drawing every sample. The defaults favor a smooth input trace and update the relative and
-standings less often (10 Hz and 2 Hz).
+standings less often (10 Hz, the slowest any widget updates).
