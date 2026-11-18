@@ -455,7 +455,7 @@ impl Panel {
         cx: &mut Context<Self>,
     ) {
         let slider = self.slider_mut(setting);
-        window.focus(&slider.focus);
+        window.focus(&slider.focus, cx);
         slider.adjusting = Some(Adjusting::Mouse);
         self.drag_to(setting, x, cx);
         cx.notify();
