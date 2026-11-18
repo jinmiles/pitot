@@ -2,13 +2,16 @@
 //! runs that code, does not load them at start. Each loads on the first call into it, in the window's process.
 
 /// Imported only by code the overlay's process never runs. The window's UI framework: `TaskDialogIndirect`, the DWM
-/// calls, and `u_strlen` (which also brings in `icu.dll`). The window's updates: sockets for its HTTP client, and
-/// `BCryptGenRandom` for its TLS (which also brings in `cryptbase.dll`). The overlay's own imports must not be
-/// listed here.
+/// calls, `u_strlen` (which also brings in `icu.dll`), UI Automation for its accessibility tree (called only when a
+/// screen reader or another UI Automation client asks a window), and `timeBeginPeriod` (only while it blocks with a
+/// timeout). The window's updates: sockets for its HTTP client, and `BCryptGenRandom` for its TLS (which also brings
+/// in `cryptbase.dll`). The overlay's own imports must not be listed here.
 const WINDOW_ONLY_DLLS: &[&str] = &[
     "comctl32.dll",
     "dwmapi.dll",
     "icuuc.dll",
+    "uiautomationcore.dll",
+    "winmm.dll",
     "ws2_32.dll",
     "bcrypt.dll",
 ];
