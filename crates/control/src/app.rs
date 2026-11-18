@@ -2,8 +2,8 @@
 
 use futures::StreamExt as _;
 use gpui::{
-    App, AppContext as _, Application, Bounds, Pixels, TitlebarOptions, Window, WindowBounds,
-    WindowKind, WindowOptions, point, px, size,
+    App, AppContext as _, Bounds, Pixels, TitlebarOptions, Window, WindowBounds, WindowKind,
+    WindowOptions, point, px, size,
 };
 use pitot_overlay::config;
 use pitot_overlay::platform::{self, ControlLink, SingleInstance};
@@ -34,7 +34,7 @@ pub fn run() {
         events: update_sender,
     };
 
-    Application::new().run(move |cx: &mut App| {
+    gpui_platform::application().run(move |cx: &mut App| {
         let (bounds, display_id) = initial_bounds(cx);
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -76,7 +76,7 @@ pub fn run() {
             .update(cx, |_, window, _| window.is_window_active())
             .unwrap_or(false);
         ControlLink::keep_above_widgets(active);
-        cx.on_window_closed(|cx| cx.quit()).detach();
+        cx.on_window_closed(|cx, _| cx.quit()).detach();
         cx.spawn(async move |cx| {
             while let Some(event) = events.next().await {
                 let close = handle
@@ -89,7 +89,7 @@ pub fn run() {
                     })
                     .unwrap_or(true);
                 if close {
-                    let _ = cx.update(|cx| cx.quit());
+                    cx.update(|cx| cx.quit());
                     break;
                 }
             }
@@ -108,7 +108,7 @@ pub fn run() {
                     .unwrap_or(true);
                 // The installer waits for this process to exit.
                 if close {
-                    let _ = cx.update(|cx| cx.quit());
+                    cx.update(|cx| cx.quit());
                     break;
                 }
             }

@@ -163,13 +163,25 @@ draws with Direct3D 11 and DirectWrite and runs its own task executors. That is 
 own: the overlay's process never starts GPUI, its executors, or its windows. While open, the window wakes with the
 display's refresh to check whether anything needs drawing, and draws only when something changed.
 
+GPUI comes from crates.io as `gpui-pre` 0.3.12 with `gpui-pre-platform` 0.3.12, pinned exactly (`=0.3.12`) as
+gpui-kit pins them. They are snapshots of Zed's `gpui` crates (`zed-industries/zed` at `d2a4fb6`, Apache-2.0, with
+their license file in the package), published on crates.io by the gpui-component maintainer (`huacnlee`), not by
+Zed Industries. On Windows they bring no HTTP client, TLS, or async runtime: `gpui-pre-http-client` holds only
+HTTP types, and the executors are GPUI's own (`async-task` and `flume` on Windows thread pool callbacks and the
+window thread's messages). Its HLSL shaders are compiled at build time in release builds with the Windows SDK's
+`fxc.exe` (found in `PATH`, the SDK, or `GPUI_FXC_PATH`), as GPUI 0.2.2 did, so release binaries carry their
+bytecode; debug builds compile them at run time with `d3dcompiler_47.dll`, which Windows ships. The
+`runtime_shaders` feature that gpui-kit enables only changes macOS.
+
 The overlay and the window are one executable, so the overlay's process maps the window's code without running
 it. Compared with the overlay's own executable in 0.1.3, measured on the lab PC:
 
 - DLLs: the system DLLs that only GPUI imports (`comctl32.dll` for `TaskDialogIndirect`, `dwmapi.dll`, and
   `icuuc.dll`, which also loads `icu.dll`) are delay-loaded (`crates/app/build.rs`), so they load on first use,
   in the window's process. The overlay's process loads the same 49 modules as before; without the
-  delay-loading it loaded those four more and started about 1.4 ms later.
+  delay-loading it loaded those four more and started about 1.4 ms later. GPUI 0.3.12 also imports
+  `uiautomationcore.dll` (its accessibility tree, through AccessKit) and `winmm.dll` (`timeBeginPeriod`, only while
+  it blocks with a timeout); both are delay-loaded too, and the overlay's process does not load them.
 - Static initializers: GPUI registers its built-in actions at process start (a few pointers in a list). Nothing
   starts a thread: the overlay's process has the same 7 threads as before, and reaches its first log line in
   the same 14 ms after the process is created.
@@ -179,6 +191,9 @@ it. Compared with the overlay's own executable in 0.1.3, measured on the lab PC:
   them out. Thread-local storage grows by 0.3 KB per thread.
 - CPU: the same within noise, 31.23 ms/s before and 31.41 ms/s after (means of six alternating 60 s runs of
   the four reference widgets in a replay; the differences of the pairs ranged from -0.32 to +1.04 ms/s).
+
+The numbers above were measured with GPUI 0.2.2. The window moved to GPUI 0.3.12 after 0.1.5; its numbers, and the
+overlay's with it, are measured again at the next release.
 
 GPUI's Windows manifest is in the executable: per-monitor DPI awareness (v2), which the overlay also sets at start,
 and version 6 of the common controls, which the overlay does not use.

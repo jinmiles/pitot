@@ -14,8 +14,12 @@ serde = { version = "1", features = ["derive"] }
 toml = { version = "1.2.1", default-features = false, features = ["std", "serde", "parse"] }
 
 [target."cfg(windows)".dependencies]
-# The window's UI framework. It runs only in the window's process (`pitot.exe --window`), never in the overlay's.
-gpui = { version = "0.2.2", default-features = false, features = ["windows-manifest"] }
+# The window's UI framework: Zed's GPUI, as the `gpui-pre` snapshot that gpui-kit pins. It runs only in the window's
+# process (`pitot.exe --window`), never in the overlay's.
+gpui = { package = "gpui-pre", version = "=0.3.12", default-features = false, features = ["windows-manifest"] }
+# GPUI's Windows platform, which the snapshot keeps in a crate of its own. Its default feature only matters on the
+# web.
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.12", default-features = false }
 # Both already in gpui's tree: a channel from the link thread to the UI, and the window's HWND.
 futures = "0.3"
 raw-window-handle = "0.6"
