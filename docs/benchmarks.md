@@ -43,6 +43,13 @@ widgets at other rates. Compare a series only with series of the same set:
 | Every widget at least 10 Hz (#181) | standings at 2 Hz | standings at 10 Hz |
 | Fuel widget at 30 Hz by default (#149) | fuel at 1 Hz | fuel at 30 Hz |
 
+## The renderer
+
+Since #183 the overlay draws its widgets with GPUI: a window per widget, GPUI's own display-refresh thread while
+any widget shows, and none of it with no widget shown ([rendering](overlay-rendering.md)). Series measured before
+that measured the Direct2D renderer and are not comparable with later ones; performance is measured at each
+release.
+
 ## Before an official run
 
 - Run on the machine the official results come from, with the fixed conditions of the project plan: power plan,

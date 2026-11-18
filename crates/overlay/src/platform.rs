@@ -1,14 +1,19 @@
-//! Win32 platform layer: DPI awareness, monitors, overlay windows, the message loop, timers, the tray icon, the
-//! single-instance lock, and the [`link`] to the Pitot window.
+//! Win32 platform layer: DPI awareness, monitors, the widget windows' styles and placement, the tray icon and its
+//! timer, the move handles, the single-instance lock, the configuration watch, and the [`link`] to the Pitot
+//! window.
 //!
-//! All Win32 `unsafe` for windowing lives here; callers use the safe types below.
+//! GPUI owns the message loop: its `GetMessageW` loop dispatches the messages of every window of its thread, so
+//! the tray window and the move handles, created on that thread, get theirs there. Their window procedures
+//! queue what happened and wake the scheduler ([`set_wake`]); they never call into GPUI. All Win32 `unsafe` for
+//! windowing lives here; callers use the safe types below.
 
 mod link;
 mod monitors;
 
 use std::cell::{Cell, RefCell};
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
+use std::thread::JoinHandle;
 use std::time::Duration;
 
 pub use link::{
@@ -20,7 +25,10 @@ pub use monitors::{Monitor, displays, monitors};
 
 use windows::Win32::Foundation::{
     COLORREF, CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE, HINSTANCE, HWND, LPARAM,
-    LRESULT, POINT, RECT, WAIT_OBJECT_0, WAIT_TIMEOUT, WPARAM,
+    LRESULT, POINT, RECT, WAIT_OBJECT_0, WPARAM,
+};
+use windows::Win32::Graphics::Dwm::{
+    DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND, DwmSetWindowAttribute,
 };
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, CreateSolidBrush, EndPaint, FillRect, FrameRect, GetMonitorInfoW, GetStockObject,
@@ -34,8 +42,7 @@ use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::SystemInformation::GetLocalTime;
 use windows::Win32::System::Threading::{
-    CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, CreateMutexW, CreateWaitableTimerExW, SetWaitableTimer,
-    TIMER_ALL_ACCESS,
+    CreateEventW, CreateMutexW, INFINITE, SetEvent, WaitForMultipleObjects,
 };
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
@@ -47,20 +54,22 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CS_HREDRAW, CS_VREDRAW, CreatePopupMenu, CreateWindowExW, DefWindowProcW,
-    DestroyMenu, DestroyWindow, DispatchMessageW, GetClientRect, GetCursorPos, GetWindowRect,
-    HTCLIENT, HTTRANSPARENT, HWND_TOPMOST, IDC_SIZEALL, IDC_SIZENESW, IDC_SIZENS, IDC_SIZENWSE,
-    IDC_SIZEWE, IDI_APPLICATION, LWA_ALPHA, LoadCursorW, LoadIconW, MA_NOACTIVATE, MF_CHECKED,
-    MF_SEPARATOR, MF_STRING, MSG, MWMO_INPUTAVAILABLE, MsgWaitForMultipleObjectsEx, PM_REMOVE,
-    PeekMessageW, PostQuitMessage, QS_ALLINPUT, RegisterClassExW, SW_SHOWNOACTIVATE,
-    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetCursor, SetForegroundWindow,
-    SetLayeredWindowAttributes, SetMenuDefaultItem, SetWindowPos, ShowWindow, TPM_NONOTIFY,
-    TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, WINDOW_EX_STYLE, WM_APP,
-    WM_CAPTURECHANGED, WM_CLOSE, WM_CONTEXTMENU, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_NCHITTEST, WM_PAINT, WM_QUIT, WM_RBUTTONUP, WM_SETCURSOR,
-    WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW,
-    WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+    DestroyMenu, DestroyWindow, GWL_EXSTYLE, GWL_STYLE, GetClientRect, GetCursorPos,
+    GetWindowLongPtrW, GetWindowRect, HTCLIENT, HWND_TOPMOST, IDC_SIZEALL, IDC_SIZENESW,
+    IDC_SIZENS, IDC_SIZENWSE, IDC_SIZEWE, IDI_APPLICATION, KillTimer, LWA_ALPHA, LoadCursorW,
+    LoadIconW, MA_NOACTIVATE, MF_CHECKED, MF_SEPARATOR, MF_STRING, PostQuitMessage,
+    RegisterClassExW, SW_HIDE, SW_SHOWNOACTIVATE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
+    SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SetCursor, SetForegroundWindow,
+    SetLayeredWindowAttributes, SetMenuDefaultItem, SetTimer, SetWindowLongPtrW, SetWindowPos,
+    ShowWindow, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, WINDOW_EX_STYLE,
+    WM_APP, WM_CAPTURECHANGED, WM_CLOSE, WM_CONTEXTMENU, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN,
+    WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_PAINT, WM_RBUTTONUP, WM_SETCURSOR, WM_TIMER,
+    WNDCLASSEXW, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_APPWINDOW, WS_EX_LAYERED,
+    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 use windows::core::{PCWSTR, w};
+
+use crate::wake::{Wake, reason};
 
 /// A Win32 failure, with the call that failed.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -88,7 +97,6 @@ fn last_error(call: &'static str) -> PlatformError {
     error(call, &windows::core::Error::from_thread())
 }
 
-/// Opts the process into per-monitor DPI awareness, so window and monitor coordinates are physical pixels.
 /// Local wall-clock time, for log lines.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LocalTime {
@@ -127,6 +135,7 @@ pub fn documents_dir() -> Option<std::path::PathBuf> {
     }
 }
 
+/// Opts the process into per-monitor DPI awareness, so window and monitor coordinates are physical pixels.
 pub fn enable_dpi_awareness() {
     // SAFETY: plain process-wide setting with a predefined context value. It fails harmlessly when already
     // set, for example by a manifest.
@@ -179,8 +188,23 @@ thread_local! {
     static COMMANDS: RefCell<Vec<TrayCommand>> = const { RefCell::new(Vec::new()) };
 }
 
+/// The scheduler's wake-up, which the window procedures here signal: set once at start with [`set_wake`].
+static WAKE: OnceLock<Arc<Wake>> = OnceLock::new();
+
+/// Sets the wake-up that tray commands, move-handle drags, and the tray timer signal.
+pub fn set_wake(wake: Arc<Wake>) {
+    let _ = WAKE.set(wake);
+}
+
+fn wake(reasons: u32) {
+    if let Some(wake) = WAKE.get() {
+        wake.signal(reasons);
+    }
+}
+
 fn push_command(command: TrayCommand) {
     COMMANDS.with(|commands| commands.borrow_mut().push(command));
+    wake(reason::COMMAND);
 }
 
 /// Takes the oldest command waiting, if any. Quit ends the message loop instead.
@@ -198,8 +222,13 @@ unsafe extern "system" fn window_proc(
     lparam: LPARAM,
 ) -> LRESULT {
     match msg {
-        // Layered and transparent windows get no mouse input at all; this only covers windows of this thread.
-        WM_NCHITTEST => LRESULT(HTTRANSPARENT as isize),
+        // The scheduler's timer (see `Tray::set_timer`), once.
+        WM_TIMER if wparam.0 == TIMER_ID => {
+            // SAFETY: stops a timer of this thread's own window.
+            let _ = unsafe { KillTimer(Some(hwnd), TIMER_ID) };
+            wake(reason::TIMER);
+            LRESULT(0)
+        }
         // Closing any window quits like the tray's Quit, so tools that close apps the usual way end the overlay
         // cleanly instead of leaving it running without that window.
         WM_CLOSE => {
@@ -315,17 +344,7 @@ fn instance() -> Result<HINSTANCE, PlatformError> {
         .map_err(|e| error("GetModuleHandleW", &e))
 }
 
-/// The class of the overlay windows, registered on first use.
-fn class() -> Result<PCWSTR, PlatformError> {
-    static REGISTERED: OnceLock<Result<(), PlatformError>> = OnceLock::new();
-    let name = w!("PitotOverlay");
-    REGISTERED
-        .get_or_init(|| register_class(name, Some(window_proc)))
-        .clone()?;
-    Ok(name)
-}
-
-/// The class of the tray window: the overlay windows' behavior under a name the Pitot window looks for.
+/// The class of the tray window, registered on first use, under a name the Pitot window looks for.
 fn tray_class() -> Result<PCWSTR, PlatformError> {
     static REGISTERED: OnceLock<Result<(), PlatformError>> = OnceLock::new();
     REGISTERED
@@ -334,43 +353,26 @@ fn tray_class() -> Result<PCWSTR, PlatformError> {
     Ok(TRAY_CLASS)
 }
 
-/// Extended styles of the overlay windows. Only `WS_EX_LAYERED` together with `WS_EX_TRANSPARENT` takes a
-/// window out of mouse hit testing, so clicks reach the windows below, also those of other processes.
-/// `WS_EX_NOREDIRECTIONBITMAP` leaves the content to DirectComposition.
-const OVERLAY_STYLE: WINDOW_EX_STYLE = WINDOW_EX_STYLE(
-    WS_EX_LAYERED.0
-        | WS_EX_TRANSPARENT.0
-        | WS_EX_NOREDIRECTIONBITMAP.0
-        | WS_EX_TOPMOST.0
-        | WS_EX_NOACTIVATE.0
-        | WS_EX_TOOLWINDOW.0,
-);
-
-/// A borderless, transparent, click-through, topmost window that never takes focus.
+/// A top-level window that is never shown, for messages: the tray icon's, the Pitot window's, and the timer's.
 #[derive(Debug)]
-pub struct OverlayWindow {
+struct HiddenWindow {
     hwnd: HWND,
 }
 
-impl OverlayWindow {
-    /// Creates a window covering `rect` and shows it without activating it.
-    pub fn create(rect: ScreenRect) -> Result<Self, PlatformError> {
-        Self::create_in(class()?, rect)
-    }
-
-    fn create_in(class: PCWSTR, rect: ScreenRect) -> Result<Self, PlatformError> {
-        let style = OVERLAY_STYLE;
-        // SAFETY: the class is registered and all strings are static; no creation parameter is passed.
+impl HiddenWindow {
+    fn create(class: PCWSTR) -> Result<Self, PlatformError> {
+        // SAFETY: the class is registered and all strings are static; no creation parameter is passed. Created
+        // without WS_VISIBLE and never shown.
         let hwnd = unsafe {
             CreateWindowExW(
-                style,
+                WS_EX_TOOLWINDOW,
                 class,
                 w!("Pitot"),
                 WS_POPUP,
-                rect.x,
-                rect.y,
-                rect.width,
-                rect.height,
+                0,
+                0,
+                0,
+                0,
                 None,
                 None,
                 Some(instance()?),
@@ -378,29 +380,111 @@ impl OverlayWindow {
             )
         }
         .map_err(|e| error("CreateWindowExW", &e))?;
-        // A layered window stays invisible until its attributes are set. Full opacity leaves the composition
-        // content as drawn.
-        // SAFETY: `hwnd` was just created by this thread with WS_EX_LAYERED.
-        if let Err(e) = unsafe { SetLayeredWindowAttributes(hwnd, COLORREF(0), 255, LWA_ALPHA) } {
-            // SAFETY: the window was created above and is destroyed once, here.
-            let _ = unsafe { DestroyWindow(hwnd) };
-            return Err(error("SetLayeredWindowAttributes", &e));
-        }
-        // SAFETY: `hwnd` was just created by this thread.
-        let _ = unsafe { ShowWindow(hwnd, SW_SHOWNOACTIVATE) };
         Ok(Self { hwnd })
-    }
-
-    pub(crate) fn hwnd(&self) -> HWND {
-        self.hwnd
     }
 }
 
-impl Drop for OverlayWindow {
+impl Drop for HiddenWindow {
     fn drop(&mut self) {
         // SAFETY: the window belongs to this thread and is destroyed once.
         let _ = unsafe { DestroyWindow(self.hwnd) };
     }
+}
+
+fn hwnd_of(raw: isize) -> HWND {
+    HWND(raw as *mut _)
+}
+
+/// Makes a widget's GPUI window an overlay window: a plain popup (without the caption GPUI's frameless windows
+/// keep, which gives them the desktop's shadow and rounded corners), click-through, always on top, never
+/// activated, and without a taskbar button. Only `WS_EX_LAYERED` together with `WS_EX_TRANSPARENT` takes a window
+/// out of mouse hit testing, so clicks reach the windows below, also those of other processes. The layer is set to
+/// full opacity once, which a layered window needs before it shows; GPUI's composition swap chain still draws the
+/// content with per-pixel alpha. Call it while GPUI's app is not borrowed: the window procedure runs GPUI's
+/// handlers.
+pub fn style_widget_window(raw: isize) -> Result<(), PlatformError> {
+    let hwnd = hwnd_of(raw);
+    // SAFETY: `hwnd` is a live window of this thread, made by GPUI and kept until it closes; style changes and a
+    // frame change for it.
+    unsafe {
+        let ex = WINDOW_EX_STYLE(GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32);
+        let ex = WINDOW_EX_STYLE(ex.0 & !WS_EX_APPWINDOW.0)
+            | WS_EX_LAYERED
+            | WS_EX_TRANSPARENT
+            | WS_EX_TOPMOST
+            | WS_EX_NOACTIVATE
+            | WS_EX_TOOLWINDOW;
+        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex.0 as isize);
+        SetWindowLongPtrW(
+            hwnd,
+            GWL_STYLE,
+            (WS_POPUP | WS_CLIPSIBLINGS | WS_CLIPCHILDREN).0 as isize,
+        );
+        SetLayeredWindowAttributes(hwnd, COLORREF(0), 255, LWA_ALPHA)
+            .map_err(|e| error("SetLayeredWindowAttributes", &e))?;
+        let corners = DWMWCP_DONOTROUND;
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_WINDOW_CORNER_PREFERENCE,
+            (&raw const corners).cast(),
+            size_of_val(&corners) as u32,
+        );
+        SetWindowPos(
+            hwnd,
+            Some(HWND_TOPMOST),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+        )
+        .map_err(|e| error("SetWindowPos", &e))
+    }
+}
+
+/// Puts a widget window at `rect` (physical pixels) without changing its order or activating it, and shows it
+/// when `show`. Moving it to a monitor of another DPI makes GPUI size it for that DPI, so it is placed once more.
+/// Call it while GPUI's app is not borrowed.
+pub fn place_widget_window(raw: isize, rect: ScreenRect, show: bool) {
+    let hwnd = hwnd_of(raw);
+    let mut flags = SWP_NOZORDER | SWP_NOACTIVATE;
+    if show {
+        flags |= SWP_SHOWWINDOW;
+    }
+    for _ in 0..2 {
+        // SAFETY: moves and sizes this thread's window without changing its order or activation.
+        let _ = unsafe { SetWindowPos(hwnd, None, rect.x, rect.y, rect.width, rect.height, flags) };
+        let placed = window_rect(hwnd);
+        let (width, height) = size_of_rect(placed);
+        if (placed.left, placed.top, width, height) == (rect.x, rect.y, rect.width, rect.height) {
+            break;
+        }
+    }
+}
+
+/// Where a widget window is, in physical pixels, shown or not.
+pub fn widget_window_rect(raw: isize) -> ScreenRect {
+    let rect = window_rect(hwnd_of(raw));
+    let (width, height) = size_of_rect(rect);
+    ScreenRect {
+        x: rect.left,
+        y: rect.top,
+        width,
+        height,
+    }
+}
+
+/// Shows a widget window without activating it, or hides it. Call it while GPUI's app is not borrowed.
+pub fn show_widget_window(raw: isize, show: bool) {
+    let command = if show { SW_SHOWNOACTIVATE } else { SW_HIDE };
+    // SAFETY: shows or hides this thread's window; it never takes the focus.
+    let _ = unsafe { ShowWindow(hwnd_of(raw), command) };
+}
+
+/// Ends GPUI's message loop, as the tray's *Quit Pitot* does.
+pub fn quit() {
+    // SAFETY: posts WM_QUIT to this thread's own message queue.
+    unsafe { PostQuitMessage(0) };
 }
 
 /// A widget dragged to a new place or size: its handle's top-left corner and size, in screen pixels. `done` is set
@@ -765,6 +849,7 @@ fn push_move(id: usize, to: RECT, done: bool) {
             done,
         });
     });
+    wake(reason::MOVE);
 }
 
 fn handle_class() -> Result<PCWSTR, PlatformError> {
@@ -813,6 +898,17 @@ impl MoveHandle {
     /// Creates a handle over `rect`, reporting moves with `id`, above the overlay windows. Resizing it keeps at least
     /// `min`, the widget's smallest size.
     pub fn create(id: usize, rect: ScreenRect, min: (u32, u32)) -> Result<Self, PlatformError> {
+        Self::create_shown(id, rect, min, true)
+    }
+
+    /// [`MoveHandle::create`], left hidden unless `show`: a hidden handle handles the same messages, which the
+    /// tests send it, and shows nothing on any monitor.
+    fn create_shown(
+        id: usize,
+        rect: ScreenRect,
+        min: (u32, u32),
+        show: bool,
+    ) -> Result<Self, PlatformError> {
         let style = WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW;
         // SAFETY: the class is registered and all strings are static; no creation parameter is passed.
         let hwnd = unsafe {
@@ -841,6 +937,9 @@ impl MoveHandle {
         // SAFETY: `hwnd` was just created by this thread with WS_EX_LAYERED.
         unsafe { SetLayeredWindowAttributes(hwnd, COLORREF(0), HANDLE_ALPHA, LWA_ALPHA) }
             .map_err(|e| error("SetLayeredWindowAttributes", &e))?;
+        if !show {
+            return Ok(handle);
+        }
         // SAFETY: shows this thread's window without activating it, at the top of the topmost windows.
         unsafe {
             let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
@@ -894,15 +993,18 @@ impl Drop for MoveHandle {
 
 /// The notification-area icon, owned by a hidden window that the Pitot window finds by its class. A left click
 /// opens the Pitot window; a right click opens the menu (Open Pitot, Move widgets, Hide widgets, Reload
-/// configuration, Quit).
+/// configuration, Quit). The same window carries the scheduler's timer.
 #[derive(Debug)]
 pub struct Tray {
-    window: OverlayWindow,
+    window: HiddenWindow,
 }
+
+/// The id of the scheduler's timer on the tray window.
+const TIMER_ID: usize = 1;
 
 impl Tray {
     pub fn create() -> Result<Self, PlatformError> {
-        let window = OverlayWindow::create_in(tray_class()?, ScreenRect::default())?;
+        let window = HiddenWindow::create(tray_class()?)?;
         let mut data = tray_data(window.hwnd);
         data.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
         data.uCallbackMessage = TRAY_MESSAGE;
@@ -928,6 +1030,19 @@ impl Tray {
     pub fn set_moving(&self, moving: bool) {
         MOVING.store(moving, Ordering::Relaxed);
     }
+
+    /// Wakes the scheduler once after `delay` (with the timer resolution of the system, about 16 ms), replacing the
+    /// time set before. A delay of zero wakes it at once. A window timer: it fires on GPUI's thread without a
+    /// thread of its own, and `timeBeginPeriod` is never called.
+    pub fn set_timer(&self, delay: Duration) {
+        if delay.is_zero() {
+            wake(reason::TIMER);
+            return;
+        }
+        let millis = u32::try_from(delay.as_millis()).unwrap_or(u32::MAX).max(1);
+        // SAFETY: sets a timer of this thread's own window; setting it again with the same id replaces it.
+        unsafe { SetTimer(Some(self.window.hwnd), TIMER_ID, millis, None) };
+    }
 }
 
 fn tray_data(hwnd: HWND) -> NOTIFYICONDATAW {
@@ -942,48 +1057,11 @@ fn tray_data(hwnd: HWND) -> NOTIFYICONDATAW {
 impl Drop for Tray {
     fn drop(&mut self) {
         let data = tray_data(self.window.hwnd);
-        // SAFETY: removes the icon added in `create` for the same window and id.
-        let _ = unsafe { Shell_NotifyIconW(NIM_DELETE, &data) };
-    }
-}
-
-/// A high-resolution waitable timer for the render schedule. Never uses `timeBeginPeriod`.
-#[derive(Debug)]
-pub struct Timer {
-    handle: HANDLE,
-}
-
-impl Timer {
-    pub fn new() -> Result<Self, PlatformError> {
-        // SAFETY: creates an unnamed timer with default security.
-        let handle = unsafe {
-            CreateWaitableTimerExW(
-                None,
-                PCWSTR::null(),
-                CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
-                TIMER_ALL_ACCESS.0,
-            )
+        // SAFETY: removes the icon added in `create` for the same window and id, and the timer of the window.
+        unsafe {
+            let _ = Shell_NotifyIconW(NIM_DELETE, &data);
+            let _ = KillTimer(Some(self.window.hwnd), TIMER_ID);
         }
-        .map_err(|e| error("CreateWaitableTimerExW", &e))?;
-        Ok(Self { handle })
-    }
-
-    /// Fires once after `delay`.
-    pub fn set(&self, delay: Duration) -> Result<(), PlatformError> {
-        // Negative due times are relative, in 100 ns units.
-        let due = -i64::try_from(delay.as_nanos() / 100)
-            .unwrap_or(i64::MAX)
-            .max(1);
-        // SAFETY: `handle` is a timer owned by `self`; no completion routine.
-        unsafe { SetWaitableTimer(self.handle, &due, 0, None, None, false) }
-            .map_err(|e| error("SetWaitableTimer", &e))
-    }
-}
-
-impl Drop for Timer {
-    fn drop(&mut self) {
-        // SAFETY: closes the timer handle owned by `self`, once.
-        let _ = unsafe { CloseHandle(self.handle) };
     }
 }
 
@@ -1033,17 +1111,23 @@ impl Drop for SingleInstance {
 }
 
 /// A change notification on a directory's file names and write times, for reloading configuration without
-/// polling.
+/// polling. A thread of its own waits on it and calls `changed` for each change; GPUI's message loop cannot wait
+/// on it.
 #[derive(Debug)]
 pub struct DirectoryWatch {
-    handle: HANDLE,
+    /// Ends the thread.
+    stop: HANDLE,
+    thread: Option<JoinHandle<()>>,
 }
 
 impl DirectoryWatch {
-    pub fn new(dir: &std::path::Path) -> Result<Self, PlatformError> {
+    pub fn start(
+        dir: &std::path::Path,
+        changed: impl Fn() + Send + 'static,
+    ) -> Result<Self, PlatformError> {
         let path = windows::core::HSTRING::from(dir.as_os_str());
         // SAFETY: `path` is a NUL-terminated wide string that outlives the call.
-        let handle = unsafe {
+        let change = unsafe {
             FindFirstChangeNotificationW(
                 &path,
                 false,
@@ -1051,76 +1135,58 @@ impl DirectoryWatch {
             )
         }
         .map_err(|e| error("FindFirstChangeNotificationW", &e))?;
-        Ok(Self { handle })
-    }
-
-    /// Re-arms the notification after it was signaled.
-    fn rearm(&self) {
-        // SAFETY: `handle` is a change notification owned by `self`.
-        let _ = unsafe { FindNextChangeNotification(self.handle) };
+        // SAFETY: an unnamed manual-reset event with default security.
+        let stop = match unsafe { CreateEventW(None, true, false, PCWSTR::null()) } {
+            Ok(stop) => stop,
+            Err(e) => {
+                // SAFETY: closes the notification opened above, once.
+                let _ = unsafe { FindCloseChangeNotification(change) };
+                return Err(error("CreateEventW", &e));
+            }
+        };
+        // Handles are plain kernel object values; the thread owns the notification and borrows the stop event,
+        // which `Drop` closes only after the thread has ended.
+        let (change_raw, stop_raw) = (change.0 as isize, stop.0 as isize);
+        let thread = std::thread::Builder::new()
+            .name("pitot-watch".into())
+            .spawn(move || {
+                let handles = [HANDLE(change_raw as *mut _), HANDLE(stop_raw as *mut _)];
+                loop {
+                    // SAFETY: waits on two live handles: the notification this thread owns and the stop event.
+                    let result = unsafe { WaitForMultipleObjects(&handles, false, INFINITE) };
+                    if result != WAIT_OBJECT_0 {
+                        break;
+                    }
+                    changed();
+                    // SAFETY: re-arms the notification this thread owns.
+                    if unsafe { FindNextChangeNotification(handles[0]) }.is_err() {
+                        break;
+                    }
+                }
+                // SAFETY: closes the notification this thread owns, once.
+                let _ = unsafe { FindCloseChangeNotification(handles[0]) };
+            })
+            .map_err(|_| PlatformError {
+                call: "thread spawn",
+                code: 0,
+            })?;
+        Ok(Self {
+            stop,
+            thread: Some(thread),
+        })
     }
 }
 
 impl Drop for DirectoryWatch {
     fn drop(&mut self) {
-        // SAFETY: closes the notification handle owned by `self`, once.
-        let _ = unsafe { FindCloseChangeNotification(self.handle) };
-    }
-}
-
-/// What ended a [`wait`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Wake {
-    Timer,
-    /// The watched directory changed.
-    Changed,
-    Messages,
-    Timeout,
-}
-
-/// Sleeps until the timer fires, the watched directory changes, a window message arrives, or `timeout`
-/// passes.
-pub fn wait(timer: &Timer, watch: Option<&DirectoryWatch>, timeout: Duration) -> Wake {
-    let millis = u32::try_from(timeout.as_millis())
-        .unwrap_or(u32::MAX - 1)
-        .min(u32::MAX - 1);
-    let both = [timer.handle, watch.map_or(timer.handle, |w| w.handle)];
-    let handles = if watch.is_some() {
-        &both[..]
-    } else {
-        &both[..1]
-    };
-    // SAFETY: waits on handles owned by `timer` and `watch`, and on this thread's message queue.
-    let result = unsafe {
-        MsgWaitForMultipleObjectsEx(Some(handles), millis, QS_ALLINPUT, MWMO_INPUTAVAILABLE)
-    };
-    match result {
-        WAIT_OBJECT_0 => Wake::Timer,
-        WAIT_TIMEOUT => Wake::Timeout,
-        r if watch.is_some() && r.0 == WAIT_OBJECT_0.0 + 1 => {
-            if let Some(watch) = watch {
-                watch.rearm();
-            }
-            Wake::Changed
+        // SAFETY: signals the stop event owned by `self`.
+        let _ = unsafe { SetEvent(self.stop) };
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
         }
-        _ => Wake::Messages,
+        // SAFETY: closes the stop event owned by `self`, once, after the thread that waited on it ended.
+        let _ = unsafe { CloseHandle(self.stop) };
     }
-}
-
-/// Dispatches queued window messages. Returns `false` once Quit was chosen.
-pub fn pump_messages() -> bool {
-    let mut msg = MSG::default();
-    // SAFETY: standard message loop over this thread's queue with a valid MSG buffer.
-    unsafe {
-        while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
-            if msg.message == WM_QUIT {
-                return false;
-            }
-            let _ = TranslateMessage(&msg);
-            DispatchMessageW(&msg);
-        }
-    }
-    true
 }
 
 #[cfg(test)]
@@ -1249,7 +1315,8 @@ mod tests {
 
     #[test]
     fn a_handle_reports_its_drag() {
-        let handle = MoveHandle::create(
+        // Hidden, so nothing shows on the monitor it is placed on.
+        let handle = MoveHandle::create_shown(
             7,
             ScreenRect {
                 x: 100,
@@ -1258,6 +1325,7 @@ mod tests {
                 height: 30,
             },
             (20, 20),
+            false,
         )
         .expect("handle");
         let lparam = |x: i32, y: i32| LPARAM(((y as isize) << 16) | (x as isize & 0xFFFF));
@@ -1287,8 +1355,8 @@ mod tests {
 
     #[test]
     fn a_handle_resizes_from_its_grip() {
-        // Far off every screen, so nothing shows; the nearest monitor's edges are far away on the right and below.
-        let handle = MoveHandle::create(
+        // Hidden and far off every screen; the nearest monitor's edges are far away on the right and below.
+        let handle = MoveHandle::create_shown(
             3,
             ScreenRect {
                 x: -30_000,
@@ -1297,6 +1365,7 @@ mod tests {
                 height: 80,
             },
             (60, 40),
+            false,
         )
         .expect("handle");
         assert_eq!(handle.id(), 3);
@@ -1356,8 +1425,7 @@ mod tests {
     fn the_pitot_window_reaches_the_app_through_the_tray_window() {
         // A window of the tray's class, without the icon. Messages are sent to it directly rather than found by
         // class, so an overlay running on this machine is not involved.
-        let window = OverlayWindow::create_in(tray_class().expect("class"), ScreenRect::default())
-            .expect("window");
+        let window = HiddenWindow::create(tray_class().expect("class")).expect("window");
         let send = |command: OverlayCommand| {
             let (c, v) = command.encode();
             // SAFETY: sends to a window of this thread; its procedure runs synchronously.

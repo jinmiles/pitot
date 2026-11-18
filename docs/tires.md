@@ -48,11 +48,12 @@ hot pressure (in kPa, in place of the distance), with `Replay` in the header. Th
 
 ## Drawing
 
-The widget redraws only when something it shows changes. When one tire's values change alone, only its block is
-drawn again; a stop changes every tire, and the dimming or dating restyles all of them. Text buffers are allocated
-once, so updates do not allocate (`cargo test -p pitot-overlay --features alloc-check`).
+The widget redraws only when something it shows changes, and then draws its window again whole. Text buffers are
+allocated once, so updates do not allocate (`cargo test -p pitot-overlay --features alloc-check`).
 
 ## Cost
+
+Cost numbers on this page were measured with the overlay's earlier Direct2D renderer, before the widgets were drawn with GPUI (#183); they are measured again at the next release.
 
 Lab PC (Parsec virtual display, the four reference widgets, release build), the home PC capture of an online
 practice session at 1x, `pitot-bench collect` for 60 s after 12 s, the same build with the tire widget off and on,

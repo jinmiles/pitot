@@ -1,7 +1,8 @@
-//! Widgets: each owns its state, decides when and what to redraw, and draws through a [`Canvas`].
+//! Widgets: each owns its state, decides when to redraw, and draws through a [`Canvas`].
 //!
-//! A widget has one or more layers (its own composition surfaces), for example a static background and a
-//! scrolling trace. Each update reports what to redraw per layer.
+//! A widget has one or two layers, drawn bottom to top in its window, each clipped to its rectangle: for example
+//! the track map's outline below its dots. Each update reports per layer whether it changed; a change redraws the
+//! widget's window, every layer of it.
 //!
 //! Every widget is one line of `list.rs`: its module, which is also its `[widgets.<name>]` table, its type, and
 //! its [`Spec`] (label and defaults). The list declares the modules and gives the defaults, the names the
@@ -173,14 +174,15 @@ impl Shared {
 /// Most layers a widget may have.
 pub const MAX_LAYERS: usize = 2;
 
-/// What a layer needs redrawn after an update.
+/// What changed in a layer after an update. Anything but [`Redraw::Nothing`] redraws the widget's window: GPUI
+/// draws whole windows, so an area says only where the change is.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Redraw {
     Nothing,
     All,
-    /// Only this area, in layer pixels.
+    /// Only this area changed, in layer pixels.
     Area(Rect),
-    /// Two areas, for example a range of columns that wraps around a scrolling layer.
+    /// Two areas changed.
     Areas(Rect, Rect),
 }
 
@@ -191,8 +193,6 @@ pub struct LayerSpec {
     pub y: i32,
     pub width: u32,
     pub height: u32,
-    /// The surface is a ring of columns shown from [`Widget::scroll`].
-    pub scrolling: bool,
 }
 
 pub trait Widget {
@@ -218,7 +218,7 @@ pub trait Widget {
     /// text size call it, so it may allocate.
     fn resize(&mut self, width: u32, height: u32);
 
-    /// The widget's layers, bottom to top. Called when the widget is placed.
+    /// The widget's layers, bottom to top. Called when the widget is placed or resized.
     fn layers(&self) -> Vec<LayerSpec> {
         let (width, height) = self.size();
         vec![LayerSpec {
@@ -226,23 +226,18 @@ pub trait Widget {
             y: 0,
             width,
             height,
-            scrolling: false,
         }]
     }
 
     /// How often [`Widget::update`] runs unless the configuration sets a rate.
     fn interval(&self) -> Duration;
 
-    /// Takes the latest data and fills in what each layer needs redrawn. Must not allocate after warm-up.
+    /// Takes the latest data and fills in which layers changed. Must not allocate after warm-up.
     fn update(&mut self, view: &mut View, now: Instant, redraw: &mut [Redraw; MAX_LAYERS]);
 
-    /// Draws `layer`. The canvas is clipped to the area being redrawn. Must not allocate after warm-up.
+    /// Draws `layer`, whole, onto a canvas clipped to it. Runs whenever GPUI draws the widget's window, which
+    /// allocates in GPUI; the widget's own drawing code should not.
     fn draw(&self, layer: usize, canvas: &mut Canvas<'_>);
-
-    /// First column to show for a scrolling layer.
-    fn scroll(&self, _layer: usize) -> u32 {
-        0
-    }
 
     /// Whether the widget shows in this display state. Hidden widgets cost no drawing.
     fn visible(&self, display: Display) -> bool {

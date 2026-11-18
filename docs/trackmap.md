@@ -100,12 +100,15 @@ future stop; it is not drawn, since it is not a place on the current map.
 
 ## Drawing
 
-Two layers: the background with the circle or outline, drawn when the track, its outline, or (for the circle) the
-sector starts change (and while mapping, when the progress changes by a percent), and the dots, drawn again only when a dot moved by half a pixel. The outline is one
-Direct2D path with round joins; the circle is two ellipse strokes and the ticks. Updates do not allocate; the
-per-car buffers are sized once.
+Two layers, drawn bottom to top in the widget's window: the background with the circle or outline, and the dots.
+The window is drawn again when the track, its outline, or (for the circle) the sector starts change (and while
+mapping, when the progress changes by a percent), or when a dot moved by half a pixel. The outline is one path with
+round joins; the circle is two ring strokes and the ticks. Updates do not allocate; the per-car buffers are sized
+once.
 
 ## Cost
+
+Cost numbers on this page were measured with the overlay's earlier Direct2D renderer, before the widgets were drawn with GPUI (#183); they are measured again at the next release.
 
 The circle, against the outline it replaced as the default: lab PC (Parsec virtual display, release builds), the
 public AI race capture at 1x, the four reference widgets with the pit widget and the map (the outline with track

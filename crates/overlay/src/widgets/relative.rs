@@ -133,7 +133,7 @@ struct Row {
     position: FixedText,
     number: FixedText,
     name: FixedText,
-    /// License class letter and safety rating, drawn apart so the rating's digits come from the glyph atlas.
+    /// License class letter and safety rating, drawn apart in their own colors and places.
     license_class: FixedText,
     license_rating: FixedText,
     license_color: u32,

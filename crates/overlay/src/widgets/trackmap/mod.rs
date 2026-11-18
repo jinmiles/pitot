@@ -673,7 +673,6 @@ impl Widget for TrackMapWidget {
             y: 0,
             width: self.width,
             height: self.height,
-            scrolling: false,
         };
         vec![layer, layer]
     }

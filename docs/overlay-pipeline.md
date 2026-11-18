@@ -1,7 +1,7 @@
 # Overlay data pipeline
 
-`pitot_overlay::pipeline` moves telemetry from the sim's shared memory to the render thread without locks and
-without per-tick allocations.
+`pitot_overlay::pipeline` moves telemetry from the sim's shared memory to the render thread (the scheduler on
+GPUI's thread, see [rendering](overlay-rendering.md#schedule)) without locks and without per-tick allocations.
 
 ## Threads
 
@@ -10,7 +10,7 @@ without per-tick allocations.
 | `pitot-data` | the data-valid event (60 Hz while driving), at most once per second otherwise | `LiveReader::step`; publishes the tick and an input sample; copies session info when `sessionInfoUpdate` changes; during a sim replay, publishes a capture's frame instead (see below) |
 | `pitot-record` | once a second, while recording | writes the rows the data thread handed over into the capture (see below) |
 | `pitot-session` | work from the data thread | `SessionParser::parse`, then hands the result to the render thread and the text buffer back to the data thread; searches for a capture when a replay starts |
-| render (caller) | its own schedule | `View::poll` and `View::drain_samples` once per frame |
+| render (caller) | its own schedule, and the wake-ups below | `View::poll` and `View::drain_samples` once per update |
 
 ## Handoff
 
@@ -26,6 +26,11 @@ without per-tick allocations.
 - **Session info text**: the data thread copies each new text into a buffer the session thread has returned
   after parsing, and the parser keeps its own text buffer, so updates do not allocate buffers the size of the
   text. Only the first updates and the parse itself (its events and the result) allocate.
+
+- **Wake-ups**: `View::wake` is the render thread's wake-up (`wake.rs`). Every message the data and session threads
+  send sets a reason and wakes it. Each published tick wakes it too while it asked for ticks (`Wake::arm_ticks`, set
+  while a shown widget is due by the next tick); each such wake disarms the next. Setting a reason is an atomic or,
+  and waking takes the task's waker from an `AtomicWaker` and wakes it, which hands the task to GPUI's executor.
 
 Every shared value is an atomic, so the pipeline has no `unsafe` and no data races.
 

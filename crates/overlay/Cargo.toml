@@ -8,8 +8,11 @@ publish.workspace = true
 license.workspace = true
 
 [features]
-# Builds the counting-allocator test that checks the data path for heap allocations.
+# Builds the counting-allocator test that checks the data path and widget updates for heap allocations.
 alloc-check = []
+# A counting global allocator in the overlay's process that logs its allocations at exit, per update and per
+# paint: a measurement for development builds (`cargo build -p pitot --features alloc-count`), never on in releases.
+alloc-count = []
 
 [dependencies]
 pitot-irsdk.workspace = true
@@ -19,11 +22,23 @@ serde = { version = "1", features = ["derive"] }
 zstd = { version = "0.13", default-features = false, features = ["thin"] }
 tracing = { version = "0.1.44", default-features = false, features = ["std", "release_max_level_info"] }
 toml = { version = "1.2.1", default-features = false, features = ["std", "serde", "parse"] }
+# The scheduler's waker, which the data thread wakes without locking or allocating. Already in GPUI's tree (and
+# the Pitot window's), so it adds no crate to the executable.
+futures = { version = "0.3", default-features = false, features = ["std"] }
 
 [target."cfg(windows)".dependencies]
-windows = { version = "0.62.2", features = ["Win32_Devices_Display", "Win32_Foundation", "Win32_Graphics_Direct2D", "Win32_Graphics_Direct2D_Common", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D11", "Win32_Graphics_DirectComposition", "Win32_Graphics_DirectWrite", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_Graphics_Gdi", "Win32_Security",
+# The widgets' windows and drawing: the same GPUI as the Pitot window (`crates/control`), Zed's GPUI as the
+# `gpui-pre` snapshot. It replaces the overlay's own Direct3D 11, Direct2D, DirectWrite, and DirectComposition
+# code, its glyph atlas, and its text layout cache; GPUI draws with Direct3D 11 and DirectWrite itself.
+gpui = { package = "gpui-pre", version = "=0.3.12", default-features = false, features = ["windows-manifest"] }
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.12", default-features = false }
+# The handle of each widget window, for its overlay styles. In GPUI's tree.
+raw-window-handle = "0.6"
+# Names the round joins and ends of stroked paths: GPUI re-exports lyon's stroke options but not these. In GPUI's
+# tree.
+lyon = "1"
+windows = { version = "0.62.2", features = ["Win32_Devices_Display", "Win32_Foundation", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_Security",
     "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_LibraryLoader", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_UI_HiDpi", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
-windows-numerics = "0.3.1"
 
 [dev-dependencies]
 pitot-irsdk = { workspace = true, features = ["test-capture"] }

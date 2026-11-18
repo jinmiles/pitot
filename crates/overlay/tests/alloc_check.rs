@@ -1,11 +1,15 @@
-//! The data thread and the render thread's view do not allocate per tick, live or while a capture plays during
-//! a replay, and widgets do not allocate per update or draw, also after being resized or laid out at another text
-//! size. Run with `--features alloc-check`.
+//! The data thread and the scheduler's view do not allocate per tick, live or while a capture plays during a
+//! replay, and widgets do not allocate per update, also after being resized or laid out at another text size.
+//! Drawing is GPUI's and allocates there; `pitot --features alloc-count` measures it in the running overlay.
+//! Run with `--features alloc-check`.
 #![cfg(all(windows, feature = "alloc-check"))]
 
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::Mutex;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::task::{Context, Waker};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -15,8 +19,6 @@ use pitot_irsdk::live::{ReaderConfig, SdkNames};
 use pitot_irsdk::publish::{Publisher, PublisherConfig};
 use pitot_overlay::config::{self, Config};
 use pitot_overlay::pipeline::{Pipeline, RecordingConfig, Source, View};
-use pitot_overlay::platform::{OverlayWindow, ScreenRect};
-use pitot_overlay::render::{Layer, Renderer, WindowTarget};
 use pitot_overlay::widgets::{MAX_LAYERS, Redraw, TiresWidget, Widget};
 
 /// Counts allocations on every thread while switched on: the data thread is internal to the pipeline.
@@ -107,14 +109,24 @@ fn pipeline_does_not_allocate_per_tick() {
 
     let mut row = [0u8; ROW];
     let mut samples = 0usize;
-    fn cycle(publisher: &mut Publisher, view: &mut View, row: &mut [u8; ROW], n: u32) -> usize {
-        row[0..8].copy_from_slice(&f64::from(n).to_le_bytes());
-        publisher.publish(row).expect("publishes");
-        // Give the data thread time to read the tick, as the sim's 60 Hz would.
-        thread::sleep(Duration::from_millis(4));
-        view.poll();
-        view.drain_samples(|_| {})
-    }
+    // The scheduler's side of the wake-up: a waiting task that asks for every tick, as it does while a widget is
+    // due by the next tick. Waking it from the data thread must not allocate either.
+    let woken = Arc::new(Woken(AtomicUsize::new(0)));
+    let waker = Waker::from(Arc::clone(&woken));
+    let cycle =
+        |publisher: &mut Publisher, view: &mut View, row: &mut [u8; ROW], n: u32| -> usize {
+            let wake = Arc::clone(view.wake());
+            let mut waiting = wake.wait();
+            let _ = Pin::new(&mut waiting).poll(&mut Context::from_waker(&waker));
+            wake.arm_ticks(true);
+            row[0..8].copy_from_slice(&f64::from(n).to_le_bytes());
+            publisher.publish(row).expect("publishes");
+            // Give the data thread time to read the tick, as the sim's 60 Hz would.
+            thread::sleep(Duration::from_millis(4));
+            let _ = Pin::new(&mut waiting).poll(&mut Context::from_waker(&waker));
+            view.poll();
+            view.drain_samples(|_| {})
+        };
     // Warm-up includes the first session info parse.
     for n in 0..120 {
         samples += cycle(&mut publisher, &mut view, &mut row, n);
@@ -137,12 +149,30 @@ fn pipeline_does_not_allocate_per_tick() {
         "the pipeline kept up: {} samples",
         samples - before
     );
+    assert!(
+        woken.0.load(Ordering::Relaxed) >= 590,
+        "ticks woke the waiting task: {}",
+        woken.0.load(Ordering::Relaxed)
+    );
     assert_eq!(
         ALLOCATIONS.load(Ordering::Relaxed),
         0,
-        "allocations across the data thread and view"
+        "allocations across the data thread, its wake-ups, and view"
     );
     drop(pipeline);
+}
+
+/// Counts wake-ups of a task; an `Arc` waker wakes and clones without allocating.
+struct Woken(AtomicUsize);
+
+impl std::task::Wake for Woken {
+    fn wake(self: Arc<Self>) {
+        self.0.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.0.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 const SESSION_INFO: &[u8] = b"WeekendInfo:\n TrackID: 1\n SubSessionID: 4242\n";
@@ -1402,88 +1432,6 @@ const EVERY_ROW: usize = 32 + 72 * 4 * 4 + 72;
 fn every_widget_and_the_histories_do_not_allocate_per_update() {
     use pitot_overlay::widgets::AllWidgets;
 
-    /// Each widget's layers on a render device, so the check draws them too. `None` without a device (no GPU and
-    /// no software rasterizer, or no desktop composition), when only updates are checked.
-    struct Drawing {
-        renderer: Renderer,
-        layers: Vec<Vec<Layer>>,
-        _target: WindowTarget,
-        _window: OverlayWindow,
-    }
-
-    impl Drawing {
-        fn new(widgets: &AllWidgets) -> Option<Self> {
-            let unavailable = |e: &dyn std::fmt::Display| eprintln!("widgets not drawn: {e}");
-            let renderer = Renderer::new(1.0).inspect_err(|e| unavailable(e)).ok()?;
-            // No size and never committed: nothing shows.
-            let window = OverlayWindow::create(ScreenRect::default())
-                .inspect_err(|e| unavailable(e))
-                .ok()?;
-            let target = renderer
-                .attach(&window)
-                .inspect_err(|e| unavailable(e))
-                .ok()?;
-            let mut layers = Vec::new();
-            for widget in widgets.widgets() {
-                let mut own = Vec::new();
-                for spec in widget.layers().into_iter().take(MAX_LAYERS) {
-                    let layer =
-                        renderer.layer(&target, 0, 0, spec.width, spec.height, spec.scrolling);
-                    own.push(layer.inspect_err(|e| unavailable(e)).ok()?);
-                }
-                layers.push(own);
-            }
-            Some(Self {
-                renderer,
-                layers,
-                _target: target,
-                _window: window,
-            })
-        }
-
-        /// New surfaces at the widgets' sizes, as *Move widgets* makes them.
-        fn resize(&mut self, widgets: &AllWidgets) {
-            for (layers, widget) in self.layers.iter_mut().zip(widgets.widgets()) {
-                for (layer, spec) in layers.iter_mut().zip(widget.layers()) {
-                    self.renderer
-                        .resize_layer(layer, spec.width, spec.height)
-                        .expect("resized");
-                }
-            }
-        }
-
-        /// The text at `scale`, as the Pitot window's slider sets it, with each layer of a widget that scales with
-        /// the text sized to its box on screen: its size in widget pixels at the scale.
-        fn set_text_scale(&mut self, widgets: &AllWidgets, scale: f32) {
-            self.renderer.set_text_scale(scale).expect("text made");
-            for (layers, widget) in self.layers.iter_mut().zip(widgets.widgets()) {
-                let scale = if widget.scales_with_text() {
-                    scale
-                } else {
-                    1.0
-                };
-                let side = |v: u32| (v as f32 * scale).round() as u32;
-                for (layer, spec) in layers.iter_mut().zip(widget.layers()) {
-                    self.renderer
-                        .resize_layer(layer, side(spec.width), side(spec.height))
-                        .expect("resized");
-                }
-            }
-        }
-
-        /// Every layer of every widget, whole.
-        fn draw(&mut self, widgets: &AllWidgets) {
-            for (layers, widget) in self.layers.iter().zip(widgets.widgets()) {
-                let scaled = widget.scales_with_text();
-                for (index, layer) in layers.iter().enumerate() {
-                    self.renderer
-                        .draw(layer, None, scaled, |canvas| widget.draw(index, canvas))
-                        .expect("drawn");
-                }
-            }
-        }
-    }
-
     let _turn = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let pid = std::process::id();
     let names = SdkNames::new(
@@ -1530,7 +1478,6 @@ fn every_widget_and_the_histories_do_not_allocate_per_update() {
     }
     let mut widgets = AllWidgets::new(&view);
     assert!(widgets.len() >= 10, "every widget is made");
-    let mut drawing = Drawing::new(&widgets);
 
     let mut row = [0u8; EVERY_ROW];
     fn put(row: &mut [u8; EVERY_ROW], at: usize, bytes: [u8; 4]) {
@@ -1570,17 +1517,11 @@ fn every_widget_and_the_histories_do_not_allocate_per_update() {
         view.drain_samples(|_| {});
         widgets.update(view, Instant::now(), 1)
     };
-    let draw = |drawing: &mut Option<Drawing>, widgets: &AllWidgets| {
-        if let Some(drawing) = drawing.as_mut() {
-            drawing.draw(widgets);
-        }
-    };
     let mut n = 0;
     // Warm-up: the session info, per-car storage, and the first laps of every car.
     while view.session().is_none() || n < 200 {
         assert!(Instant::now() < deadline, "session info parsed");
         cycle(n, &mut view, &mut widgets);
-        draw(&mut drawing, &widgets);
         n += 1;
     }
     let (_, laps_before) = cycle(n, &mut view, &mut widgets);
@@ -1591,7 +1532,6 @@ fn every_widget_and_the_histories_do_not_allocate_per_update() {
     for _ in 0..400 {
         n += 1;
         held = cycle(n, &mut view, &mut widgets);
-        draw(&mut drawing, &widgets);
     }
     COUNTING.store(false, Ordering::Relaxed);
     assert!(held.0 > 200, "gap samples taken: {}", held.0);
@@ -1607,7 +1547,7 @@ fn every_widget_and_the_histories_do_not_allocate_per_update() {
     );
 
     // Resized as in *Move widgets*, to their smallest size and to twice the size they were made with: after a
-    // short warm-up at the new size (new text layouts for the new boxes), neither updates nor draws allocate.
+    // short warm-up at the new size, updates do not allocate.
     type Pick = fn((u32, u32), (u32, u32)) -> (u32, u32);
     let sizes: [(&str, Pick); 2] = [
         ("smallest", |min, _| min),
@@ -1615,20 +1555,15 @@ fn every_widget_and_the_histories_do_not_allocate_per_update() {
     ];
     for (name, pick) in sizes {
         widgets.resize(pick);
-        if let Some(drawing) = drawing.as_mut() {
-            drawing.resize(&widgets);
-        }
         for _ in 0..40 {
             n += 1;
             cycle(n, &mut view, &mut widgets);
-            draw(&mut drawing, &widgets);
         }
         ALLOCATIONS.store(0, Ordering::Relaxed);
         COUNTING.store(true, Ordering::Relaxed);
         for _ in 0..200 {
             n += 1;
             cycle(n, &mut view, &mut widgets);
-            draw(&mut drawing, &widgets);
         }
         COUNTING.store(false, Ordering::Relaxed);
         assert_eq!(
@@ -1639,26 +1574,20 @@ fn every_widget_and_the_histories_do_not_allocate_per_update() {
     }
 
     // At either end of `[general] text_size`, as the slider sets it: the widgets laid out in their boxes as made, in
-    // widget pixels, with the text and the atlas made at the new size. After a short warm-up (new text layouts at
-    // the new size), neither updates nor draws allocate.
+    // widget pixels. After a short warm-up, updates do not allocate.
     for percent in [config::MAX_TEXT_SIZE, config::MIN_TEXT_SIZE] {
         let scale = config::text_scale(percent);
         let inside = |side: u32| (side as f32 / scale).ceil() as u32;
         widgets.resize(|_, made| (inside(made.0), inside(made.1)));
-        if let Some(drawing) = drawing.as_mut() {
-            drawing.set_text_scale(&widgets, scale);
-        }
         for _ in 0..40 {
             n += 1;
             cycle(n, &mut view, &mut widgets);
-            draw(&mut drawing, &widgets);
         }
         ALLOCATIONS.store(0, Ordering::Relaxed);
         COUNTING.store(true, Ordering::Relaxed);
         for _ in 0..200 {
             n += 1;
             cycle(n, &mut view, &mut widgets);
-            draw(&mut drawing, &widgets);
         }
         COUNTING.store(false, Ordering::Relaxed);
         assert_eq!(

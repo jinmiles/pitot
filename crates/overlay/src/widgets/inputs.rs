@@ -1,9 +1,9 @@
 //! Input trace: throttle, brake (with ABS), clutch, and steering over the last few seconds, live pedal bars,
 //! and a steering wheel icon that turns with the wheel.
 //!
-//! The trace is a scrolling layer: each sample owns two columns of a ring surface, only new samples' columns
-//! are drawn, and scrolling moves the visuals instead of redrawing. Every sample from the pipeline is drawn,
-//! including those that queued while a frame was late.
+//! The trace is the last samples of a ring, two pixels each with the newest at the right, drawn as one line per
+//! input whenever new samples arrive. Every sample from the pipeline is drawn, including those that queued while a
+//! frame was late: an update takes every sample queued since the last one, and the ring holds the whole trace.
 
 use std::f32::consts::PI;
 use std::time::{Duration, Instant};
@@ -13,6 +13,30 @@ use crate::pipeline::{InputSample, View};
 use crate::render::{Canvas, Color, Rect};
 
 use super::{Build, LayerSpec, MAX_LAYERS, Redraw, Register, Widget};
+
+/// The line of one input through the samples `range` of the trace: from the sample before the first (or the first,
+/// at the ring's start) to the last, `level` giving each sample's height from 0 to 1.
+struct Trace<'a> {
+    widget: &'a InputTraceWidget,
+    level: fn(&InputSample) -> f32,
+}
+
+impl Trace<'_> {
+    fn points(&self, from: u64, to: u64) -> impl Iterator<Item = (f32, f32)> + '_ {
+        let w = self.widget;
+        let previous = if from > w.first {
+            w.sample(from - 1)
+        } else {
+            w.sample(from)
+        };
+        let start = (
+            w.sample_x(from) - PX_PER_SAMPLE as f32,
+            w.y((self.level)(previous)),
+        );
+        std::iter::once(start)
+            .chain((from..to).map(move |index| (w.sample_x(index), w.y((self.level)(w.sample(index))))))
+    }
+}
 
 const PX_PER_SAMPLE: u32 = 2;
 /// Live pedal bars: width and the gap before each bar.
@@ -144,12 +168,14 @@ impl InputTraceWidget {
         widget
     }
 
-    fn column(&self, index: u64) -> u32 {
-        ((index * u64::from(PX_PER_SAMPLE)) % u64::from(self.columns)) as u32
-    }
-
     fn sample(&self, index: u64) -> &InputSample {
         &self.history[(index % self.history.len() as u64) as usize]
+    }
+
+    /// Where sample `index` ends in the trace: the newest at its right edge, each older one two pixels further left.
+    fn sample_x(&self, index: u64) -> f32 {
+        let back = self.total.saturating_sub(1).saturating_sub(index);
+        self.columns as f32 - back as f32 * PX_PER_SAMPLE as f32
     }
 
     /// Oldest sample still on screen.
@@ -182,17 +208,6 @@ impl InputTraceWidget {
         // Half a line from each edge, so a line at zero or full stays whole.
         let inner = self.trace.h - LINE;
         LINE / 2.0 + (1.0 - level.clamp(0.0, 1.0)) * inner
-    }
-
-    /// Columns `[from, to)` of the trace, which may wrap around the ring.
-    fn columns_area(&self, from: u32, to: u32) -> Redraw {
-        let h = self.trace.h;
-        let rect = |x0: u32, x1: u32| Rect::new(x0 as f32, 0.0, (x1 - x0) as f32, h);
-        if from < to {
-            Redraw::Area(rect(from, to))
-        } else {
-            Redraw::Areas(rect(from, self.columns), rect(0, to))
-        }
     }
 
     fn draw_background(&self, canvas: &mut Canvas<'_>) {
@@ -239,31 +254,33 @@ impl InputTraceWidget {
         canvas.line(at(from), at(to), ICON_MARK_STROKE * scale, WHEEL_MARK);
     }
 
+    /// The visible samples as one line per input, oldest at the left. The brake's line changes color where ABS
+    /// starts or ends.
     fn draw_trace(&self, canvas: &mut Canvas<'_>) {
-        let area = canvas.area();
-        let (left, right) = (area.x as u32, (area.x + area.w) as u32);
-        for index in self.first_visible()..self.total {
-            let x = self.column(index);
-            if x + PX_PER_SAMPLE <= left || x >= right {
-                continue;
-            }
-            let current = self.sample(index);
-            // Each segment covers exactly this sample's columns, from the previous value to this one, so
-            // segments join without gaps and a wrap never draws across the trace.
-            let previous = if index > self.first {
-                self.sample(index - 1)
+        let (from, to) = (self.first_visible(), self.total);
+        if to <= from {
+            return;
+        }
+        let line = |canvas: &mut Canvas<'_>, level: fn(&InputSample) -> f32, a: u64, b: u64, color| {
+            let trace = Trace { widget: self, level };
+            canvas.stroke(trace.points(a, b), false, LINE, color);
+        };
+        line(canvas, steering_level, from, to, STEERING);
+        line(canvas, clutch_pedal, from, to, CLUTCH);
+        line(canvas, |s| s.throttle, from, to, THROTTLE);
+        let brake_color = |index: u64| {
+            if self.sample(index).abs_active {
+                ABS
             } else {
-                current
-            };
-            let (x0, x1) = (x as f32, (x + PX_PER_SAMPLE) as f32);
-            let mut segment = |a: f32, b: f32, color: Color| {
-                canvas.line((x0, self.y(a)), (x1, self.y(b)), LINE, color);
-            };
-            segment(steering_level(previous), steering_level(current), STEERING);
-            segment(clutch_pedal(previous), clutch_pedal(current), CLUTCH);
-            segment(previous.throttle, current.throttle, THROTTLE);
-            let brake = if current.abs_active { ABS } else { BRAKE };
-            segment(previous.brake, current.brake, brake);
+                BRAKE
+            }
+        };
+        let mut run = from;
+        for index in from + 1..=to {
+            if index == to || brake_color(index) != brake_color(run) {
+                line(canvas, |s| s.brake, run, index, brake_color(run));
+                run = index;
+            }
         }
     }
 }
@@ -330,14 +347,12 @@ impl Widget for InputTraceWidget {
                 y: 0,
                 width: self.width,
                 height: self.height,
-                scrolling: false,
             },
             LayerSpec {
                 x: self.trace.x as i32,
                 y: self.trace.y as i32,
                 width: self.columns,
                 height: self.trace.h as u32,
-                scrolling: true,
             },
         ]
     }
@@ -362,14 +377,8 @@ impl Widget for InputTraceWidget {
             *latest = sample;
             *missed += u64::from(sample.missed_before);
         });
-        let added = self.total - first;
-        if added > 0 {
-            redraw[1] = if added >= u64::from(self.columns / PX_PER_SAMPLE) {
-                Redraw::All
-            } else {
-                let to = self.column(self.total - 1) + PX_PER_SAMPLE;
-                self.columns_area(self.column(first), to)
-            };
+        if self.total > first {
+            redraw[1] = Redraw::All;
         }
         let bars = bar_levels(&self.latest, self.bars_rect().h);
         if bars != self.bars || self.missed != self.missed_shown {
@@ -384,10 +393,6 @@ impl Widget for InputTraceWidget {
             0 => self.draw_background(canvas),
             _ => self.draw_trace(canvas),
         }
-    }
-
-    fn scroll(&self, _layer: usize) -> u32 {
-        self.column(self.total)
     }
 
     fn reset(&mut self) {
@@ -426,25 +431,29 @@ mod tests {
         assert!(w.trace.x + w.trace.w <= w.bars_rect().x);
         assert_eq!(w.history.len() as u32, w.columns / PX_PER_SAMPLE + 1);
         let layers = w.layers();
-        assert!(layers[1].scrolling && !layers[0].scrolling);
         assert_eq!(layers[1].width, w.columns);
     }
 
     #[test]
-    fn columns_wrap_around_the_ring() {
-        let w = widget();
+    fn the_newest_sample_ends_at_the_right_edge() {
+        let mut w = widget();
         let samples = u64::from(w.columns / PX_PER_SAMPLE);
-        assert_eq!(w.column(0), 0);
-        assert_eq!(w.column(samples), 0, "one full ring later");
-        assert_eq!(w.column(samples - 1), w.columns - PX_PER_SAMPLE);
-        match w.columns_area(w.columns - 4, 2) {
-            Redraw::Areas(a, b) => {
-                assert_eq!((a.x, a.w), ((w.columns - 4) as f32, 4.0));
-                assert_eq!((b.x, b.w), (0.0, 2.0));
-            }
-            other => panic!("expected two areas, got {other:?}"),
-        }
-        assert!(matches!(w.columns_area(10, 14), Redraw::Area(r) if r.x == 10.0 && r.w == 4.0));
+        w.total = samples * 3 + 5;
+        let newest = w.total - 1;
+        assert_eq!(w.sample_x(newest), w.columns as f32);
+        assert_eq!(w.sample_x(newest - 1), (w.columns - PX_PER_SAMPLE) as f32);
+        // The oldest visible sample's line starts at the left edge.
+        let oldest = w.first_visible();
+        assert_eq!(w.sample_x(oldest) - PX_PER_SAMPLE as f32, 0.0);
+        // Its line starts from the sample before it, which the ring still holds.
+        let trace = Trace {
+            widget: &w,
+            level: |s| s.throttle,
+        };
+        let points: Vec<(f32, f32)> = trace.points(oldest, w.total).collect();
+        assert_eq!(points.len() as u64, w.total - oldest + 1);
+        assert_eq!(points[0].0, 0.0);
+        assert_eq!(points.last().map(|p| p.0), Some(w.columns as f32));
     }
 
     #[test]

@@ -1118,8 +1118,8 @@ impl Columns {
     }
 }
 
-/// Draws text only when its cell reaches into the area being redrawn: clipped text still costs DirectWrite its
-/// layout, and in a race most updates redraw only the gap columns.
+/// Draws text only when its cell reaches into the area being drawn, which is the whole widget: a cell outside it
+/// would only be clipped.
 fn text_in(canvas: &mut Canvas<'_>, text: &str, rect: Rect, size: f32, align: Align, color: Color) {
     let area = canvas.area();
     if rect.x < area.x + area.w && rect.x + rect.w > area.x {

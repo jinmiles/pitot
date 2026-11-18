@@ -5,26 +5,28 @@ pressed pedal is high), and steering (grey, half a turn either way) for the last
 the right. The bars follow the pedals from left to right: clutch, brake, throttle. Right of them a white steering
 wheel icon turns by the actual wheel angle (`SteeringWheelAngle`, positive to the left), beyond half a turn as
 well. An orange center marker at the top of the rim shows which way and how far the wheel is turned, as on a
-racing wheel. The icon is Tabler Icons' `steering-wheel` with that marker added, drawn with Direct2D circles and
-lines so it stays sharp at any size and angle.
+racing wheel. The icon is Tabler Icons' `steering-wheel` with that marker added, drawn with circles and lines so it
+stays sharp at any size and angle.
 
 ## How it draws
 
 - Lines are 2.5 px wide, inset by half a line at the top and bottom so zero and full pedal stay whole.
 - The width sets the history: each sample takes 2 px, so the default 600 px shows 3.8 s and a wider widget more.
   Resizing in *Move widgets* keeps the samples already drawn, as many as the new width shows.
-- The trace is a scrolling layer: a ring surface where each sample owns two columns. A frame draws only the
-  columns of samples that arrived since the last frame, and scrolling moves the two composition visuals that
-  show the ring. Nothing else is redrawn.
-- Samples come from the pipeline's sample ring, so every 60 Hz sample is drawn even though the screen updates
-  less often: a frame draws all samples queued since the previous one.
-- The bars and the wheel are redrawn only when a level changes by at least a pixel or the wheel angle by a
-  whole degree.
+- The trace is one line per input through the samples the widget's ring holds, newest at the right, two pixels
+  a sample; the brake's line turns yellow where ABS was active. When new samples arrive the widget's window is
+  drawn again whole (GPUI draws whole windows), lines and bars together.
+- Samples come from the pipeline's sample ring, so every 60 Hz sample is drawn even when an update or a frame is
+  late: an update takes every sample queued since the previous one, and the widget's ring holds the whole trace.
+- Without new samples, the window is drawn again only when a bar level changes by at least a pixel or the wheel
+  angle by a whole degree.
 - Samples lost upstream (overwritten in the sim's buffers) are counted; a red line on top of the bars appears if
   any were lost.
 - Hidden unless the player is driving.
 
 ## Update rate
+
+Cost numbers on this page were measured with the overlay's earlier Direct2D renderer, before the widgets were drawn with GPUI (#183); they are measured again at the next release.
 
 `rate_hz` sets how often the screen updates (default 60, for a smooth trace). Development measurement on the lab PC (release build,
 60 Hz replay, process CPU time over 10 s, not `pitot-bench`):

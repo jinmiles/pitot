@@ -122,13 +122,13 @@ interpolation spans shorter stretches):
 
 ## Drawing
 
-Rows and text buffers are pooled and reused, so updates do not allocate. Only the rows that changed are drawn
-again (the header's session clock alone changes every second). In a race the live gaps change on nearly every
-update while the rest of a row stays the same until cars pass each other or reach the line, so rows whose gaps
-alone changed redraw only the gap and interval columns, and text outside the redrawn area is skipped rather than
-laid out and clipped.
+Rows and text buffers are pooled and reused, so updates do not allocate. An update that changes nothing shown
+draws nothing; any change (the header's session clock alone changes every second, and in a race the live gaps on
+nearly every update) draws the widget's window again whole, as GPUI draws whole windows.
 
 ## Cost
+
+Cost numbers on this page were measured with the overlay's earlier Direct2D renderer, before the widgets were drawn with GPUI (#183); they are measured again at the next release.
 
 Lab PC (Parsec virtual display, four widgets, release build), the home PC capture of an online practice session
 replayed at 1x, `pitot-bench collect` for 60 s after a 12 s warm-up, two runs each, alternating: overlay CPU 23.90

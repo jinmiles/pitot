@@ -1,21 +1,23 @@
-//! Overlay process: one process, no IPC between data and rendering. No async runtimes,
-//! WebView, or garbage-collected runtimes. `pitot.exe` runs it through [`app::main`] when started without
-//! arguments; with `--window` it runs the Pitot window instead, in a process of its own.
+//! Overlay process: one process, no IPC between data and rendering, no WebView or garbage-collected runtime.
+//! The widgets are drawn with GPUI, whose executor runs on the overlay's main thread. `pitot.exe` runs it through
+//! [`app::main`] when started without arguments; with `--window` it runs the Pitot window instead, in a process of
+//! its own.
 //!
-//! - [`pipeline`]: data and session threads, and the render thread's view of the latest telemetry.
-//! - [`platform`]: monitors, overlay windows, message loop, timers, the tray icon, and the link to the Pitot window
-//!   (`pitot-control`) (Windows).
-//! - [`render`]: D3D11, Direct2D, DirectWrite, and DirectComposition layers per widget (Windows).
-//! - [`app`]: the process start, and the render thread's schedule and main loop (Windows).
+//! - [`pipeline`]: data and session threads, and the scheduler's view of the latest telemetry.
+//! - [`wake`]: how those threads, the windows, and the timer wake the scheduler.
+//! - [`platform`]: monitors, the widget windows' styles and placement, the tray icon, move handles, and the link to
+//!   the Pitot window (`pitot-control`) (Windows).
+//! - [`render`]: the drawing API widgets use, on GPUI's painting (Windows).
+//! - [`app`]: the process start, the GPUI app with a window per widget, and the scheduler (Windows).
 //! - [`widgets`]: the widget trait and widgets.
 //! - [`config`]: the hot-reloaded TOML configuration.
 //! - [`log`]: the log file (Windows).
 //!
 //! Planned modules:
-//! - `text`: glyph atlas for digits and symbols, cached DirectWrite layouts (M3).
-//! - more widgets: input trace (M3); relative, standings, and fuel (M4).
 //! - `output`: Spout2 and optional local web output, active only when enabled (M6).
 
+#[cfg(all(windows, feature = "alloc-count"))]
+pub mod alloc_count;
 #[cfg(windows)]
 pub mod app;
 pub mod config;
@@ -26,5 +28,6 @@ pub mod pipeline;
 pub mod platform;
 #[cfg(windows)]
 pub mod render;
+pub mod wake;
 #[cfg(windows)]
 pub mod widgets;

@@ -49,10 +49,12 @@ every frame (60 Hz), for the three cars ahead and behind of every car in turn.
 
 No pass was older than a lap. The old estimate's largest errors are across classes and in practice, where the
 player's lap time says little about other cars.
-- Text buffers have fixed capacity and are reused, so updates do not allocate. Only the span of changed lines is
-  drawn again, and license letters are drawn apart from their digits, which come from the glyph atlas.
+- Text buffers have fixed capacity and are reused, so updates do not allocate. An update that changes nothing
+  shown draws nothing; a change draws the widget's window again whole.
 
 ## Cost
+
+Cost numbers on this page were measured with the overlay's earlier Direct2D renderer, before the widgets were drawn with GPUI (#183); they are measured again at the next release.
 
 Development measurement on the lab PC (release build, 60 Hz replay, process CPU time over 10 s, not
 `pitot-bench`), with status, input trace at 30 Hz, and relative at 15 Hz: 2.50% of one core, 0.31% of all
