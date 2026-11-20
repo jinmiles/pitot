@@ -149,7 +149,7 @@ impl RenderStats {
             steps_per_s = round1(self.steps as f64 / seconds),
             tick = count(reason::TICK),
             timer = count(reason::TIMER),
-            message = count(reason::MESSAGE),
+            messages = count(reason::MESSAGE),
             command = count(reason::COMMAND),
             moves = count(reason::MOVE),
             config = count(reason::CONFIG),
