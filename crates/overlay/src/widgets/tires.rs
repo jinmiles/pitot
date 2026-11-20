@@ -415,7 +415,11 @@ impl TiresWidget {
         // A line shows its three numbers only when each has room, so a narrow block leaves the line out whole rather
         // than some of its numbers; the swatches' colors still show the temperatures.
         let room = Rect::new(0.0, 0.0, cell_w, row_h);
-        let fit = |texts: &[FixedText; ZONES]| texts.iter().all(|t| canvas.fits(t.as_str(), room, 14.0));
+        let mut fit = |texts: &[FixedText; ZONES]| {
+            texts
+                .iter()
+                .all(|t| canvas.fits(t.as_str(), room, 14.0))
+        };
         let (temps, wear) = (fit(&corner.temps), fit(&corner.wear));
         for z in 0..ZONES {
             let cell = Rect::new(block.x + z as f32 * cell_w, block.y, cell_w, row_h);

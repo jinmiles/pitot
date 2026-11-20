@@ -15,7 +15,9 @@ stays sharp at any size and angle.
   Resizing in *Move widgets* keeps the samples already drawn, as many as the new width shows.
 - The trace is one line per input through the samples the widget's ring holds, newest at the right, two pixels
   a sample; the brake's line turns yellow where ABS was active. When new samples arrive the widget's window is
-  drawn again whole (GPUI draws whole windows), lines and bars together.
+  drawn again whole (GPUI draws whole windows), lines and bars together. Samples inside a level run (a pedal held
+  at zero or full, the wheel held still) are left out of the line's points, which covers the same pixels with far
+  fewer triangles ([rendering](overlay-rendering.md#drawing)); the wheel's three spokes are one path.
 - Samples come from the pipeline's sample ring, so every 60 Hz sample is drawn even when an update or a frame is
   late: an update takes every sample queued since the previous one, and the widget's ring holds the whole trace.
 - Without new samples, the window is drawn again only when a bar level changes by at least a pixel or the wheel

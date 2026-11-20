@@ -5,14 +5,37 @@
 //! Widgets draw in widget pixels: screen pixels at the default text size, and `text_scale` screen pixels each for a
 //! widget that scales with the text. The canvas maps them to screen pixels so whole widget pixels land on whole
 //! screen pixels, then to GPUI's logical pixels at the window's DPI.
+//!
+//! GPUI draws a window whole whenever it draws it, so a widget's every shape and every line of text is painted
+//! again each time. What a window keeps between paints ([`PaintCache`]) keeps that from shaping text and
+//! tessellating with fresh buffers each time: lines of text are shaped once and kept while they are drawn, numbers
+//! are drawn from glyphs measured once per size, and strokes are tessellated by one retained lyon tessellator
+//! straight into GPUI paths.
+
+use std::collections::HashMap;
+use std::sync::Arc;
 
 use gpui::{
-    Bounds, ContentMask, Font, FontFeatures, FontStyle, FontWeight, Hsla, PathBuilder, PathStyle,
-    Pixels, Point, SharedString, StrokeOptions, TextRun, Window, point, px, quad, size,
+    Bounds, ContentMask, Font, FontFeatures, FontId, FontStyle, FontWeight, GlyphId, Hsla,
+    LineLayout, Path, Pixels, Point, SharedString, StrokeOptions, TextRun, Window, point, px, quad,
+    size,
 };
-use lyon::tessellation::{LineCap, LineJoin};
+use lyon::math::Point as LyonPoint;
+use lyon::tessellation::{
+    BuffersBuilder, LineCap, LineJoin, StrokeTessellator, StrokeVertex, VertexBuffers,
+};
 
 use crate::config;
+
+/// Evaluates `$e`, counting the heap allocations it makes as a paint's `$kind` in a `--features alloc-count` build
+/// (see [`crate::alloc_count::PaintKind`]).
+macro_rules! counted {
+    ($kind:ident, $e:expr) => {{
+        #[cfg(feature = "alloc-count")]
+        let _counted = crate::alloc_count::Phase::In(crate::alloc_count::PaintKind::$kind).enter();
+        $e
+    }};
+}
 
 /// Straight (non-premultiplied) RGBA color.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -53,6 +76,9 @@ impl Color {
         .into()
     }
 }
+
+/// A line segment from one point to another, in widget pixels.
+pub type Segment = ((f32, f32), (f32, f32));
 
 /// A rectangle in widget or layer pixels.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -97,6 +123,26 @@ fn is_number(text: &str) -> bool {
     text.chars().all(|c| NUMBER_CHARS.contains(c))
 }
 
+/// Characters drawn from glyphs measured alone ([`Glyphs`]) when a whole line is made of them: those of numbers. In
+/// Segoe UI semibold they have no kerning or contextual forms between them: shaped whole by GPUI, every pair and
+/// triple of them at the font sizes of every text size gives the glyphs measured alone, each exactly where the
+/// advances of those before it end, and the sum of the advances as the width (trailing spaces included).
+const GLYPH_CHARS: &[u8] = NUMBER_CHARS.as_bytes();
+
+/// For each ASCII byte, its index in [`GLYPH_CHARS`] plus one, or 0 for a byte not in it.
+const GLYPH_INDEX: [u8; 128] = {
+    let mut table = [0u8; 128];
+    let mut i = 0;
+    while i < GLYPH_CHARS.len() {
+        table[GLYPH_CHARS[i] as usize] = i as u8 + 1;
+        i += 1;
+    }
+    table
+};
+
+/// The longest line drawn from measured glyphs; longer ones are shaped.
+const MAX_GLYPH_LINE: usize = 24;
+
 /// The widgets' font: Segoe UI semibold, made once per paint state so drawing text clones it without allocating.
 pub fn widget_font() -> Font {
     Font {
@@ -139,6 +185,34 @@ fn scaled_span(low: f32, high: f32, scale: f32) -> (f32, f32) {
     }
 }
 
+/// A line's ends and width in layer pixels at `scale` layer pixels per widget pixel. A level or upright line keeps
+/// its edges on whole pixels when they were (see [`scaled_edge`]), so a hairline stays sharp.
+fn layer_line(
+    scale: f32,
+    from: (f32, f32),
+    to: (f32, f32),
+    width: f32,
+) -> ((f32, f32), (f32, f32), f32) {
+    let s = scale;
+    if s == 1.0 {
+        return (from, to, width);
+    }
+    let half = width.abs() / 2.0;
+    if from.1 == to.1 {
+        let (top, bottom) = scaled_span(from.1 - half, from.1 + half, s);
+        let y = (top + bottom) / 2.0;
+        let (x0, x1) = (scaled_edge(from.0, s), scaled_edge(to.0, s));
+        ((x0, y), (x1, y), bottom - top)
+    } else if from.0 == to.0 {
+        let (left, right) = scaled_span(from.0 - half, from.0 + half, s);
+        let x = (left + right) / 2.0;
+        let (y0, y1) = (scaled_edge(from.1, s), scaled_edge(to.1, s));
+        ((x, y0), (x, y1), right - left)
+    } else {
+        ((from.0 * s, from.1 * s), (to.0 * s, to.1 * s), width * s)
+    }
+}
+
 /// Where one layer of a widget is drawn in its window.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LayerPlace {
@@ -172,11 +246,217 @@ impl Default for Style {
     }
 }
 
-/// Draws one layer of a widget into `window` with `draw`, clipped to the layer. Called from a widget window's
-/// paint.
+/// What a widget window keeps from one paint to the next: its lines of text and number glyphs, and the stroke
+/// tessellator with its buffers. Painting with it allocates only in the GPUI calls that must (a path's vertices,
+/// handed to GPUI's scene), and when text is drawn that was not drawn in the previous paint.
+#[derive(Default)]
+pub struct PaintCache {
+    text: TextCache,
+    strokes: Strokes,
+}
+
+impl PaintCache {
+    /// Ends a paint of the whole window: lines of text that were not drawn in it are let go.
+    pub fn finish_paint(&mut self) {
+        self.text.finish_paint();
+    }
+}
+
+impl std::fmt::Debug for PaintCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PaintCache")
+            .field("sizes", &self.text.sizes.len())
+            .finish_non_exhaustive()
+    }
+}
+
+/// A glyph measured alone: its id and advance, in logical pixels.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Measured {
+    NotYet,
+    Glyph(GlyphId, f32),
+    /// Shaped alone it is not one glyph of the line's font: such lines are shaped whole.
+    No,
+}
+
+/// The glyphs of [`GLYPH_CHARS`] at one font size, each measured from GPUI's layout of it alone the first time it
+/// is drawn.
+#[derive(Debug, Clone)]
+struct Glyphs {
+    font_id: Option<FontId>,
+    /// The line box's ascent and descent, which do not depend on the characters.
+    ascent: f32,
+    descent: f32,
+    chars: [Measured; GLYPH_CHARS.len()],
+}
+
+impl Default for Glyphs {
+    fn default() -> Self {
+        Self {
+            font_id: None,
+            ascent: 0.0,
+            descent: 0.0,
+            chars: [Measured::NotYet; GLYPH_CHARS.len()],
+        }
+    }
+}
+
+/// Lines of text at one font size, each with the paint it was last drawn in.
+#[derive(Default)]
+struct SizedText {
+    /// The font size in logical pixels.
+    font_size: f32,
+    lines: HashMap<String, (Arc<LineLayout>, u64)>,
+    glyphs: Glyphs,
+    /// The paint the size was last drawn in.
+    used: u64,
+}
+
+/// A window's text: shaped lines and number glyphs per font size, for the window's font.
+#[derive(Default)]
+struct TextCache {
+    font: Option<Font>,
+    sizes: Vec<SizedText>,
+    /// Paints finished.
+    paint: u64,
+}
+
+impl TextCache {
+    /// Text from now on is in `font`; text kept in another font is let go.
+    fn use_font(&mut self, font: &Font) {
+        if self.font.as_ref() != Some(font) {
+            self.font = Some(font.clone());
+            self.sizes.clear();
+        }
+    }
+
+    /// The text at `font_size`.
+    fn sized(&mut self, font_size: f32) -> &mut SizedText {
+        let paint = self.paint;
+        let index = match self.sizes.iter().position(|s| s.font_size == font_size) {
+            Some(index) => index,
+            None => {
+                self.sizes.push(SizedText {
+                    font_size,
+                    ..SizedText::default()
+                });
+                self.sizes.len() - 1
+            }
+        };
+        let sized = &mut self.sizes[index];
+        sized.used = paint;
+        sized
+    }
+
+    fn finish_paint(&mut self) {
+        let paint = self.paint;
+        self.sizes.retain(|s| s.used == paint);
+        for sized in &mut self.sizes {
+            sized.lines.retain(|_, (_, used)| *used == paint);
+        }
+        self.paint += 1;
+    }
+}
+
+/// A line of text ready to paint, in logical pixels.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "on the stack, so drawing a number does not allocate"
+)]
+enum Line {
+    /// Shaped by GPUI.
+    Shaped(Arc<LineLayout>),
+    /// Drawn from measured glyphs: the first `len` of `glyphs`, each with its x from the line's start.
+    Glyphs {
+        font_id: FontId,
+        glyphs: [(GlyphId, f32); MAX_GLYPH_LINE],
+        len: usize,
+        width: f32,
+        ascent: f32,
+        descent: f32,
+    },
+}
+
+impl Line {
+    fn width(&self) -> f32 {
+        match self {
+            Self::Shaped(layout) => f32::from(layout.width),
+            Self::Glyphs { width, .. } => *width,
+        }
+    }
+
+    fn ascent(&self) -> f32 {
+        match self {
+            Self::Shaped(layout) => f32::from(layout.ascent),
+            Self::Glyphs { ascent, .. } => *ascent,
+        }
+    }
+
+    fn descent(&self) -> f32 {
+        match self {
+            Self::Shaped(layout) => f32::from(layout.descent),
+            Self::Glyphs { descent, .. } => *descent,
+        }
+    }
+}
+
+/// lyon's stroke tessellator and its output, kept for every stroke a window draws.
+struct Strokes {
+    tessellator: StrokeTessellator,
+    buffers: VertexBuffers<LyonPoint, u32>,
+}
+
+impl Default for Strokes {
+    fn default() -> Self {
+        Self {
+            tessellator: StrokeTessellator::new(),
+            buffers: VertexBuffers::new(),
+        }
+    }
+}
+
+/// Leaves out the points of a line that lie inside a level or upright run of it, which change nothing that is
+/// drawn: the line through the run's ends covers what the line through every point covers, joins included. The
+/// first and last points stay. Points are in GPUI's logical pixels, as the tessellator gets them.
+#[derive(Debug, Default)]
+struct RunFilter {
+    last: Option<LyonPoint>,
+    pending: Option<LyonPoint>,
+}
+
+impl RunFilter {
+    /// Takes the next point, and returns the point to pass on, if any.
+    fn push(&mut self, next: LyonPoint) -> Option<LyonPoint> {
+        let Some(last) = self.last else {
+            self.last = Some(next);
+            return Some(next);
+        };
+        let pending = self.pending.replace(next)?;
+        let between = |a: f32, b: f32, c: f32| (a <= b && b <= c) || (a >= b && b >= c);
+        let level =
+            last.y == pending.y && pending.y == next.y && between(last.x, pending.x, next.x);
+        let upright =
+            last.x == pending.x && pending.x == next.x && between(last.y, pending.y, next.y);
+        if level || upright {
+            None
+        } else {
+            self.last = Some(pending);
+            Some(pending)
+        }
+    }
+
+    /// The point still held back, which ends the line.
+    fn finish(&mut self) -> Option<LyonPoint> {
+        self.pending.take()
+    }
+}
+
+/// Draws one layer of a widget into `window` with `draw`, clipped to the layer, with what the window keeps between
+/// paints. Called from a widget window's paint, which calls [`PaintCache::finish_paint`] after its last layer.
 pub fn paint_layer(
     window: &mut Window,
     style: &Style,
+    cache: &mut PaintCache,
     place: LayerPlace,
     draw: impl FnOnce(&mut Canvas<'_>),
 ) {
@@ -197,10 +477,12 @@ pub fn paint_layer(
         ),
     };
     let bounds = (place.width / scale, place.height / scale);
+    cache.text.use_font(&style.font);
     window.with_content_mask(Some(mask), |window| {
         let mut canvas = Canvas {
             window,
             style,
+            cache,
             logical,
             origin: (place.x, place.y),
             scale,
@@ -218,6 +500,7 @@ pub fn paint_layer(
 pub struct Canvas<'a> {
     window: &'a mut Window,
     style: &'a Style,
+    cache: &'a mut PaintCache,
     /// Logical pixels per layer pixel.
     logical: f32,
     /// The layer's top-left corner in the window, in screen pixels.
@@ -273,7 +556,10 @@ impl Canvas<'_> {
             return;
         }
         let bounds = self.window_bounds(rect);
-        self.window.paint_quad(gpui::fill(bounds, color.hsla()));
+        counted!(
+            Draw,
+            self.window.paint_quad(gpui::fill(bounds, color.hsla()))
+        );
     }
 
     pub fn fill(&mut self, rect: Rect, color: Color) {
@@ -293,53 +579,60 @@ impl Canvas<'_> {
     }
 
     pub fn line(&mut self, from: (f32, f32), to: (f32, f32), width: f32, color: Color) {
-        let (from, to, width) = self.layer_line(from, to, width);
-        if width <= 0.0 {
-            return;
-        }
-        // Level and upright lines are rectangles, as sharp as fills; others are stroked paths with flat ends.
-        let half = width / 2.0;
-        if from.1 == to.1 {
-            let (x0, x1) = (from.0.min(to.0), from.0.max(to.0));
-            self.fill_layer(Rect::new(x0, from.1 - half, x1 - x0, width), color);
-        } else if from.0 == to.0 {
-            let (y0, y1) = (from.1.min(to.1), from.1.max(to.1));
-            self.fill_layer(Rect::new(from.0 - half, y0, width, y1 - y0), color);
-        } else {
-            let mut path = PathBuilder::stroke(px(width * self.logical));
-            path.move_to(self.at(from.0, from.1));
-            path.line_to(self.at(to.0, to.1));
-            if let Ok(path) = path.build() {
-                self.window.paint_path(path, color.hsla());
-            }
-        }
+        self.lines(&[(from, to)], width, color);
     }
 
-    /// A line's ends and width in layer pixels. A level or upright line keeps its edges on whole pixels when they
-    /// were (see [`scaled_edge`]), so a hairline stays sharp.
-    fn layer_line(
-        &self,
-        from: (f32, f32),
-        to: (f32, f32),
-        width: f32,
-    ) -> ((f32, f32), (f32, f32), f32) {
-        let s = self.scale;
-        if s == 1.0 {
-            return (from, to, width);
+    /// Draws each of `segments` as [`Canvas::line`] does: level and upright ones as rectangles, as sharp as fills,
+    /// and the others with flat ends in one path.
+    pub fn lines(&mut self, segments: &[Segment], width: f32, color: Color) {
+        let scale = self.scale;
+        let mut slanted = false;
+        let mut path_width = 0.0;
+        for &(from, to) in segments {
+            let (from, to, width) = layer_line(scale, from, to, width);
+            if width <= 0.0 {
+                continue;
+            }
+            let half = width / 2.0;
+            if from.1 == to.1 {
+                let (x0, x1) = (from.0.min(to.0), from.0.max(to.0));
+                self.fill_layer(Rect::new(x0, from.1 - half, x1 - x0, width), color);
+            } else if from.0 == to.0 {
+                let (y0, y1) = (from.1.min(to.1), from.1.max(to.1));
+                self.fill_layer(Rect::new(from.0 - half, y0, width, y1 - y0), color);
+            } else {
+                slanted = true;
+                path_width = width;
+            }
         }
-        let half = width.abs() / 2.0;
-        if from.1 == to.1 {
-            let (top, bottom) = scaled_span(from.1 - half, from.1 + half, s);
-            let y = (top + bottom) / 2.0;
-            let (x0, x1) = (scaled_edge(from.0, s), scaled_edge(to.0, s));
-            ((x0, y), (x1, y), bottom - top)
-        } else if from.0 == to.0 {
-            let (left, right) = scaled_span(from.0 - half, from.0 + half, s);
-            let x = (left + right) / 2.0;
-            let (y0, y1) = (scaled_edge(from.1, s), scaled_edge(to.1, s));
-            ((x, y0), (x, y1), right - left)
-        } else {
-            (self.layer_point(from), self.layer_point(to), width * s)
+        if !slanted || color.a <= 0.0 {
+            return;
+        }
+        // Each slanted segment is a sub-path of its own, as a path of one line each would be.
+        let (origin, logical) = (self.origin, self.logical);
+        let options = StrokeOptions::default().with_line_width(path_width * logical);
+        let at =
+            |(x, y): (f32, f32)| LyonPoint::new((origin.0 + x) * logical, (origin.1 + y) * logical);
+        let strokes = &mut self.cache.strokes;
+        strokes.buffers.vertices.clear();
+        strokes.buffers.indices.clear();
+        let built = {
+            let mut output =
+                BuffersBuilder::new(&mut strokes.buffers, |v: StrokeVertex| v.position());
+            let mut builder = strokes.tessellator.builder(&options, &mut output);
+            for &(from, to) in segments {
+                let (from, to, width) = layer_line(scale, from, to, width);
+                if width <= 0.0 || from.1 == to.1 || from.0 == to.0 {
+                    continue;
+                }
+                builder.begin(at(from));
+                builder.line_to(at(to));
+                builder.end(false);
+            }
+            counted!(Path, builder.build())
+        };
+        if built.is_ok() {
+            self.paint_strokes(color);
         }
     }
 
@@ -353,14 +646,17 @@ impl Canvas<'_> {
         }
         let bounds =
             self.window_bounds(Rect::new(cx - outer, cy - outer, outer * 2.0, outer * 2.0));
-        self.window.paint_quad(quad(
-            bounds,
-            px(outer * self.logical),
-            gpui::transparent_black(),
-            px(w * self.logical),
-            color.hsla(),
-            gpui::BorderStyle::Solid,
-        ));
+        counted!(
+            Draw,
+            self.window.paint_quad(quad(
+                bounds,
+                px(outer * self.logical),
+                gpui::transparent_black(),
+                px(w * self.logical),
+                color.hsla(),
+                gpui::BorderStyle::Solid,
+            ))
+        );
     }
 
     /// Fills a circle around `center`.
@@ -371,14 +667,17 @@ impl Canvas<'_> {
             return;
         }
         let bounds = self.window_bounds(Rect::new(cx - r, cy - r, r * 2.0, r * 2.0));
-        self.window.paint_quad(quad(
-            bounds,
-            px(r * self.logical),
-            color.hsla(),
-            px(0.0),
-            gpui::transparent_black(),
-            gpui::BorderStyle::Solid,
-        ));
+        counted!(
+            Draw,
+            self.window.paint_quad(quad(
+                bounds,
+                px(r * self.logical),
+                color.hsla(),
+                px(0.0),
+                gpui::transparent_black(),
+                gpui::BorderStyle::Solid,
+            ))
+        );
     }
 
     /// Strokes the line through `points` with round joins, back to the first point when `closed`.
@@ -387,7 +686,8 @@ impl Canvas<'_> {
     }
 
     /// Strokes the line through `points` (widget pixels) with round joins and ends, back to the first point when
-    /// `closed`. Fewer than two points draw nothing.
+    /// `closed`. Fewer than two points draw nothing. Points inside a level or upright run are left out, which
+    /// changes nothing drawn ([`RunFilter`]).
     pub fn stroke(
         &mut self,
         points: impl IntoIterator<Item = (f32, f32)>,
@@ -399,36 +699,81 @@ impl Canvas<'_> {
         if width <= 0.0 || color.a <= 0.0 {
             return;
         }
+        let (origin, logical, scale) = (self.origin, self.logical, self.scale);
         let options = StrokeOptions::default()
-            .with_line_width(width * self.logical)
+            .with_line_width(width * logical)
             .with_line_join(LineJoin::Round)
             .with_line_cap(LineCap::Round);
-        let mut path = PathBuilder::default().with_style(PathStyle::Stroke(options));
-        let mut count = 0usize;
-        for p in points {
-            let (x, y) = self.layer_point(p);
-            if count == 0 {
-                path.move_to(self.at(x, y));
-            } else {
-                path.line_to(self.at(x, y));
+        let strokes = &mut self.cache.strokes;
+        strokes.buffers.vertices.clear();
+        strokes.buffers.indices.clear();
+        let (count, built) = {
+            let mut output =
+                BuffersBuilder::new(&mut strokes.buffers, |v: StrokeVertex| v.position());
+            let mut builder = strokes.tessellator.builder(&options, &mut output);
+            let mut filter = RunFilter::default();
+            let mut count = 0usize;
+            let mut pass = |p: LyonPoint, count: &mut usize| {
+                if *count == 0 {
+                    builder.begin(p);
+                } else {
+                    builder.line_to(p);
+                }
+                *count += 1;
+            };
+            for (x, y) in points {
+                let p = LyonPoint::new(
+                    (origin.0 + x * scale) * logical,
+                    (origin.1 + y * scale) * logical,
+                );
+                if let Some(p) = filter.push(p) {
+                    pass(p, &mut count);
+                }
             }
-            count += 1;
+            if let Some(p) = filter.finish() {
+                pass(p, &mut count);
+            }
+            if count == 0 {
+                (0, Ok(()))
+            } else {
+                builder.end(closed && count > 1);
+                (count, counted!(Path, builder.build()))
+            }
+        };
+        if count >= 2 && built.is_ok() {
+            self.paint_strokes(color);
         }
-        if count < 2 {
+    }
+
+    /// Paints the tessellator's output as one GPUI path, triangle by triangle as GPUI's own path builder makes it.
+    fn paint_strokes(&mut self, color: Color) {
+        let buffers = &self.cache.strokes.buffers;
+        let Some(first) = buffers.vertices.first() else {
+            return;
+        };
+        if buffers.indices.len() < 3 {
             return;
         }
-        if closed {
-            path.close();
-        }
-        if let Ok(path) = path.build() {
-            self.window.paint_path(path, color.hsla());
-        }
+        let at = |index: u32| {
+            let v = buffers.vertices[index as usize];
+            point(px(v.x), px(v.y))
+        };
+        let solid = (point(0., 1.), point(0., 1.), point(0., 1.));
+        let path = counted!(Path, {
+            let mut path = Path::new(point(px(first.x), px(first.y)));
+            path.vertices.reserve_exact(buffers.indices.len());
+            for triangle in buffers.indices.as_chunks::<3>().0 {
+                path.push_triangle((at(triangle[0]), at(triangle[1]), at(triangle[2])), solid);
+            }
+            path
+        });
+        counted!(Path, self.window.paint_path(path, color.hsla()));
     }
 
     /// The font size in logical pixels for a size in widget pixels: the next of [`TEXT_SIZES`] up, times the text
     /// scale.
-    fn font_size(&self, size: f32) -> Pixels {
-        px(TEXT_SIZES[size_index(size)] * self.style.text_scale * self.logical)
+    fn font_size(&self, size: f32) -> f32 {
+        TEXT_SIZES[size_index(size)] * self.style.text_scale * self.logical
     }
 
     fn run(&self, text: &str, color: Color) -> TextRun {
@@ -440,6 +785,122 @@ impl Canvas<'_> {
             underline: None,
             strikethrough: None,
         }
+    }
+
+    /// `text` at `font_size` (logical pixels), ready to paint: from measured glyphs when it is made of
+    /// [`GLYPH_CHARS`], else shaped by GPUI once and kept while it is drawn in every paint.
+    fn text_line(&mut self, text: &str, font_size: f32) -> Line {
+        if let Some(line) = self.glyph_line(text, font_size) {
+            return line;
+        }
+        let paint = self.cache.text.paint;
+        let sized = self.cache.text.sized(font_size);
+        if let Some((layout, used)) = sized.lines.get_mut(text) {
+            *used = paint;
+            return Line::Shaped(Arc::clone(layout));
+        }
+        let run = self.run(text, Color::WHITE);
+        let layout = counted!(
+            Text,
+            self.window
+                .text_system()
+                .layout_line(text, px(font_size), &[run], None)
+        );
+        // Kept under a copy of the text: the overlay's own allocation, made only for text new to the window.
+        self.cache
+            .text
+            .sized(font_size)
+            .lines
+            .insert(text.to_owned(), (Arc::clone(&layout), paint));
+        Line::Shaped(layout)
+    }
+
+    /// `text` from glyphs measured alone, when every character is one of [`GLYPH_CHARS`] and it is at most
+    /// [`MAX_GLYPH_LINE`] long.
+    fn glyph_line(&mut self, text: &str, font_size: f32) -> Option<Line> {
+        let bytes = text.as_bytes();
+        if bytes.len() > MAX_GLYPH_LINE {
+            return None;
+        }
+        let mut indices = [0usize; MAX_GLYPH_LINE];
+        for (slot, &byte) in indices.iter_mut().zip(bytes) {
+            let index = *GLYPH_INDEX.get(usize::from(byte))?;
+            *slot = usize::from(index.checked_sub(1)?);
+        }
+        let indices = &indices[..bytes.len()];
+        loop {
+            let measured = &self.cache.text.sized(font_size).glyphs;
+            let mut glyphs = [(GlyphId(0), 0.0); MAX_GLYPH_LINE];
+            let mut x = 0.0;
+            let mut missing = None;
+            for (n, &index) in indices.iter().enumerate() {
+                match measured.chars[index] {
+                    Measured::Glyph(id, advance) => {
+                        glyphs[n] = (id, x);
+                        x += advance;
+                    }
+                    Measured::No => return None,
+                    Measured::NotYet => {
+                        missing = Some(index);
+                        break;
+                    }
+                }
+            }
+            match missing {
+                None => {
+                    return Some(Line::Glyphs {
+                        font_id: measured.font_id?,
+                        glyphs,
+                        len: indices.len(),
+                        width: x,
+                        ascent: measured.ascent,
+                        descent: measured.descent,
+                    });
+                }
+                // Measured once per size; then the line is put together again.
+                Some(index) => self.measure(index, font_size),
+            }
+        }
+    }
+
+    /// Measures `GLYPH_CHARS[index]` at `font_size` from GPUI's layout of it alone.
+    fn measure(&mut self, index: usize, font_size: f32) {
+        let Some(text) = GLYPH_CHARS
+            .get(index..=index)
+            .and_then(|c| std::str::from_utf8(c).ok())
+        else {
+            if let Some(c) = self.cache.text.sized(font_size).glyphs.chars.get_mut(index) {
+                *c = Measured::No;
+            }
+            return;
+        };
+        let run = self.run(text, Color::WHITE);
+        let layout = counted!(
+            Text,
+            self.window
+                .text_system()
+                .layout_line(text, px(font_size), &[run], None)
+        );
+        let glyphs = &mut self.cache.text.sized(font_size).glyphs;
+        let alone = match layout.runs.as_slice() {
+            [run] if glyphs.font_id.is_none_or(|id| id == run.font_id) => {
+                match run.glyphs.as_slice() {
+                    [glyph] if !glyph.is_emoji && glyph.position == Point::default() => {
+                        Some((run.font_id, glyph.id))
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        let Some((font_id, id)) = alone else {
+            glyphs.chars[index] = Measured::No;
+            return;
+        };
+        glyphs.font_id = Some(font_id);
+        glyphs.ascent = f32::from(layout.ascent);
+        glyphs.descent = f32::from(layout.descent);
+        glyphs.chars[index] = Measured::Glyph(id, f32::from(layout.width));
     }
 
     /// Draws one line of text vertically centered in `rect`, clipped to it. `size` is in widget pixels, from the
@@ -457,12 +918,8 @@ impl Canvas<'_> {
         }
         let rect = self.layer_rect(rect);
         let font_size = self.font_size(size);
-        let run = self.run(text, color);
-        let layout = self
-            .window
-            .text_system()
-            .layout_line(text, font_size, &[run], None);
-        let width = f32::from(layout.width) / self.logical;
+        let line = self.text_line(text, font_size);
+        let width = line.width() / self.logical;
         if self.scale != 1.0 && width > rect.w + 0.5 && is_number(text) {
             return;
         }
@@ -473,42 +930,64 @@ impl Canvas<'_> {
         };
         // The line box is the font's ascent and descent, centered in the rectangle as DirectWrite centers a
         // paragraph; glyph positions are relative to the baseline.
-        let line = f32::from(layout.ascent + layout.descent) / self.logical;
+        let line_height = (line.ascent() + line.descent()) / self.logical;
         // On a whole pixel, so text stays as sharp as it was before GPUI drew it.
         let baseline =
-            (rect.y + (rect.h - line) / 2.0 + f32::from(layout.ascent) / self.logical).round();
+            (rect.y + (rect.h - line_height) / 2.0 + line.ascent() / self.logical).round();
         let origin = self.at(x, baseline);
         let mask = ContentMask {
             bounds: self.window_bounds(rect),
         };
         let hsla = color.hsla();
-        self.window.with_content_mask(Some(mask), |window| {
-            for run in &layout.runs {
-                for glyph in &run.glyphs {
-                    let at = point(origin.x + glyph.position.x, origin.y + glyph.position.y);
-                    let _ = if glyph.is_emoji {
-                        window.paint_emoji(at, run.font_id, glyph.id, layout.font_size)
-                    } else {
-                        window.paint_glyph(at, run.font_id, glyph.id, layout.font_size, hsla)
-                    };
+        let font_size = px(font_size);
+        self.window
+            .with_content_mask(Some(mask), |window| match &line {
+                Line::Shaped(layout) => {
+                    for run in &layout.runs {
+                        for glyph in &run.glyphs {
+                            let at =
+                                point(origin.x + glyph.position.x, origin.y + glyph.position.y);
+                            let _ = counted!(
+                                Draw,
+                                if glyph.is_emoji {
+                                    window.paint_emoji(at, run.font_id, glyph.id, layout.font_size)
+                                } else {
+                                    window.paint_glyph(
+                                        at,
+                                        run.font_id,
+                                        glyph.id,
+                                        layout.font_size,
+                                        hsla,
+                                    )
+                                }
+                            );
+                        }
+                    }
                 }
-            }
-        });
+                Line::Glyphs {
+                    font_id,
+                    glyphs,
+                    len,
+                    ..
+                } => {
+                    for &(id, x) in &glyphs[..*len] {
+                        let at = point(origin.x + px(x), origin.y);
+                        let _ =
+                            counted!(Draw, window.paint_glyph(at, *font_id, id, font_size, hsla));
+                    }
+                }
+            });
     }
 
     /// Whether `text` at `size` fits the width of `rect` (both in widget pixels), as GPUI's text system measures
     /// it.
-    pub fn fits(&self, text: &str, rect: Rect, size: f32) -> bool {
+    pub fn fits(&mut self, text: &str, rect: Rect, size: f32) -> bool {
         if text.is_empty() {
             return true;
         }
         let font_size = self.font_size(size);
-        let run = self.run(text, Color::WHITE);
-        let layout = self
-            .window
-            .text_system()
-            .layout_line(text, font_size, &[run], None);
-        f32::from(layout.width) / self.logical <= self.layer_rect(rect).w + 0.5
+        let width = self.text_line(text, font_size).width();
+        width / self.logical <= self.layer_rect(rect).w + 0.5
     }
 
     /// Whether `rect`, in widget pixels, lies within the layer. A pixel of slack covers the layer's size in widget
@@ -588,9 +1067,143 @@ mod tests {
     }
 
     #[test]
+    fn glyph_characters_are_single_bytes() {
+        for &c in GLYPH_CHARS {
+            assert!(c.is_ascii(), "{c}");
+        }
+    }
+
+    #[test]
     fn colors_keep_their_alpha() {
         let c = Color::rgb(0x10_1418, 0.82);
         assert!((c.hsla().a - 0.82).abs() < 1e-6);
         assert_eq!(Color::TRANSPARENT.hsla().a, 0.0);
+    }
+
+    /// Runs `points` through a [`RunFilter`].
+    fn filtered(points: &[(f32, f32)]) -> Vec<(f32, f32)> {
+        let mut filter = RunFilter::default();
+        let mut out: Vec<(f32, f32)> = points
+            .iter()
+            .filter_map(|&(x, y)| filter.push(LyonPoint::new(x, y)))
+            .map(|p| (p.x, p.y))
+            .collect();
+        out.extend(filter.finish().map(|p| (p.x, p.y)));
+        out
+    }
+
+    #[test]
+    fn level_and_upright_runs_keep_only_their_ends() {
+        // A pedal at zero, pressed, then held: the level runs keep their ends, the ramp every point.
+        let line = [
+            (0.0, 10.0),
+            (2.0, 10.0),
+            (4.0, 10.0),
+            (6.0, 10.0),
+            (8.0, 6.0),
+            (10.0, 2.0),
+            (12.0, 2.0),
+            (14.0, 2.0),
+        ];
+        assert_eq!(
+            filtered(&line),
+            [
+                (0.0, 10.0),
+                (6.0, 10.0),
+                (8.0, 6.0),
+                (10.0, 2.0),
+                (14.0, 2.0)
+            ]
+        );
+        // An upright run, as a closed outline has.
+        assert_eq!(
+            filtered(&[(0.0, 0.0), (0.0, 1.0), (0.0, 2.0), (3.0, 2.0)]),
+            [(0.0, 0.0), (0.0, 2.0), (3.0, 2.0)]
+        );
+        // Going back over a level run is not a run: the turn stays.
+        assert_eq!(
+            filtered(&[(0.0, 0.0), (4.0, 0.0), (2.0, 0.0)]),
+            [(0.0, 0.0), (4.0, 0.0), (2.0, 0.0)]
+        );
+        // Short lines stay as they are.
+        assert_eq!(filtered(&[(1.0, 1.0)]), [(1.0, 1.0)]);
+        assert_eq!(
+            filtered(&[(1.0, 1.0), (3.0, 1.0)]),
+            [(1.0, 1.0), (3.0, 1.0)]
+        );
+        assert!(filtered(&[]).is_empty());
+    }
+
+    /// The triangles lyon makes for the line through `points` with the canvas's stroke options.
+    fn tessellated(points: &[(f32, f32)]) -> Vec<[LyonPoint; 3]> {
+        let mut strokes = Strokes::default();
+        let options = StrokeOptions::default()
+            .with_line_width(2.5)
+            .with_line_join(LineJoin::Round)
+            .with_line_cap(LineCap::Round);
+        let mut output = BuffersBuilder::new(&mut strokes.buffers, |v: StrokeVertex| v.position());
+        let mut builder = strokes.tessellator.builder(&options, &mut output);
+        builder.begin(LyonPoint::new(points[0].0, points[0].1));
+        for p in &points[1..] {
+            builder.line_to(LyonPoint::new(p.0, p.1));
+        }
+        builder.end(false);
+        builder.build().expect("tessellated");
+        let v = &strokes.buffers.vertices;
+        strokes
+            .buffers
+            .indices
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .map(|t| [v[t[0] as usize], v[t[1] as usize], v[t[2] as usize]])
+            .collect()
+    }
+
+    /// Which samples of a fine grid over the box from `low` to `high` the triangles cover, each sample counted once
+    /// however many triangles hold it.
+    fn covered(triangles: &[[LyonPoint; 3]], low: (f32, f32), high: (f32, f32)) -> Vec<bool> {
+        let inside = |t: &[LyonPoint; 3], x: f32, y: f32| {
+            let edge =
+                |a: LyonPoint, b: LyonPoint| (b.x - a.x) * (y - a.y) - (b.y - a.y) * (x - a.x);
+            let (e0, e1, e2) = (edge(t[0], t[1]), edge(t[1], t[2]), edge(t[2], t[0]));
+            (e0 >= 0.0 && e1 >= 0.0 && e2 >= 0.0) || (e0 <= 0.0 && e1 <= 0.0 && e2 <= 0.0)
+        };
+        let step = 0.125;
+        let mut samples = Vec::new();
+        let mut y = low.1 + step / 2.0;
+        while y < high.1 {
+            let mut x = low.0 + step / 2.0;
+            while x < high.0 {
+                samples.push(triangles.iter().any(|t| inside(t, x, y)));
+                x += step;
+            }
+            y += step;
+        }
+        samples
+    }
+
+    #[test]
+    fn leaving_out_run_points_covers_the_same_pixels() {
+        // A trace with level runs at the top and bottom, a ramp, and a spike.
+        let line: Vec<(f32, f32)> = [
+            10.0, 10.0, 10.0, 10.0, 7.0, 3.0, 1.25, 1.25, 1.25, 1.25, 1.25, 5.0, 1.25, 1.25, 10.0,
+            10.0,
+        ]
+        .iter()
+        .enumerate()
+        .map(|(i, &y)| (i as f32 * 2.0, y))
+        .collect();
+        let kept = filtered(&line);
+        assert!(kept.len() < line.len(), "runs shortened: {kept:?}");
+        let (low, high) = ((-3.0, -3.0), (34.0, 14.0));
+        let all = covered(&tessellated(&line), low, high);
+        let fewer = covered(&tessellated(&kept), low, high);
+        let differ = all.iter().zip(&fewer).filter(|(a, b)| a != b).count();
+        assert_eq!(differ, 0, "of {} samples", all.len());
+        assert!(
+            tessellated(&kept).len() < tessellated(&line).len(),
+            "fewer triangles"
+        );
     }
 }

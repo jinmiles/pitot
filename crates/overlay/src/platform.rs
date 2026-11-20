@@ -11,7 +11,7 @@ mod link;
 mod monitors;
 
 use std::cell::{Cell, RefCell};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -53,19 +53,20 @@ use windows::Win32::UI::Shell::{
     NOTIFYICONDATAW, SHGetKnownFolderPath, Shell_NotifyIconW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CS_HREDRAW, CS_VREDRAW, CreatePopupMenu, CreateWindowExW, DefWindowProcW,
-    DestroyMenu, DestroyWindow, GWL_EXSTYLE, GWL_STYLE, GetClientRect, GetCursorPos,
-    GetWindowLongPtrW, GetWindowRect, HTCLIENT, HWND_TOPMOST, IDC_SIZEALL, IDC_SIZENESW,
-    IDC_SIZENS, IDC_SIZENWSE, IDC_SIZEWE, IDI_APPLICATION, KillTimer, LWA_ALPHA, LoadCursorW,
-    LoadIconW, MA_NOACTIVATE, MF_CHECKED, MF_SEPARATOR, MF_STRING, PostQuitMessage,
-    RegisterClassExW, SW_HIDE, SW_SHOWNOACTIVATE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
-    SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SetCursor, SetForegroundWindow,
-    SetLayeredWindowAttributes, SetMenuDefaultItem, SetTimer, SetWindowLongPtrW, SetWindowPos,
-    ShowWindow, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, WINDOW_EX_STYLE,
-    WM_APP, WM_CAPTURECHANGED, WM_CLOSE, WM_CONTEXTMENU, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_PAINT, WM_RBUTTONUP, WM_SETCURSOR, WM_TIMER,
-    WNDCLASSEXW, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_APPWINDOW, WS_EX_LAYERED,
-    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+    AppendMenuW, CS_HREDRAW, CS_VREDRAW, CallWindowProcW, CreatePopupMenu, CreateWindowExW,
+    DefWindowProcW, DestroyMenu, DestroyWindow, GWL_EXSTYLE, GWL_STYLE, GWLP_WNDPROC,
+    GetClientRect, GetCursorPos, GetWindowLongPtrW, GetWindowRect, HTCLIENT, HWND_TOPMOST,
+    IDC_SIZEALL, IDC_SIZENESW, IDC_SIZENS, IDC_SIZENWSE, IDC_SIZEWE, IDI_APPLICATION, KillTimer,
+    LWA_ALPHA, LoadCursorW, LoadIconW, MA_NOACTIVATE, MF_CHECKED, MF_SEPARATOR, MF_STRING,
+    PostQuitMessage, RegisterClassExW, SW_HIDE, SW_SHOWNOACTIVATE, SWP_FRAMECHANGED,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SetCursor,
+    SetForegroundWindow, SetLayeredWindowAttributes, SetMenuDefaultItem, SetTimer,
+    SetWindowLongPtrW, SetWindowPos, ShowWindow, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON,
+    TrackPopupMenu, WINDOW_EX_STYLE, WM_APP, WM_CAPTURECHANGED, WM_CLOSE, WM_CONTEXTMENU,
+    WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_NCDESTROY,
+    WM_PAINT, WM_RBUTTONUP, WM_SETCURSOR, WM_TIMER, WNDCLASSEXW, WNDPROC, WS_CLIPCHILDREN,
+    WS_CLIPSIBLINGS, WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 use windows::core::{PCWSTR, w};
 
@@ -479,6 +480,62 @@ pub fn show_widget_window(raw: isize, show: bool) {
     let command = if show { SW_SHOWNOACTIVATE } else { SW_HIDE };
     // SAFETY: shows or hides this thread's window; it never takes the focus.
     let _ = unsafe { ShowWindow(hwnd_of(raw), command) };
+}
+
+thread_local! {
+    /// Widget windows whose paint messages are counted: the window, its window procedure before
+    /// [`count_paint_messages`], and the counter.
+    static COUNTED: RefCell<Vec<(isize, isize, Arc<AtomicU64>)>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Counts the `WM_PAINT` messages a widget window receives into `counter`, for the render counters logged at exit:
+/// GPUI's display-refresh thread invalidates every window at each refresh, and GPUI draws only the windows asked
+/// to. The window's procedure is wrapped by one that counts and passes every message on unchanged, until the window
+/// is destroyed. Call it while GPUI's app is not borrowed, once per window.
+pub fn count_paint_messages(raw: isize, counter: Arc<AtomicU64>) {
+    let hwnd = hwnd_of(raw);
+    let counting: unsafe extern "system" fn(HWND, u32, WPARAM, LPARAM) -> LRESULT = counting_proc;
+    // SAFETY: replaces the procedure of this thread's live window with `counting_proc`, which calls the previous
+    // procedure, kept below before any message can arrive (both run on this thread), for every message.
+    let previous = unsafe { SetWindowLongPtrW(hwnd, GWLP_WNDPROC, counting as usize as isize) };
+    if previous != 0 {
+        COUNTED.with(|c| c.borrow_mut().push((raw, previous, counter)));
+    }
+}
+
+unsafe extern "system" fn counting_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    let raw = hwnd.0 as isize;
+    let previous = COUNTED.with(|c| {
+        let c = c.try_borrow().ok()?;
+        let (_, previous, counter) = c.iter().find(|(hwnd, ..)| *hwnd == raw)?;
+        if msg == WM_PAINT {
+            counter.fetch_add(1, Ordering::Relaxed);
+        }
+        Some(*previous)
+    });
+    let Some(previous) = previous else {
+        // SAFETY: default handling for a window that is no longer counted.
+        return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
+    };
+    // SAFETY: `previous` is the window procedure this window had (GetWindowLongPtrW's value from
+    // SetWindowLongPtrW), a valid WNDPROC for as long as the window exists.
+    let result = unsafe {
+        let previous = std::mem::transmute::<isize, WNDPROC>(previous);
+        CallWindowProcW(previous, hwnd, msg, wparam, lparam)
+    };
+    if msg == WM_NCDESTROY {
+        COUNTED.with(|c| {
+            if let Ok(mut c) = c.try_borrow_mut() {
+                c.retain(|(hwnd, ..)| *hwnd != raw);
+            }
+        });
+    }
+    result
 }
 
 /// Ends GPUI's message loop, as the tray's *Quit Pitot* does.

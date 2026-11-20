@@ -48,7 +48,9 @@ widgets at other rates. Compare a series only with series of the same set:
 Since #183 the overlay draws its widgets with GPUI: a window per widget, GPUI's own display-refresh thread while
 any widget shows, and none of it with no widget shown ([rendering](overlay-rendering.md)). Series measured before
 that measured the Direct2D renderer and are not comparable with later ones; performance is measured at each
-release.
+release. Since #187 the overlay's log ends with render counters (`render counters at exit` and a `widget render
+counters at exit` line per widget: updates, redraws asked for, paints, paint time, and the paint messages its
+window received), which say where a run's time went ([development measurement](overlay-rendering.md#development-measurement)).
 
 ## Before an official run
 
