@@ -36,7 +36,7 @@ use crate::platform::{
     self, ControlEvent, DirectoryWatch, Monitor, MoveHandle, ScreenRect, Tray, TrayCommand,
     WidgetMove,
 };
-use crate::render::{self, LayerPlace, Style};
+use crate::render::{self, LayerPlace, PaintCache, Style};
 use crate::wake::reason;
 use crate::widgets::{self, Build, LayerSpec, MAX_LAYERS, Redraw, Shared, Widget};
 
@@ -193,21 +193,24 @@ fn next_wake(shown_due: impl Iterator<Item = Instant>, connected: bool, now: Ins
     }
 }
 
-/// What a widget window's paint reads: the widget, where its layers go in the window, and the shared style.
+/// What a widget window's paint reads: the widget, where its layers go in the window, the shared style, and what
+/// the window keeps between paints.
 struct Painted {
     widget: RefCell<Box<dyn Widget>>,
     places: RefCell<Vec<LayerPlace>>,
     style: Rc<RefCell<Style>>,
+    cache: RefCell<PaintCache>,
     stats: Rc<WidgetStats>,
 }
 
 impl Painted {
     /// Draws every layer of the widget, bottom to top.
     fn paint(&self, window: &mut Window) {
-        let (Ok(widget), Ok(places), Ok(style)) = (
+        let (Ok(widget), Ok(places), Ok(style), Ok(mut cache)) = (
             self.widget.try_borrow(),
             self.places.try_borrow(),
             self.style.try_borrow(),
+            self.cache.try_borrow_mut(),
         ) else {
             return;
         };
@@ -218,8 +221,11 @@ impl Painted {
             #[cfg(feature = "alloc-count")]
             let _paint = crate::alloc_count::Phase::Paint.enter();
             for (index, place) in places.iter().enumerate() {
-                render::paint_layer(window, &style, *place, |canvas| widget.draw(index, canvas));
+                render::paint_layer(window, &style, &mut cache, *place, |canvas| {
+                    widget.draw(index, canvas)
+                });
             }
+            cache.finish_paint();
         }
         #[cfg(feature = "alloc-count")]
         let allocations = crate::alloc_count::paint_allocations() - allocations;
@@ -505,6 +511,7 @@ impl Layout {
                     widget: RefCell::new(widget),
                     places: RefCell::new(Vec::new()),
                     style: Rc::clone(style),
+                    cache: RefCell::new(PaintCache::default()),
                     stats,
                 }),
                 size,

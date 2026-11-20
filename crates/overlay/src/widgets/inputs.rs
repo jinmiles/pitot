@@ -247,9 +247,8 @@ impl InputTraceWidget {
             let (x, y) = turn(point, angle);
             (center.0 + x * scale, center.1 + y * scale)
         };
-        for (from, to) in ICON_SPOKES {
-            canvas.line(at(from), at(to), stroke, WHEEL);
-        }
+        let spokes = ICON_SPOKES.map(|(from, to)| (at(from), at(to)));
+        canvas.lines(&spokes, stroke, WHEEL);
         let (from, to) = ICON_MARK;
         canvas.line(at(from), at(to), ICON_MARK_STROKE * scale, WHEEL_MARK);
     }
