@@ -11,6 +11,7 @@
 //! - [`app`]: the process start, the GPUI app with a window per widget, and the scheduler (Windows).
 //! - [`widgets`]: the widget trait and widgets.
 //! - [`config`]: the hot-reloaded TOML configuration.
+//! - [`diag`]: render counters logged at exit (Windows).
 //! - [`log`]: the log file (Windows).
 //!
 //! Planned modules:
@@ -21,6 +22,8 @@ pub mod alloc_count;
 #[cfg(windows)]
 pub mod app;
 pub mod config;
+#[cfg(windows)]
+pub mod diag;
 #[cfg(windows)]
 pub mod log;
 pub mod pipeline;

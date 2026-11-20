@@ -2,6 +2,10 @@
 //! heap allocations of Rust code in total, on GPUI's thread, during widget updates, and during widget paints,
 //! logged at exit. A measurement, not a check: GPUI allocates while it draws, and native code (Direct3D,
 //! DirectWrite, the driver) allocates outside Rust's heap and is not counted.
+//!
+//! Allocations during a paint are counted by where they happen: in the overlay's own drawing code, or inside the
+//! GPUI calls it makes, by kind (text layout, paths, and other drawing such as quads and glyphs). The kinds say
+//! which allocations the overlay's use of GPUI causes and which GPUI makes whatever the overlay does.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
@@ -16,7 +20,8 @@ static TOTAL: AtomicU64 = AtomicU64::new(0);
 /// Allocations on GPUI's thread (the scheduler, GPUI's own work, updates, and paints).
 static MAIN: AtomicU64 = AtomicU64::new(0);
 static UPDATE: AtomicU64 = AtomicU64::new(0);
-static PAINT: AtomicU64 = AtomicU64::new(0);
+/// Allocations during paints, by [`PaintKind`].
+static PAINT: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
 static UPDATES: AtomicU64 = AtomicU64::new(0);
 static PAINTS: AtomicU64 = AtomicU64::new(0);
 static STARTED: OnceLock<Instant> = OnceLock::new();
@@ -24,6 +29,7 @@ static STARTED: OnceLock<Instant> = OnceLock::new();
 const OTHER: u8 = 0;
 const MAIN_THREAD: u8 = 1;
 const IN_UPDATE: u8 = 2;
+/// A paint, in [`PaintKind`] `n` at `IN_PAINT + n`.
 const IN_PAINT: u8 = 3;
 
 thread_local! {
@@ -38,10 +44,16 @@ fn record() {
         MAIN.fetch_add(1, Ordering::Relaxed);
     }
     match phase {
-        IN_UPDATE => UPDATE.fetch_add(1, Ordering::Relaxed),
-        IN_PAINT => PAINT.fetch_add(1, Ordering::Relaxed),
-        _ => 0,
-    };
+        IN_UPDATE => {
+            UPDATE.fetch_add(1, Ordering::Relaxed);
+        }
+        p if p >= IN_PAINT => {
+            if let Some(counter) = PAINT.get(usize::from(p - IN_PAINT)) {
+                counter.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        _ => {}
+    }
 }
 
 struct Counting;
@@ -82,11 +94,27 @@ pub fn start() {
     PHASE.with(|p| p.set(MAIN_THREAD));
 }
 
+/// Where an allocation during a paint happens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaintKind {
+    /// The overlay's own drawing code.
+    Own = 0,
+    /// GPUI's text layout.
+    Text = 1,
+    /// Building and painting paths (lyon's tessellation and GPUI's paths).
+    Path = 2,
+    /// GPUI's other painting: quads, glyphs, and content masks.
+    Draw = 3,
+}
+
 /// What GPUI's thread is doing, for counting.
 #[derive(Debug, Clone, Copy)]
 pub enum Phase {
     Update,
+    /// A widget's paint, in its own drawing code.
     Paint,
+    /// Within a paint, a call of this kind.
+    In(PaintKind),
 }
 
 /// Restores the phase before [`Phase::enter`] when dropped.
@@ -96,13 +124,19 @@ pub struct PhaseGuard {
 }
 
 impl Phase {
-    /// Counts this thread's allocations as this phase until the guard drops.
+    /// Counts this thread's allocations as this phase until the guard drops. An update or a paint counts one.
     pub fn enter(self) -> PhaseGuard {
-        let (counter, phase) = match self {
-            Self::Update => (&UPDATES, IN_UPDATE),
-            Self::Paint => (&PAINTS, IN_PAINT),
+        let phase = match self {
+            Self::Update => {
+                UPDATES.fetch_add(1, Ordering::Relaxed);
+                IN_UPDATE
+            }
+            Self::Paint => {
+                PAINTS.fetch_add(1, Ordering::Relaxed);
+                IN_PAINT + PaintKind::Own as u8
+            }
+            Self::In(kind) => IN_PAINT + kind as u8,
         };
-        counter.fetch_add(1, Ordering::Relaxed);
         PhaseGuard {
             previous: PHASE.with(|p| p.replace(phase)),
         }
@@ -115,6 +149,11 @@ impl Drop for PhaseGuard {
     }
 }
 
+/// Allocations during paints so far, of every kind together.
+pub fn paint_allocations() -> u64 {
+    PAINT.iter().map(|c| c.load(Ordering::Relaxed)).sum()
+}
+
 /// Logs the counts since [`start`].
 pub fn log_totals() {
     let seconds = STARTED
@@ -123,10 +162,13 @@ pub fn log_totals() {
         .max(1e-9);
     let load = |c: &AtomicU64| c.load(Ordering::Relaxed);
     let (total, main) = (load(&TOTAL), load(&MAIN));
-    let (update, paint) = (load(&UPDATE), load(&PAINT));
+    let update = load(&UPDATE);
+    let paint = paint_allocations();
     let (updates, paints) = (load(&UPDATES), load(&PAINTS));
     let per = |n: u64, d: u64| if d == 0 { 0.0 } else { n as f64 / d as f64 };
+    let per_paint = |n: u64| (per(n, paints) * 10.0).round() / 10.0;
     let rate = |n: u64| (n as f64 / seconds * 10.0).round() / 10.0;
+    let kind = |k: PaintKind| load(&PAINT[k as usize]);
     info!(
         seconds = (seconds * 10.0).round() / 10.0,
         total,
@@ -137,7 +179,11 @@ pub fn log_totals() {
         per_update = (per(update, updates) * 100.0).round() / 100.0,
         paints,
         paint_allocations = paint,
-        per_paint = (per(paint, paints) * 10.0).round() / 10.0,
+        per_paint = per_paint(paint),
+        per_paint_own = per_paint(kind(PaintKind::Own)),
+        per_paint_text = per_paint(kind(PaintKind::Text)),
+        per_paint_path = per_paint(kind(PaintKind::Path)),
+        per_paint_draw = per_paint(kind(PaintKind::Draw)),
         "allocations at exit"
     );
 }

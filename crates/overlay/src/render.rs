@@ -14,6 +14,16 @@ use lyon::tessellation::{LineCap, LineJoin};
 
 use crate::config;
 
+/// Evaluates `$e`, counting the heap allocations it makes as a paint's `$kind` in a `--features alloc-count` build
+/// (see [`crate::alloc_count::PaintKind`]).
+macro_rules! counted {
+    ($kind:ident, $e:expr) => {{
+        #[cfg(feature = "alloc-count")]
+        let _counted = crate::alloc_count::Phase::In(crate::alloc_count::PaintKind::$kind).enter();
+        $e
+    }};
+}
+
 /// Straight (non-premultiplied) RGBA color.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Color {
@@ -273,7 +283,10 @@ impl Canvas<'_> {
             return;
         }
         let bounds = self.window_bounds(rect);
-        self.window.paint_quad(gpui::fill(bounds, color.hsla()));
+        counted!(
+            Draw,
+            self.window.paint_quad(gpui::fill(bounds, color.hsla()))
+        );
     }
 
     pub fn fill(&mut self, rect: Rect, color: Color) {
@@ -306,12 +319,14 @@ impl Canvas<'_> {
             let (y0, y1) = (from.1.min(to.1), from.1.max(to.1));
             self.fill_layer(Rect::new(from.0 - half, y0, width, y1 - y0), color);
         } else {
-            let mut path = PathBuilder::stroke(px(width * self.logical));
-            path.move_to(self.at(from.0, from.1));
-            path.line_to(self.at(to.0, to.1));
-            if let Ok(path) = path.build() {
-                self.window.paint_path(path, color.hsla());
-            }
+            counted!(Path, {
+                let mut path = PathBuilder::stroke(px(width * self.logical));
+                path.move_to(self.at(from.0, from.1));
+                path.line_to(self.at(to.0, to.1));
+                if let Ok(path) = path.build() {
+                    self.window.paint_path(path, color.hsla());
+                }
+            });
         }
     }
 
@@ -353,14 +368,17 @@ impl Canvas<'_> {
         }
         let bounds =
             self.window_bounds(Rect::new(cx - outer, cy - outer, outer * 2.0, outer * 2.0));
-        self.window.paint_quad(quad(
-            bounds,
-            px(outer * self.logical),
-            gpui::transparent_black(),
-            px(w * self.logical),
-            color.hsla(),
-            gpui::BorderStyle::Solid,
-        ));
+        counted!(
+            Draw,
+            self.window.paint_quad(quad(
+                bounds,
+                px(outer * self.logical),
+                gpui::transparent_black(),
+                px(w * self.logical),
+                color.hsla(),
+                gpui::BorderStyle::Solid,
+            ))
+        );
     }
 
     /// Fills a circle around `center`.
@@ -371,14 +389,17 @@ impl Canvas<'_> {
             return;
         }
         let bounds = self.window_bounds(Rect::new(cx - r, cy - r, r * 2.0, r * 2.0));
-        self.window.paint_quad(quad(
-            bounds,
-            px(r * self.logical),
-            color.hsla(),
-            px(0.0),
-            gpui::transparent_black(),
-            gpui::BorderStyle::Solid,
-        ));
+        counted!(
+            Draw,
+            self.window.paint_quad(quad(
+                bounds,
+                px(r * self.logical),
+                color.hsla(),
+                px(0.0),
+                gpui::transparent_black(),
+                gpui::BorderStyle::Solid,
+            ))
+        );
     }
 
     /// Strokes the line through `points` with round joins, back to the first point when `closed`.
@@ -403,14 +424,18 @@ impl Canvas<'_> {
             .with_line_width(width * self.logical)
             .with_line_join(LineJoin::Round)
             .with_line_cap(LineCap::Round);
-        let mut path = PathBuilder::default().with_style(PathStyle::Stroke(options));
+        let mut path = counted!(
+            Path,
+            PathBuilder::default().with_style(PathStyle::Stroke(options))
+        );
         let mut count = 0usize;
         for p in points {
             let (x, y) = self.layer_point(p);
+            let at = self.at(x, y);
             if count == 0 {
-                path.move_to(self.at(x, y));
+                counted!(Path, path.move_to(at));
             } else {
-                path.line_to(self.at(x, y));
+                counted!(Path, path.line_to(at));
             }
             count += 1;
         }
@@ -420,9 +445,11 @@ impl Canvas<'_> {
         if closed {
             path.close();
         }
-        if let Ok(path) = path.build() {
-            self.window.paint_path(path, color.hsla());
-        }
+        counted!(Path, {
+            if let Ok(path) = path.build() {
+                self.window.paint_path(path, color.hsla());
+            }
+        });
     }
 
     /// The font size in logical pixels for a size in widget pixels: the next of [`TEXT_SIZES`] up, times the text
@@ -458,10 +485,12 @@ impl Canvas<'_> {
         let rect = self.layer_rect(rect);
         let font_size = self.font_size(size);
         let run = self.run(text, color);
-        let layout = self
-            .window
-            .text_system()
-            .layout_line(text, font_size, &[run], None);
+        let layout = counted!(
+            Text,
+            self.window
+                .text_system()
+                .layout_line(text, font_size, &[run], None)
+        );
         let width = f32::from(layout.width) / self.logical;
         if self.scale != 1.0 && width > rect.w + 0.5 && is_number(text) {
             return;
@@ -486,11 +515,14 @@ impl Canvas<'_> {
             for run in &layout.runs {
                 for glyph in &run.glyphs {
                     let at = point(origin.x + glyph.position.x, origin.y + glyph.position.y);
-                    let _ = if glyph.is_emoji {
-                        window.paint_emoji(at, run.font_id, glyph.id, layout.font_size)
-                    } else {
-                        window.paint_glyph(at, run.font_id, glyph.id, layout.font_size, hsla)
-                    };
+                    let _ = counted!(
+                        Draw,
+                        if glyph.is_emoji {
+                            window.paint_emoji(at, run.font_id, glyph.id, layout.font_size)
+                        } else {
+                            window.paint_glyph(at, run.font_id, glyph.id, layout.font_size, hsla)
+                        }
+                    );
                 }
             }
         });
@@ -504,10 +536,12 @@ impl Canvas<'_> {
         }
         let font_size = self.font_size(size);
         let run = self.run(text, Color::WHITE);
-        let layout = self
-            .window
-            .text_system()
-            .layout_line(text, font_size, &[run], None);
+        let layout = counted!(
+            Text,
+            self.window
+                .text_system()
+                .layout_line(text, font_size, &[run], None)
+        );
         f32::from(layout.width) / self.logical <= self.layer_rect(rect).w + 0.5
     }
 

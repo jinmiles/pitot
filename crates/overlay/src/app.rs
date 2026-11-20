@@ -30,6 +30,7 @@ use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use tracing::{debug, info, warn};
 
 use crate::config::{self, Config};
+use crate::diag::{RenderStats, WidgetStats};
 use crate::pipeline::{Display, Pipeline, RecordingConfig, Source, View, Wake};
 use crate::platform::{
     self, ControlEvent, DirectoryWatch, Monitor, MoveHandle, ScreenRect, Tray, TrayCommand,
@@ -197,6 +198,7 @@ struct Painted {
     widget: RefCell<Box<dyn Widget>>,
     places: RefCell<Vec<LayerPlace>>,
     style: Rc<RefCell<Style>>,
+    stats: Rc<WidgetStats>,
 }
 
 impl Painted {
@@ -209,11 +211,21 @@ impl Painted {
         ) else {
             return;
         };
+        let started = Instant::now();
         #[cfg(feature = "alloc-count")]
-        let _paint = crate::alloc_count::Phase::Paint.enter();
-        for (index, place) in places.iter().enumerate() {
-            render::paint_layer(window, &style, *place, |canvas| widget.draw(index, canvas));
+        let allocations = crate::alloc_count::paint_allocations();
+        {
+            #[cfg(feature = "alloc-count")]
+            let _paint = crate::alloc_count::Phase::Paint.enter();
+            for (index, place) in places.iter().enumerate() {
+                render::paint_layer(window, &style, *place, |canvas| widget.draw(index, canvas));
+            }
         }
+        #[cfg(feature = "alloc-count")]
+        let allocations = crate::alloc_count::paint_allocations() - allocations;
+        #[cfg(not(feature = "alloc-count"))]
+        let allocations = 0;
+        self.stats.painted(started.elapsed(), allocations);
     }
 }
 
@@ -412,6 +424,7 @@ impl Layout {
         vars: &VarSet,
         scale: f32,
         style: &Rc<RefCell<Style>>,
+        stats: &[Rc<WidgetStats>],
     ) -> Self {
         let primary = monitors.iter().position(|m| m.primary).unwrap_or(0);
         let general = config.general.monitor;
@@ -482,12 +495,17 @@ impl Layout {
                     "widget shown inside its monitor, away from its configured place"
                 );
             }
+            let stats = stats
+                .iter()
+                .find(|s| s.name == name)
+                .map_or_else(|| Rc::new(WidgetStats::new(name)), Rc::clone);
             let slot = Slot {
                 name,
                 painted: Rc::new(Painted {
                     widget: RefCell::new(widget),
                     places: RefCell::new(Vec::new()),
                     style: Rc::clone(style),
+                    stats,
                 }),
                 size,
                 scaled,
@@ -737,6 +755,9 @@ struct Overlay {
     unseen_since: Option<Instant>,
     /// The actions of the last step, kept for their buffer.
     actions: Vec<Action>,
+    /// Every widget's render counters, kept across reloads, and the scheduler's.
+    stats: Vec<Rc<WidgetStats>>,
+    render_stats: RenderStats,
 }
 
 fn config_stamp() -> Option<config::Stamp> {
@@ -904,8 +925,14 @@ impl Overlay {
                 self.handles = None;
                 let scale = config::text_scale(self.previews.text_size(&fresh));
                 let missing = std::mem::take(&mut self.layout.missing);
-                self.layout =
-                    Layout::build(&fresh, &monitors, self.view.var_set(), scale, &self.style);
+                self.layout = Layout::build(
+                    &fresh,
+                    &monitors,
+                    self.view.var_set(),
+                    scale,
+                    &self.style,
+                    &self.stats,
+                );
                 log_missing(&missing, &self.layout.missing, monitors.len());
                 self.config = fresh;
                 info!("configuration reloaded");
@@ -982,6 +1009,7 @@ impl Overlay {
                 Ok(window) => {
                     slot.window = Some(window);
                     slot.stale = true;
+                    slot.painted.stats.window_made();
                 }
                 Err(e) => warn!(widget = slot.name, "widget window not made: {e}"),
             }
@@ -1005,6 +1033,7 @@ impl Overlay {
             ..Plan::default()
         };
         plan.actions.clear();
+        self.render_stats.step(reasons);
         if reasons & reason::COMMAND != 0 {
             self.take_commands();
         }
@@ -1106,7 +1135,10 @@ impl Overlay {
                     .borrow_mut()
                     .update(&mut self.view, now, &mut redraws);
             }
-            if std::mem::take(&mut slot.stale) || redraws.iter().any(|r| *r != Redraw::Nothing) {
+            let redraw =
+                std::mem::take(&mut slot.stale) || redraws.iter().any(|r| *r != Redraw::Nothing);
+            slot.painted.stats.updated(redraw);
+            if redraw {
                 window.view.update(cx, |_, cx| cx.notify());
             }
         }
@@ -1171,6 +1203,14 @@ impl Overlay {
                     if let Err(e) = platform::style_widget_window(hwnd) {
                         warn!("widget window not made an overlay window: {e}");
                         continue;
+                    }
+                    if let Some(slot) = self
+                        .layout
+                        .slots
+                        .iter()
+                        .find(|s| s.window.as_ref().is_some_and(|w| w.hwnd == hwnd))
+                    {
+                        platform::count_paint_messages(hwnd, slot.painted.stats.paint_messages());
                     }
                     platform::place_widget_window(hwnd, rect, false);
                     let placed = platform::widget_window_rect(hwnd);
@@ -1326,6 +1366,9 @@ async fn schedule(overlay: Rc<RefCell<Option<Overlay>>>, wake: Arc<Wake>, cx: &m
             let task = cx.update(|cx| cx.request_windowing(request));
             let result = task.await;
             if let Some(overlay) = overlay.borrow_mut().as_mut() {
+                if result.is_ok() && windowed {
+                    overlay.render_stats.became_windowed();
+                }
                 overlay.windowing = match (&result, windowed) {
                     (Ok(()), true) => Windowing::Windowed,
                     (Ok(()), false) => Windowing::Headless,
@@ -1392,7 +1435,11 @@ pub fn run(launch: Launch) -> Result<(), Box<dyn std::error::Error>> {
         background: config.general.background_opacity,
         ..Style::default()
     }));
-    let layout = Layout::build(&config, &monitors, view.var_set(), scale, &style);
+    let stats: Vec<Rc<WidgetStats>> = widgets::SPECS
+        .iter()
+        .map(|spec| Rc::new(WidgetStats::new(spec.name)))
+        .collect();
+    let layout = Layout::build(&config, &monitors, view.var_set(), scale, &style, &stats);
     log_missing(&[], &layout.missing, monitors.len());
     let tray = Tray::create()?;
     // A Pitot window open from before learns that the overlay runs now.
@@ -1424,6 +1471,8 @@ pub fn run(launch: Launch) -> Result<(), Box<dyn std::error::Error>> {
         windowing: Windowing::Headless,
         unseen_since: None,
         actions: Vec::new(),
+        stats,
+        render_stats: RenderStats::new(),
     })));
 
     // Headless until a widget shows: no GPU device and no display-refresh thread while nothing is drawn.
@@ -1440,6 +1489,7 @@ pub fn run(launch: Launch) -> Result<(), Box<dyn std::error::Error>> {
 
     if let Some(overlay) = overlay.borrow_mut().take() {
         log_counters(&overlay.view, "data counters at exit");
+        overlay.render_stats.log(&overlay.stats);
         #[cfg(feature = "alloc-count")]
         crate::alloc_count::log_totals();
     }
