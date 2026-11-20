@@ -49,6 +49,17 @@ that both use GPUI, and left for a later change.
   run GPUI's handlers, which borrow GPUI's app, and calling them inside an update panics.
 - Moving a widget moves its window; resizing it resizes the window, and GPUI draws it at the new size. Hiding a
   widget hides its window. A widget shown once keeps its window while any widget shows.
+- Each window costs what GPUI gives every window, whatever it draws (read from `gpui-pre-windows` 0.3.12):
+  a composition swap chain of three buffers, a path texture, and a 4x multisampled path texture, all the window's
+  size (32 bytes per pixel together, made when the window is made and resized with it); a glyph atlas of its own
+  (a 1024x1024 texture per kind of sprite it draws); its own DirectComposition device, target, and visual; its own
+  DirectManipulation manager; eight render pipelines with their shaders and instance buffers, which grow to the
+  largest frame drawn; and a line layout cache. The four reference widgets' windows hold 698,600 pixels, about
+  22 MB at 32 bytes each. Widgets do not share windows: a window covering several boxes has their gaps' pixels
+  too and is drawn whole whenever any of them changes, so its widgets draw at the rate of the fastest and the
+  compositor takes the whole window each time; in the default layout the only reference widgets close together,
+  the relative (10 Hz) and the fuel widget (30 Hz), would make a window 12% larger than their boxes. *Move widgets*
+  would also have to split and join windows while a widget is dragged.
 - With no widget shown for 2 s (the sim off, in the garage, *Hide widgets*), every widget window closes and GPUI
   goes headless (`App::request_windowing`), which releases its GPU device and stops its display-refresh thread.
   The overlay starts headless and becomes windowed again when a widget is to show; making the device and the
@@ -82,9 +93,18 @@ that both use GPUI, and left for a later change.
   widgets that did not change are not drawn. There are no partial updates; a `Redraw::Area` from a widget only
   says that something changed.
 - `Canvas::fill` and `fill_background` are GPUI quads, as are level and upright lines (so they stay as sharp as
-  fills). Other lines and polylines (`Canvas::stroke`, `polyline`) are GPUI paths with lyon's tessellation, flat
-  ends for lines and round joins and ends for polylines. Circles are round quads: a border for a stroke, a fill
-  for a disk.
+  fills). Other lines (`Canvas::line`, and `Canvas::lines` for several in one path) and polylines
+  (`Canvas::stroke`, `polyline`) are GPUI paths with lyon's tessellation, flat ends for lines and round joins and
+  ends for polylines. Circles are round quads: a border for a stroke, a fill for a disk.
+- What a window keeps between paints (`PaintCache`) keeps a paint from redoing work GPUI's whole-window drawing
+  would otherwise repeat: lines of text shaped in the last paint ([below](#text)), and one lyon stroke tessellator
+  with its vertex buffers, which tessellates each stroke straight into a GPUI path (the triangles GPUI's own path
+  builder makes from the same tessellation, without its intermediate path, fresh tessellator, and growing
+  buffers). Points inside a level or upright run of a polyline are left out before tessellation: the line through
+  the run's ends covers exactly the pixels the line through every point covers, joins included (a test compares
+  the triangles' coverage), with far fewer triangles for pedals held at zero or full. A paint then allocates only
+  in the GPUI calls that must: each path's vertices, which GPUI's scene takes and scales into a copy, and text not
+  drawn in the last paint.
 - `[general] text_size` ([configuration](configuration.md#text-size)) sets a text scale, `text_size / 100`. A widget
   that scales with the text (`Widget::scales_with_text`, every widget but the input trace) is given its box divided
   by the scale through `Widget::resize` and draws in those widget pixels: the canvas maps each coordinate to screen
@@ -103,12 +123,21 @@ that both use GPUI, and left for a later change.
 
 ## Text
 
-- Text is laid out by GPUI's text system (DirectWrite underneath), in Segoe UI semibold, one line per call, and
-  painted glyph by glyph (`Window::paint_glyph`) from GPUI's glyph atlas. GPUI keeps the layouts of the last frame
-  and reuses them for text that did not change, and rasterizes each glyph once per size.
+- Text is in Segoe UI semibold, one line per call, painted glyph by glyph (`Window::paint_glyph`) from GPUI's
+  glyph atlas, which rasterizes each glyph once per size.
+- Numbers (lines made only of digits, signs, separators, `%`, `#`, `k`, `L`, and spaces, up to 24 characters) are
+  put together from glyphs measured once per font size: each character is laid out alone by GPUI's text system the
+  first time it is drawn at a size, and a line places each glyph where the advances of those before it end. In
+  Segoe UI semibold these characters have no kerning or contextual forms between them: shaped whole by GPUI,
+  every pair and triple of them at the font sizes of every text size gives the same glyphs, each exactly at that
+  position, and the same width (checked when this was written, 233,184 lines). So numbers that change, such as
+  gaps and times, draw without a DirectWrite layout or an allocation.
+- Other text is laid out by GPUI's text system (DirectWrite underneath) and kept by the window, per font size,
+  while it is drawn in every paint; text not drawn in a paint is let go at its end. GPUI would keep its own layouts
+  for a frame too, but finding them again costs a copy of the string and lookups per line, every paint.
 - Text is vertically centered in its box by the font's ascent and descent, as DirectWrite centers a paragraph, on a
   whole screen pixel; left, centered, or right in it; and clipped to it, so long names do not run into the next
-  column. `Canvas::fits` measures with the same layout.
+  column. `Canvas::fits` measures with the same glyphs or layout.
 
 ## Schedule
 
@@ -137,9 +166,19 @@ GPUI's update. Hidden widgets are not updated; they keep their last due time, so
 appear.
 
 GPUI draws on its own schedule: while it is windowed, a display-refresh thread waits for each composition
-(`DwmFlush`) and invalidates every GPUI window, and GPUI draws the windows that were notified and presents them.
-That thread and the paint messages it causes wake the process at the display's refresh rate whenever any widget
-shows, whether or not anything changed. Going headless when nothing shows stops them.
+(`DwmFlush`) and invalidates every GPUI window (`RedrawWindow`), and GPUI draws the windows that were notified and
+presents them. A window that was not notified is not drawn or presented: its paint message runs GPUI's frame
+callback, which finds the window clean and does nothing else. That callback still runs for every shown window at
+every refresh, with a DirectManipulation update, two short updates of GPUI's app, and an IME check, so the
+process wakes about once per window per refresh whenever any widget shows, whether or not anything changed. GPUI
+has no option to stop that per window; fewer windows and going headless when nothing shows are what the overlay can
+do about it.
+
+A draw lays out and paints the window's one element, sorts and batches the scene, uploads every kind of primitive
+to its instance buffer (`Map` with `WRITE_DISCARD`), draws, and presents the swap chain without dirty rectangles,
+so the compositor takes the whole window. Paths take a pass of their own: the 4x multisampled path texture is
+cleared and resolved over the whole window, and each path vertex goes to the GPU with its own copy of the color
+(104 bytes a vertex).
 
 ## Widgets
 
@@ -285,8 +324,20 @@ for the display states it shows in, its background through `Canvas::fill_backgro
 
 Performance is measured with `pitot-bench` at each release, on the release build. For development:
 
+- Every build logs render counters at exit, next to `data counters at exit` (never while it runs):
+  `render counters at exit` with the scheduler's wake-ups, in total, per second, and per reason (ticks, timer,
+  messages, commands, moves, configuration), and how often GPUI became windowed; then one `widget render counters
+  at exit` line per widget made: updates, updates that asked for a redraw, paints (GPUI's draws of the widget's
+  window, each presented once) and paints per second, the time the widget's paint took in total per second, on
+  average, and at most (its drawing inside GPUI's frame, not GPUI's layout, upload, or present), windows made, and
+  the `WM_PAINT` messages its windows received, in total and per second (the display-refresh thread's
+  invalidations; a window subclass counts them on GPUI's thread). Paints well below paint messages are windows GPUI
+  was asked to paint and found clean.
 - `cargo build -p pitot --features alloc-count` builds the overlay with a counting allocator. At exit it logs
   `allocations at exit` with the total and the rate per second of the whole process, the rate on GPUI's thread,
-  and the allocations during widget updates and paints with their counts and the allocations per paint. It counts
-  Rust's heap only: Direct3D, DirectWrite, and the driver allocate natively and are not counted.
+  and the allocations during widget updates and paints with their counts and the allocations per paint, split by
+  where they happen: the overlay's own drawing code (`per_paint_own`), GPUI's text layout (`per_paint_text`),
+  paths (`per_paint_path`, lyon's tessellation and GPUI's paths), and GPUI's other painting (`per_paint_draw`:
+  quads, glyphs). Each widget's line above then has `paint_allocations_mean`. It counts Rust's heap only:
+  Direct3D, DirectWrite, and the driver allocate natively and are not counted.
 - Wake-ups per thread can be read without ETW from the PDH counter `\Thread(pitot*)\Context Switches/sec`.

@@ -806,13 +806,12 @@ impl Canvas<'_> {
                 .text_system()
                 .layout_line(text, px(font_size), &[run], None)
         );
-        let sized = self.cache.text.sized(font_size);
-        counted!(
-            Text,
-            sized
-                .lines
-                .insert(text.to_owned(), (Arc::clone(&layout), paint))
-        );
+        // Kept under a copy of the text: the overlay's own allocation, made only for text new to the window.
+        self.cache
+            .text
+            .sized(font_size)
+            .lines
+            .insert(text.to_owned(), (Arc::clone(&layout), paint));
         Line::Shaped(layout)
     }
 
