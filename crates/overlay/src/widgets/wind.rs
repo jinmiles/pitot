@@ -1,5 +1,6 @@
 //! Wind: one speed in km/h, and a dial that turns with the car (its nose at the top) with an arrow showing where
-//! the air flows relative to the car, so where the wind hits the car reads at a glance.
+//! the air flows relative to the car, so where the wind hits the car reads at a glance. The arrow is the only sign
+//! of the direction: no compass point is written out.
 //!
 //! `YawNorth` is the car's compass heading, clockwise from north: it matches the course over ground from an
 //! `.ibt`'s latitude and longitude within 0.2 degrees. `WindDir` is taken as the compass direction the wind comes
@@ -50,13 +51,6 @@ pub(crate) fn relative(wind_dir: f32, heading: f32) -> f32 {
     (wind_dir - heading).rem_euclid(TAU)
 }
 
-/// The compass point (of eight) of a direction in radians clockwise from north.
-pub(crate) fn compass(direction: f32) -> &'static str {
-    const POINTS: [&str; 8] = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"];
-    let eighth = (direction.rem_euclid(TAU) / (TAU / 8.0)).round() as usize;
-    POINTS[eighth % 8]
-}
-
 /// An angle in whole steps, from 0 to `STEPS - 1`.
 fn step(angle: f32) -> i32 {
     ((angle.rem_euclid(TAU).to_degrees() / STEP_DEGREES).round() as i32).rem_euclid(STEPS)
@@ -95,8 +89,6 @@ pub(crate) fn arrow(center: (f32, f32), radius: f32, relative: f32) -> [(f32, f3
 struct Reading {
     /// Wind speed in whole km/h, or dashes.
     speed: FixedText,
-    /// Compass point the wind comes from, empty when calm or unknown.
-    from: &'static str,
     /// Where the wind comes from relative to the nose, in steps; `None` when calm or without a heading.
     arrow: Option<i32>,
     /// Where north is on the dial, in steps; `None` without a heading.
@@ -109,7 +101,6 @@ impl Reading {
     fn new() -> Self {
         Self {
             speed: FixedText::new(8),
-            from: "",
             arrow: None,
             north: None,
             level: 0,
@@ -119,7 +110,6 @@ impl Reading {
     /// Fills from the wind speed (m/s), the direction it comes from, and the car's heading, any of them unknown.
     fn fill(&mut self, speed: Option<f32>, wind_dir: Option<f32>, heading: Option<f32>) {
         self.speed.set("--");
-        self.from = "";
         self.arrow = None;
         let heading = heading.filter(|h| h.is_finite());
         self.north = heading.map(|h| step(-h));
@@ -139,7 +129,6 @@ impl Reading {
         if kmh < CALM_KMH {
             return;
         }
-        self.from = compass(dir);
         self.arrow = heading.map(|heading| step(relative(dir, heading)));
     }
 }
@@ -167,23 +156,72 @@ impl WindWidget {
             next: Reading::new(),
         }
     }
-
-    /// The dial's center and radius: left of the text column, as large as fits.
-    fn dial(&self) -> ((f32, f32), f32) {
-        let (w, h) = (self.width as f32, self.height as f32);
-        let room = (w - COLUMN - 2.0 * PAD).min(h - 2.0 * PAD);
-        let radius = (room / 2.0 - 2.0).max(10.0);
-        ((PAD + room / 2.0, h / 2.0), radius)
-    }
 }
 
 /// Width of the text column on the right.
 const COLUMN: f32 = 64.0;
 /// Where the speed's number ends in the text column: two digits at the speed's size fit before it.
 const SPEED_END: f32 = 30.0;
+/// Heights of the text column's two lines: the `Wind` label, and the speed with its unit.
+const LABEL_HEIGHT: f32 = 16.0;
+const VALUE_HEIGHT: f32 = 30.0;
 const PAD: f32 = 8.0;
 /// The text column's lines apart, and a small dial beside it: a default-sized widget at the largest text size.
 const MIN_SIZE: (u32, u32) = (130, 110);
+
+/// The dial's center and radius in a widget `width` by `height`: left of the text column, as large as fits.
+fn dial(width: f32, height: f32) -> ((f32, f32), f32) {
+    let room = (width - COLUMN - 2.0 * PAD).min(height - 2.0 * PAD);
+    let radius = (room / 2.0 - 2.0).max(10.0);
+    ((PAD + room / 2.0, height / 2.0), radius)
+}
+
+/// One line of text in the text column.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ColumnText<'a> {
+    text: &'a str,
+    rect: Rect,
+    size: f32,
+    align: Align,
+    /// Drawn dim (a label or unit) rather than white (a value).
+    dim: bool,
+}
+
+/// The text column right of the dial: the `Wind` label above the speed and its unit, the pair centered on the
+/// dial's middle. The direction is the arrow's alone, so nothing here depends on it.
+fn column(reading: &Reading, width: f32, height: f32) -> [ColumnText<'_>; 3] {
+    let x = width - COLUMN - 4.0;
+    // The label's line box starts a little below its rectangle's top and the speed's baseline sits a little above
+    // its rectangle's bottom by about as much, so centering the rectangles centers the ink.
+    let top = height / 2.0 - (LABEL_HEIGHT + VALUE_HEIGHT) / 2.0;
+    let value = top + LABEL_HEIGHT;
+    // The number ends at a fixed point and the unit follows it, so one to three digits keep the unit in place.
+    let unit = SPEED_END + 3.0;
+    [
+        ColumnText {
+            text: "Wind",
+            rect: Rect::new(x, top, COLUMN, LABEL_HEIGHT),
+            size: 11.0,
+            align: Align::Left,
+            dim: true,
+        },
+        ColumnText {
+            text: reading.speed.as_str(),
+            rect: Rect::new(x - 12.0, value, 12.0 + SPEED_END, VALUE_HEIGHT),
+            size: 24.0,
+            align: Align::Right,
+            dim: false,
+        },
+        // Lowered so the smaller unit sits on the number's baseline.
+        ColumnText {
+            text: "km/h",
+            rect: Rect::new(x + unit, value + 6.0, COLUMN - unit, VALUE_HEIGHT),
+            size: 11.0,
+            align: Align::Left,
+            dim: true,
+        },
+    ]
+}
 
 impl Register for WindWidget {
     type Vars = WindVars;
@@ -236,7 +274,7 @@ impl Widget for WindWidget {
         let r = &self.shown;
 
         // The dial: a ring, the nose at the top, north and the other compass points turning with the car.
-        let (center, radius) = self.dial();
+        let (center, radius) = dial(w, h);
         canvas.circle(center, radius, 1.5, Color::rgb(DIM, 0.5));
         let nose = 7f32.to_radians();
         canvas.line(
@@ -273,31 +311,9 @@ impl Widget for WindWidget {
             canvas.line(head, right, 3.0, ink);
         }
 
-        // The text column, centered beside the dial: the speed with its unit, and where the wind comes from.
-        let x = w - COLUMN - 4.0;
-        let row = |top: f32, height: f32| Rect::new(x, top * h / 170.0, COLUMN, height * h / 170.0);
-        canvas.text("Wind", row(40.0, 16.0), 11.0, Align::Left, dim);
-        // The number ends at a fixed point and the unit follows it, so one to three digits keep the unit in place.
-        let value = row(56.0, 30.0);
-        canvas.text(
-            r.speed.as_str(),
-            Rect::new(x - 12.0, value.y, 12.0 + SPEED_END, value.h),
-            24.0,
-            Align::Right,
-            white,
-        );
-        // Lowered so the smaller unit sits on the number's baseline.
-        let unit = SPEED_END + 3.0;
-        canvas.text(
-            "km/h",
-            Rect::new(x + unit, value.y + 6.0, COLUMN - unit, value.h),
-            11.0,
-            Align::Left,
-            dim,
-        );
-        if !r.from.is_empty() {
-            canvas.text("from", row(92.0, 14.0), 11.0, Align::Left, dim);
-            canvas.text(r.from, row(106.0, 22.0), 16.0, Align::Left, white);
+        for line in column(r, w, h) {
+            let color = if line.dim { dim } else { white };
+            canvas.text(line.text, line.rect, line.size, line.align, color);
         }
     }
 }
@@ -323,20 +339,6 @@ mod tests {
     }
 
     #[test]
-    fn compass_points() {
-        assert_eq!(compass(0.0), "N");
-        assert_eq!(compass(TAU - 0.1), "N");
-        assert_eq!(compass(PI / 4.0), "NE");
-        assert_eq!(compass(PI), "S");
-        assert_eq!(
-            compass(4.688),
-            "W",
-            "Sebring .ibt at the start: 268.6 degrees"
-        );
-        assert_eq!(compass(-PI / 2.0), "W");
-    }
-
-    #[test]
     fn the_arrow_points_downwind() {
         let center = (100.0, 100.0);
         // Headwind: the air comes at the car from the front, so the arrow points down the dial.
@@ -353,12 +355,11 @@ mod tests {
     }
 
     #[test]
-    fn reading_shows_one_speed_and_direction() {
+    fn reading_shows_one_speed_and_the_arrow() {
         let mut r = Reading::new();
         // 5 m/s from the west (270 degrees), car heading north: from the left, 18 km/h.
         r.fill(Some(5.0), Some(3.0 * PI / 2.0), Some(0.0));
         assert_eq!(r.speed.as_str(), "18");
-        assert_eq!(r.from, "W");
         assert_eq!(r.arrow, Some(135), "270 degrees in 2-degree steps");
         assert_eq!(r.north, Some(0));
         assert_eq!(r.level, 1, "18 km/h is moderate");
@@ -386,14 +387,65 @@ mod tests {
         let mut r = Reading::new();
         r.fill(None, None, None);
         assert_eq!(r.speed.as_str(), "--");
-        assert_eq!((r.arrow, r.north, r.from), (None, None, ""));
+        assert_eq!((r.arrow, r.north), (None, None));
         r.fill(Some(0.1), Some(1.0), Some(0.0));
         assert_eq!(r.speed.as_str(), "0");
-        assert_eq!((r.arrow, r.from), (None, ""), "calm");
+        assert_eq!(r.arrow, None, "calm");
         r.fill(Some(5.0), Some(1.0), None);
-        assert_eq!(r.from, "NE", "direction without a heading: 57 degrees");
-        assert_eq!(r.arrow, None);
+        assert_eq!(r.arrow, None, "a direction without a heading has no arrow");
         assert_eq!(r.speed.as_str(), "18");
+        // Without a heading nothing shown depends on the direction, so a new direction does not redraw.
+        let mut other = Reading::new();
+        other.fill(Some(5.0), Some(4.0), None);
+        assert_eq!(r, other);
+    }
+
+    #[test]
+    fn no_direction_text_is_drawn() {
+        const DIRECTION_TEXT: [&str; 9] = ["from", "N", "NE", "E", "SE", "S", "SW", "W", "NW"];
+        let mut r = Reading::new();
+        // Every eighth of the compass, with and without a heading, calm, and without data.
+        let mut cases = Vec::new();
+        for eighth in 0..8 {
+            let dir = eighth as f32 * TAU / 8.0;
+            cases.push((Some(5.0), Some(dir), Some(0.0)));
+            cases.push((Some(5.0), Some(dir), None));
+        }
+        cases.push((Some(0.1), Some(1.0), Some(0.0)));
+        cases.push((None, None, None));
+        for (speed, dir, heading) in cases {
+            r.fill(speed, dir, heading);
+            let texts = column(&r, 200.0, 170.0).map(|line| line.text);
+            assert_eq!(texts, ["Wind", r.speed.as_str(), "km/h"], "{dir:?}");
+            assert!(
+                texts.iter().all(|text| !DIRECTION_TEXT.contains(text)),
+                "{texts:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_text_column_is_centered_beside_the_dial() {
+        let mut r = Reading::new();
+        r.fill(Some(30.0), Some(0.0), Some(0.0));
+        assert_eq!(r.speed.as_str(), "108", "three digits, the widest speed");
+        // In widget pixels: the default size, the smallest, and the default box at text sizes 150 and 70.
+        for (w, h) in [(200.0, 170.0), (130.0, 110.0), (134.0, 114.0), (286.0, 243.0)] {
+            let [label, speed, unit] = column(&r, w, h).map(|line| line.rect);
+            let (center, radius) = dial(w, h);
+            let middle = (label.y + speed.y + speed.h) / 2.0;
+            assert!((middle - center.1).abs() < 0.01, "{w}x{h}: {middle}");
+            assert!((center.1 - h / 2.0).abs() < 0.01, "{w}x{h}");
+            // The label and the unit start right of the dial; the right-aligned speed ends right of it.
+            assert!(label.x > center.0 + radius, "{w}x{h}");
+            assert!(unit.x > center.0 + radius, "{w}x{h}");
+            assert!(speed.x + speed.w > center.0 + radius, "{w}x{h}");
+            assert_eq!(label.y + label.h, speed.y, "{w}x{h}: the speed under the label");
+            for rect in [label, speed, unit] {
+                assert!(rect.x >= 0.0 && rect.y >= 0.0, "{w}x{h}: {rect:?}");
+                assert!(rect.x + rect.w <= w && rect.y + rect.h <= h, "{w}x{h}: {rect:?}");
+            }
+        }
     }
 
     #[test]
