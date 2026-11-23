@@ -18,6 +18,7 @@ use crate::config::{NoOptions, WidgetConfig};
 use crate::pipeline::View;
 use crate::render::{Align, Canvas, Color, Rect};
 
+use super::relative::{in_pits, track_out_lap};
 use super::text::FixedText;
 use super::timing::{Gap, RaceClock, SectorClock, SectorStarts};
 use super::trackclock::{SharedTrackClock, TrackClock};
@@ -125,6 +126,14 @@ pub(crate) fn write_length(out: &mut FixedText, seconds: f64) {
     }
 }
 
+/// Whether a `SessionType` is a qualifying session: `Open Qualify`, `Lone Qualify`, or `Qualify`.
+fn is_qualifying_type(session_type: &str) -> bool {
+    session_type
+        .as_bytes()
+        .windows(b"qualify".len())
+        .any(|w| w.eq_ignore_ascii_case(b"qualify"))
+}
+
 /// `m:ss.sss`, or nothing for a missing time.
 pub(crate) fn write_lap_time(out: &mut FixedText, seconds: f32) {
     out.clear();
@@ -217,6 +226,8 @@ struct CarRow {
     player: bool,
     leader: bool,
     in_pit: bool,
+    /// On an out lap in qualifying.
+    out_lap: bool,
     /// A line above: the rows before are the class leaders, these are the cars around the player.
     break_before: bool,
     color: u32,
@@ -249,6 +260,7 @@ impl CarRow {
             player: false,
             leader: false,
             in_pit: false,
+            out_lap: false,
             break_before: false,
             color: 0,
             position: FixedText::new(4),
@@ -278,6 +290,7 @@ impl CarRow {
             player,
             leader,
             in_pit,
+            out_lap,
             break_before,
             color,
             position,
@@ -302,6 +315,7 @@ impl CarRow {
         *player == other.player
             && *leader == other.leader
             && *in_pit == other.in_pit
+            && *out_lap == other.out_lap
             && *break_before == other.break_before
             && *color == other.color
             && *position == other.position
@@ -400,6 +414,10 @@ pub struct StandingsWidget {
     sectors: SectorStarts,
     /// Live race order and gaps, shared with the relative.
     clock: SharedTrackClock,
+    /// Per car: on pit road at the last update, and the completed-lap count of its out lap, as the relative keeps
+    /// them ([`track_out_lap`]).
+    on_pit: Vec<bool>,
+    out_lap_of: Vec<Option<i32>>,
     /// Class position at the start of the race, per car; 0 when unknown.
     start_positions: Vec<i32>,
     start_session: Option<i64>,
@@ -428,6 +446,8 @@ impl StandingsWidget {
             clocks: Vec::with_capacity(72),
             sectors: SectorStarts::default(),
             clock,
+            on_pit: Vec::with_capacity(72),
+            out_lap_of: Vec::with_capacity(72),
             start_positions: Vec::with_capacity(72),
             start_session: None,
             ratings: Vec::with_capacity(72),
@@ -477,6 +497,10 @@ impl StandingsWidget {
             self.start_positions.resize(cars, 0);
             self.result_of.clear();
             self.result_of.resize(cars, None);
+            self.on_pit.clear();
+            self.on_pit.resize(cars, false);
+            self.out_lap_of.clear();
+            self.out_lap_of.resize(cars, None);
             self.start_session = None;
         }
         let player = snap
@@ -492,7 +516,20 @@ impl StandingsWidget {
         let is_race = session
             .and_then(|s| s.session_type.as_deref())
             .is_some_and(|t| t.eq_ignore_ascii_case("race"));
+        let is_qualifying = session
+            .and_then(|s| s.session_type.as_deref())
+            .is_some_and(is_qualifying_type);
         let now = snap.f64(vars.session_time, 0).unwrap_or(0.0);
+
+        // Out laps, followed in every session and shown in qualifying.
+        for (car, (on_pit, out_lap_of)) in self.on_pit.iter_mut().zip(&mut self.out_lap_of).enumerate() {
+            track_out_lap(
+                on_pit,
+                out_lap_of,
+                in_pits(view, car),
+                snap.i32(vars.car_lap_completed, car),
+            );
+        }
         let state = snap.i32(vars.session_state, 0);
 
         // Every car's progress, kept from before the green flag (and in every session, for the relative) so the
@@ -760,6 +797,8 @@ impl StandingsWidget {
                     clocks: &self.clocks,
                     sector_count: self.sectors.len(),
                     start_position: self.start_positions.get(entry.car).copied().unwrap_or(0),
+                    out_lap: is_qualifying
+                        && self.out_lap_of.get(entry.car).is_some_and(Option::is_some),
                 };
                 write_car(&mut row, &entry, &context);
                 row.break_before = previous.is_some_and(|p| offset > p + 1);
@@ -882,6 +921,8 @@ struct RowContext<'a> {
     clocks: &'a [SectorClock],
     sector_count: usize,
     start_position: i32,
+    /// The car is on an out lap and the session is qualifying.
+    out_lap: bool,
 }
 
 fn write_car(row: &mut CarRow, entry: &Entry, cx: &RowContext<'_>) {
@@ -896,6 +937,8 @@ fn write_car(row: &mut CarRow, entry: &Entry, cx: &RowContext<'_>) {
     row.player = Some(car) == cx.player;
     row.leader = car == cx.leader.car;
     row.in_pit = snap.bool(vars.car_on_pit_road, car).unwrap_or(false);
+    // An out lap ends on pit road, where the row shows `PIT`.
+    row.out_lap = cx.out_lap && !row.in_pit;
     row.color = driver.and_then(|d| d.car_class_color).unwrap_or(0xFF_FFFF);
     row.position.clear();
     if entry.position != i32::MAX {
@@ -1133,6 +1176,9 @@ const GREEN: u32 = 0x3D_D68C;
 const RED: u32 = 0xFF_6B5E;
 const PURPLE: u32 = 0xB4_5CFF;
 const BACKGROUND: u32 = 0x10_1418;
+/// The out-lap badge: the relative's color, the license box's height.
+const OUT_FILL: u32 = 0xF2_C14E;
+const BADGE_WIDTH: f32 = 32.0;
 
 /// Cars a class of `cars` shows: its first `leaders`, and with the player at `player` in it, the cars within
 /// `around` places of the player.
@@ -1326,10 +1372,28 @@ impl StandingsWidget {
             Align::Right,
             muted,
         );
+        // The relative's out-lap badge, at the end of the name's place.
+        let (name_x, mut name_w) = cols.name;
+        if car.out_lap && name_w >= 2.0 * BADGE_WIDTH {
+            let x = name_x + name_w - BADGE_WIDTH;
+            canvas.fill(
+                Rect::new(x, y + 4.0, BADGE_WIDTH, ROW_HEIGHT - 8.0),
+                Color::rgb(OUT_FILL, 1.0),
+            );
+            text_in(
+                canvas,
+                "OUT",
+                cell(x, BADGE_WIDTH),
+                11.0,
+                Align::Center,
+                Color::rgb(BACKGROUND, 1.0),
+            );
+            name_w -= BADGE_WIDTH + 4.0;
+        }
         text_in(
             canvas,
             car.name.as_str(),
-            cell(cols.name.0, cols.name.1),
+            cell(name_x, name_w),
             TEXT_SIZE,
             Align::Left,
             text,
@@ -1598,6 +1662,8 @@ impl Widget for StandingsWidget {
         self.clocks
             .iter_mut()
             .for_each(|c| *c = SectorClock::default());
+        self.on_pit.iter_mut().for_each(|p| *p = false);
+        self.out_lap_of.iter_mut().for_each(|l| *l = None);
         if let Ok(mut clock) = self.clock.try_borrow_mut() {
             clock.reset();
         }
@@ -2072,6 +2138,157 @@ DriverInfo:
                 _ => None,
             })
             .collect()
+    }
+
+    const QUALIFY_CARS: usize = 3;
+    const QUALIFY_ROW: usize = 16 + QUALIFY_CARS * 4 * 3;
+
+    fn qualify_session(session_type: &str) -> String {
+        format!(
+            "---
+WeekendInfo:
+ TrackID: 7
+SessionInfo:
+ Sessions:
+ - SessionNum: 0
+   SessionLaps: unlimited
+   SessionTime: 1200.0000 sec
+   SessionType: {session_type}
+DriverInfo:
+ DriverCarIdx: 2
+ Drivers:
+ - CarIdx: 0
+   CarNumber: 0
+   CarIsPaceCar: 1
+   CarClassID: 11
+ - CarIdx: 1
+   CarNumber: 1
+   CarClassID: 10
+ - CarIdx: 2
+   CarNumber: 2
+   CarClassID: 10
+...
+"
+        )
+    }
+
+    /// Session time `t`, and per car: laps completed, lap distance, and on pit road.
+    fn qualify_row(t: f64, cars: [(i32, f32, bool); QUALIFY_CARS]) -> Vec<u8> {
+        let mut row = vec![0u8; QUALIFY_ROW];
+        row[0..8].copy_from_slice(&t.to_le_bytes());
+        row[12..16].copy_from_slice(&2i32.to_le_bytes());
+        for (car, (laps, pct, pit)) in cars.into_iter().enumerate() {
+            let at = 16 + car * 4;
+            row[at..at + 4].copy_from_slice(&pct.to_le_bytes());
+            let at = 16 + QUALIFY_CARS * 4 + car * 4;
+            row[at..at + 4].copy_from_slice(&laps.to_le_bytes());
+            // Booleans take a byte each.
+            row[16 + 2 * QUALIFY_CARS * 4 + car] = u8::from(pit);
+        }
+        row
+    }
+
+    /// Car 1 leaves the pits before its first lap and reaches the line; car 2 drives on. Returns, after each
+    /// step, which cars' rows show an out lap.
+    fn out_laps_in(session_type: &str, tag: &str) -> Vec<String> {
+        let pid = std::process::id();
+        let names = SdkNames::new(
+            &format!("Local\\PitotStandingsOut{tag}Map-{pid}"),
+            &format!("Local\\PitotStandingsOut{tag}Event-{pid}"),
+        );
+        let array = |t, k: usize, name| {
+            VarHeader::new(t, (16 + k * QUALIFY_CARS * 4) as i32, QUALIFY_CARS as i32, name)
+                .expect("valid")
+        };
+        let config = PublisherConfig {
+            vars: vec![
+                VarHeader::new(VarType::Double, 0, 1, "SessionTime").expect("valid"),
+                VarHeader::new(VarType::Int, 8, 1, "SessionNum").expect("valid"),
+                VarHeader::new(VarType::Int, 12, 1, "PlayerCarIdx").expect("valid"),
+                array(VarType::Float, 0, "CarIdxLapDistPct"),
+                array(VarType::Int, 1, "CarIdxLapCompleted"),
+                array(VarType::Bool, 2, "CarIdxOnPitRoad"),
+            ],
+            buf_len: QUALIFY_ROW,
+            num_buf: 3,
+            tick_rate: 60,
+            session_info_capacity: 8192,
+        };
+        let mut publisher = Publisher::create(&names, &config).expect("creates");
+        publisher.set_connected(true).expect("connects");
+        publisher
+            .set_session_info(qualify_session(session_type).as_bytes())
+            .expect("fits");
+        let reader = ReaderConfig {
+            retry_interval: Duration::from_millis(5),
+            idle_timeout: Duration::from_millis(50),
+        };
+        let (_pipeline, mut view) =
+            Pipeline::start(names, reader, Vec::new(), None).expect("starts");
+        let config = WidgetConfig {
+            enabled: true,
+            monitor: None,
+            x: 0,
+            y: 0,
+            width: Some(760),
+            height: Some(240),
+            rate_hz: None,
+            opacity: 0.8,
+            options: toml::Table::new(),
+        };
+        let mut widget = StandingsWidget::new(&config);
+        let steps = [
+            (100.0, [(0, 0.0, false), (-1, 0.90, true), (2, 0.30, false)]),
+            (100.5, [(0, 0.0, false), (-1, 0.92, false), (2, 0.31, false)]),
+            (101.0, [(0, 0.0, false), (-1, 0.99, false), (2, 0.32, false)]),
+            (101.5, [(0, 0.0, false), (0, 0.01, false), (2, 0.33, false)]),
+        ];
+        let mut shown = Vec::new();
+        for (t, state) in steps {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                assert!(Instant::now() < deadline, "the view reaches {t}");
+                publisher.publish(&qualify_row(t, state)).expect("publishes");
+                thread::sleep(Duration::from_millis(2));
+                view.poll();
+                let at = view.snapshot().f64(view.vars().session_time, 0);
+                if view.session().is_some() && at == Some(t) {
+                    break;
+                }
+            }
+            widget.fill(&view);
+            let marked: Vec<&str> = cars(&widget)
+                .iter()
+                .filter(|c| c.out_lap)
+                .map(|c| c.number.as_str())
+                .collect();
+            shown.push(marked.join(","));
+        }
+        shown
+    }
+
+    #[test]
+    fn qualifying_marks_out_laps() {
+        assert_eq!(
+            out_laps_in("Open Qualify", "Q"),
+            ["", "1", "1", ""],
+            "from leaving pit road to the line, also before the first lap"
+        );
+        assert_eq!(
+            out_laps_in("Practice", "P"),
+            ["", "", "", ""],
+            "only in qualifying"
+        );
+    }
+
+    #[test]
+    fn qualifying_sessions_are_told_by_their_type() {
+        for t in ["Open Qualify", "Lone Qualify", "Qualify", "QUALIFY"] {
+            assert!(is_qualifying_type(t), "{t}");
+        }
+        for t in ["Practice", "Race", "Warmup", "Offline Testing"] {
+            assert!(!is_qualifying_type(t), "{t}");
+        }
     }
 
     #[test]
