@@ -44,7 +44,8 @@ Car rows, left to right:
 
 - class position, and in a race the places gained (green up arrow) or lost (red down arrow) since the start, by the
   live position,
-- car number and driver name,
+- car number and driver name, and in qualifying an `OUT` badge (yellow, as in the relative) at the end of the
+  name's place while the car is on an out lap,
 - license class and safety rating (`D 2.83` as `D2.8`) in the license color,
 - iRating, and in a race the estimated change if the race ended now,
 - the maker's letter: the first letter of `CarScreenName` (BMW is B, Porsche is P), instead of a logo,
@@ -59,6 +60,13 @@ Car rows, left to right:
 Cars on pit road are dimmed and show `PIT` instead of the last lap; the player's row is highlighted. The pace car
 and spectators are left out. Optional columns are dropped when the widget is too narrow: sectors first, then the
 iRating change, interval, places gained, maker, and tires.
+
+In qualifying (a `SessionType` containing "Qualify": open, lone, or plain qualifying), an out lap runs from leaving
+pit road until the car completes a lap or is on pit road again, the relative's rule. It includes a car's first run
+out of the pits, while `CarIdxLapCompleted` is still -1. Moments out of the world change nothing: online, cars on
+track drop out of the world for a few seconds at a time, and a car in its garage comes back on pit road. A car
+whose pit exit the overlay did not see (it was already on track when the overlay connected) is not marked.
+Practice and race rows show no out laps.
 
 ## Class names
 
