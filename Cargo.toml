@@ -16,3 +16,11 @@ pitot-irsdk = { path = "crates/irsdk" }
 lto = "fat"
 codegen-units = 1
 panic = "abort"
+
+# Release settings without fat LTO, for local functional checks and screenshots: it builds in a fraction of the
+# time. Release artifacts and benchmark measurements use `--release`.
+[profile.fast-release]
+inherits = "release"
+lto = false
+codegen-units = 16
+incremental = true
