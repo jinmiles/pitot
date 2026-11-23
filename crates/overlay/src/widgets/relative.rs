@@ -6,10 +6,11 @@
 //! for a car behind, the time since the player was where that car is. The passes come from the [`RaceClock`]
 //! shared with the standings, so laps and classes do not matter.
 //!
-//! Until a pass has been seen, or when either car is on pit road, the gap is estimated instead: the distance times
-//! the player's lap time, or for cars of the player's class `CarIdxEstTime` (the sim's estimate of time into the
-//! lap) when it agrees with the distance. Estimated times are not compared across classes, because each class's
-//! estimate follows its own pace.
+//! Until a pass has been seen, or when either car is on pit road, the gap is estimated instead, from the car ahead
+//! of the two, so other classes come out at their own pace: the time that car took on its last usable lap from the
+//! other car's lap distance to its own; without such a lap, the share of a lap between the two by `CarIdxEstTime`
+//! (each car's over its own class's estimated lap time) times that car's best lap; without estimated times, the
+//! distance times that lap.
 
 use std::fmt::Write as _;
 use std::rc::Rc;
@@ -61,20 +62,39 @@ pub(crate) fn normalize_gap(gap: f32, lap: f32) -> f32 {
     gap
 }
 
-/// Estimated gap in seconds from the player to a car, positive when the car is ahead on track.
-///
-/// Distance decides the side. Estimated times are only comparable within a class, so they refine the gap for
-/// same-class cars and only when they agree with the distance.
-pub(crate) fn car_gap(car: (f32, f32), player: (f32, f32), lap: f32, same_class: bool) -> f32 {
-    let ((car_pct, car_est), (player_pct, player_est)) = (car, player);
-    let by_distance = normalize_gap((car_pct - player_pct) * lap, lap);
-    if same_class && car_est > 0.0 && player_est > 0.0 {
-        let by_estimate = normalize_gap(car_est - player_est, lap);
-        if by_estimate.signum() == by_distance.signum() {
-            return by_estimate;
-        }
+/// Estimated gap in seconds from the player to a car, positive when the car is ahead on track, for when the clock
+/// has no measured gap. Every source follows the car ahead of the two on track (the leading car), as a measured gap
+/// does, so a car of another class is timed at its own pace. `distance` is the car's lap distance from the player,
+/// normalized to half a lap either way; it decides the side. In order:
+/// 1. `profile`: the time the leading car took on its last usable lap from the other car's lap distance to its own
+///    ([`RaceClock::lap_time_between`](super::timing::RaceClock::lap_time_between)).
+/// 2. `share` times `pace`: `share` is the share of a lap between the two by estimated time ([`est_share`]), used
+///    when it puts the leading car ahead; `pace` is the leading car's lap time.
+/// 3. The distance times `pace`.
+pub(crate) fn estimate_gap(distance: f32, profile: Option<f64>, share: Option<f32>, pace: f32) -> f32 {
+    let side = if distance > 0.0 { 1.0 } else { -1.0 };
+    if let Some(seconds) = profile {
+        side * seconds as f32
+    } else if let Some(share) = share.filter(|&s| s > 0.0) {
+        side * share * pace
+    } else {
+        distance * pace
     }
-    by_distance
+}
+
+/// Share of a lap from the trailing car to the leading car by `CarIdxEstTime`, given `(estimated time, class
+/// estimated lap time)` of each: the sim times each car against its own class's lap (in AI races, its own car's),
+/// so each estimate is taken as a share of that lap first. Wrapped to half a lap either way; positive when the
+/// leading car is ahead. `None` without both estimates.
+pub(crate) fn est_share(leader: (f32, f32), trailer: (f32, f32)) -> Option<f32> {
+    let ((leader_est, leader_lap), (trailer_est, trailer_lap)) = (leader, trailer);
+    if leader_est <= 0.0 || trailer_est <= 0.0 || leader_lap <= 1.0 || trailer_lap <= 1.0 {
+        return None;
+    }
+    Some(normalize_gap(
+        leader_est / leader_lap - trailer_est / trailer_lap,
+        1.0,
+    ))
 }
 
 /// Laps between a car and the player, accounting for one of them having just crossed the line: positive when
@@ -375,7 +395,20 @@ impl RelativeWidget {
         let pct = |i: usize| snap.f32(vars.car_lap_dist_pct, i).unwrap_or(-1.0);
         let est = |i: usize| snap.f32(vars.car_est_time, i).unwrap_or(0.0);
         let on_pit = |i: usize| snap.bool(vars.car_on_pit_road, i).unwrap_or(false);
-        let (player_pct, player_est) = (pct(player), est(player));
+        let class_lap = |i: usize| {
+            driver(i)
+                .and_then(|d| d.car_class_est_lap_time)
+                .map(|t| t as f32)
+                .filter(|&t| t > 1.0)
+        };
+        // A car's lap time for estimates: its best lap, else its class's estimate (the session's for the player).
+        let pace = |i: usize| {
+            snap.f32(vars.car_best_lap_time, i)
+                .filter(|&t| t > 1.0)
+                .or_else(|| if i == player { Some(lap) } else { class_lap(i) })
+                .unwrap_or(lap)
+        };
+        let player_pct = pct(player);
         if player_pct < 0.0 {
             return;
         }
@@ -398,23 +431,27 @@ impl RelativeWidget {
             if driver(i).is_some_and(|d| d.is_pace_car || d.is_spectator) {
                 continue;
             }
-            let class_of = |idx: usize| {
-                snap.i32(vars.car_class, idx)
-                    .map(i64::from)
-                    .or_else(|| driver(idx).and_then(|d| d.car_class_id))
-            };
-            let same_class = class_of(i) == class_of(player);
-            let estimate = car_gap((pct(i), est(i)), (player_pct, player_est), lap, same_class);
             let distance = normalize_gap(pct(i) - player_pct, 1.0);
             let ahead = distance > 0.0;
-            // Pit road does not follow the track's speeds, so a pass there says little.
+            let (leader, trailer) = if ahead { (i, player) } else { (player, i) };
+            // Pit road does not follow the track's speeds, so a pass there says little. The estimate still holds:
+            // the leading car's profile is from a lap on track, so it gives how far apart the two are at track
+            // speed, as the sim's own relative does for a car in the pits.
             let measured = if on_pit(i) || on_pit(player) {
                 None
-            } else if ahead {
-                clock.track_gap(i, player)
             } else {
-                clock.track_gap(player, i)
+                clock.track_gap(leader, trailer)
             };
+            let estimate = estimate_gap(
+                distance,
+                clock.lap_time_between(leader, pct(trailer), pct(leader)),
+                class_lap(leader)
+                    .zip(class_lap(trailer))
+                    .and_then(|(leader_lap, trailer_lap)| {
+                        est_share((est(leader), leader_lap), (est(trailer), trailer_lap))
+                    }),
+                pace(leader),
+            );
             let gap = chosen_gap(ahead, measured, estimate, lap);
             self.cars.push((distance, gap, i));
         }
@@ -823,6 +860,7 @@ impl Widget for RelativeWidget {
 
 #[cfg(test)]
 mod tests {
+    use super::super::timing::RaceClock;
     use super::*;
 
     #[test]
@@ -877,25 +915,90 @@ mod tests {
         assert_eq!(normalize_gap(150.0, 100.0), 50.0);
     }
 
-    #[test]
-    fn other_classes_are_placed_by_distance() {
-        // Captured case: a faster-class car ahead on track has a lower estimated time than the player.
-        let player = (0.2257, 26.29);
-        let car = (0.2472, 26.01);
-        let gap = car_gap(car, player, 140.0, false);
-        assert!(gap > 2.9 && gap < 3.1, "ahead by distance: {gap}");
-        assert_eq!(lap_difference(1, car.0, 1, player.0, gap), 0, "same lap");
-        // The same numbers for a same-class car disagree with the distance, so distance wins there too.
-        assert!(car_gap(car, player, 140.0, true) > 0.0);
+    fn close(a: f32, b: f32) -> bool {
+        (a - b).abs() < 1e-4
     }
 
     #[test]
-    fn same_class_cars_use_estimated_time() {
-        let gap = car_gap((0.2510, 26.38), (0.2257, 26.29), 140.0, true);
-        assert!((gap - 0.09).abs() < 0.001, "{gap}");
-        // Across the line: car just behind the player who has just crossed.
-        let gap = car_gap((0.99, 138.6), (0.01, 1.4), 140.0, true);
-        assert!(gap < 0.0 && gap > -3.0, "{gap}");
+    fn estimates_fall_back_in_order() {
+        // The leading car's profile first, on either side.
+        assert!(close(estimate_gap(0.02, Some(2.5), Some(0.03), 120.0), 2.5));
+        assert!(close(estimate_gap(-0.02, Some(2.5), Some(0.03), 120.0), -2.5));
+        // Then the share of a lap by estimated time, at the leading car's pace.
+        assert!(close(estimate_gap(0.02, None, Some(0.025), 120.0), 3.0));
+        assert!(close(estimate_gap(-0.02, None, Some(0.025), 120.0), -3.0));
+        // A share that puts the other car ahead disagrees with the distance: the distance at that pace.
+        assert!(close(estimate_gap(0.02, None, Some(-0.01), 120.0), 2.4));
+        assert!(close(estimate_gap(0.02, None, Some(0.0), 120.0), 2.4));
+        // No estimated times.
+        assert!(close(estimate_gap(-0.02, None, None, 120.0), -2.4));
+    }
+
+    #[test]
+    fn estimated_times_compare_across_classes() {
+        // A car of a 100 s class 30% into its lap leads a car of a 125 s class 28% into its lap: the sim's estimated
+        // times say the leader is 5 s behind, the shares of each class's lap put it 2% ahead.
+        let share = est_share((30.0, 100.0), (35.0, 125.0));
+        assert!(share.is_some_and(|s| close(s, 0.02)), "{share:?}");
+        // Across the line: the leader just past it, the trailing car just before it.
+        let share = est_share((1.0, 100.0), (123.75, 125.0));
+        assert!(share.is_some_and(|s| close(s, 0.02)), "{share:?}");
+        // At the line the sim's estimate is zero or missing.
+        assert_eq!(est_share((0.0, 100.0), (35.0, 125.0)), None);
+        assert_eq!(est_share((30.0, 100.0), (35.0, 0.0)), None);
+    }
+
+    #[test]
+    fn other_classes_are_timed_at_their_own_pace() {
+        // Two classes at constant speeds: 100 s laps and 125 s laps. At 375 s, car 1 (fast) is 0.04 of a lap ahead
+        // of car 0 (slow), so 4 s ahead at its pace; car 3 (slow) is 0.04 ahead of car 2 (fast), so 5 s.
+        let laps = [125.0, 100.0, 100.0, 125.0];
+        let offsets = [0.1, 0.39, 0.85, 0.64];
+        let progress = |car: usize, t: f64| t / laps[car] + offsets[car];
+        let pct = |car: usize, t: f64| progress(car, t).fract() as f32;
+        let est = |car: usize, t: f64| (progress(car, t).fract() * laps[car]) as f32;
+        // (estimate, true gap, old estimate, whether a profile was used) of `car` from `player`, positive ahead.
+        let gaps = |clock: Option<&RaceClock>, car: usize, player: usize, t: f64| {
+            let d = normalize_gap(pct(car, t) - pct(player, t), 1.0);
+            let (leader, trailer) = if d > 0.0 { (car, player) } else { (player, car) };
+            let profile =
+                clock.and_then(|c| c.lap_time_between(leader, pct(trailer, t), pct(leader, t)));
+            let share = est_share(
+                (est(leader, t), laps[leader] as f32),
+                (est(trailer, t), laps[trailer] as f32),
+            );
+            let estimate = estimate_gap(d, profile, share, laps[leader] as f32);
+            let truth = d * laps[leader] as f32;
+            (estimate, truth, d * laps[player] as f32, profile.is_some())
+        };
+        // Before any lap is complete: the share of a lap by estimated time, at the leading car's lap.
+        for (car, player) in [(1, 0), (3, 2)] {
+            let (estimate, truth, _, profiled) = gaps(None, car, player, 10.0);
+            assert!(!profiled);
+            assert!((estimate - truth).abs() < 1e-3, "{estimate} vs {truth}");
+        }
+        // Observed at 10 Hz for three slow laps: the measured gaps, and the leading car's last usable lap.
+        let mut clock = RaceClock::default();
+        clock.resize(4);
+        for n in 0..=3750 {
+            let t = f64::from(n) * 0.1;
+            clock.observe(t, false, |car| {
+                let p = progress(car, t);
+                Some((p.floor() as i32, p.fract() as f32, true))
+            });
+        }
+        let t = 375.0;
+        for (car, player, truth) in [(1, 0, 4.0f32), (3, 2, 5.0)] {
+            let measured = clock.track_gap(car, player).unwrap_or(f64::NAN);
+            assert!((measured - f64::from(truth)).abs() < 0.01, "measured {measured}");
+            // Forced, as when either car is on pit road.
+            let (estimate, _, old, profiled) = gaps(Some(&clock), car, player, t);
+            assert!(profiled);
+            assert!((estimate - truth).abs() < 0.01, "estimate {estimate} vs {truth}");
+            // The old estimate, the distance times the player's lap, is off by the ratio of the two laps.
+            let ratio = (laps[player] / laps[car]) as f32;
+            assert!((old / truth - ratio).abs() < 0.01, "old {old} vs {truth}");
+        }
     }
 
     #[test]
@@ -977,8 +1080,8 @@ DriverInfo:
 ";
 
     /// At session time `t` on 100 s laps: the player (car 1) at 2.30 laps at 0 s, car 2 3 s ahead, car 3 (another
-    /// class) 5 s behind, car 4 10 s ahead on track but a lap down. Car 2 is on pit road when `car_2_in_pit`.
-    fn row(t: f64, car_2_in_pit: bool) -> Vec<u8> {
+    /// class) 5 s behind, car 4 10 s ahead on track but a lap down. Car `pit`, if any, is on pit road.
+    fn row(t: f64, pit: Option<usize>) -> Vec<u8> {
         let mut row = vec![0u8; ROW];
         row[0..8].copy_from_slice(&t.to_le_bytes());
         row[12..16].copy_from_slice(&1i32.to_le_bytes());
@@ -998,7 +1101,9 @@ DriverInfo:
             put(&mut row, 3, car, best[car].to_le_bytes());
             put(&mut row, 4, car, class_position[car].to_le_bytes());
         }
-        row[PIT_AT + 2] = u8::from(car_2_in_pit);
+        if let Some(car) = pit {
+            row[PIT_AT + car] = 1;
+        }
         row
     }
 
@@ -1057,11 +1162,11 @@ DriverInfo:
         let (_pipeline, mut view) =
             Pipeline::start(names, reader, Vec::new(), None).expect("starts");
         // Publishes until the view shows this moment.
-        let mut step = |view: &mut View, t: f64, car_2_in_pit: bool| {
+        let mut step = |view: &mut View, t: f64, pit: Option<usize>| {
             let deadline = Instant::now() + Duration::from_secs(5);
             loop {
                 assert!(Instant::now() < deadline, "the view reaches {t}");
-                publisher.publish(&row(t, car_2_in_pit)).expect("publishes");
+                publisher.publish(&row(t, pit)).expect("publishes");
                 thread::sleep(Duration::from_millis(2));
                 view.poll();
                 let at = view.snapshot().f64(view.vars().session_time, 0);
@@ -1086,17 +1191,18 @@ DriverInfo:
         let mut relative = RelativeWidget::with_clock(&config(460, 300), Rc::clone(&clock));
         let mut standings = StandingsWidget::with_clock(&config(760, 240), Rc::clone(&clock));
 
-        // Nothing seen yet: the estimate, the distance times the 90 s lap.
-        step(&mut view, 1000.0, false);
+        // Nothing seen yet: the estimate, the distance times the best lap of the car ahead of the two (car 4 101 s,
+        // car 2 99.5 s, the player 100 s).
+        step(&mut view, 1000.0, None);
         relative.fill(&view);
-        assert_eq!(shown(&relative), ["#4 9.0", "#2 2.7", "#1 ", "#3 4.5"]);
+        assert_eq!(shown(&relative), ["#4 10.1", "#2 3.0", "#1 ", "#3 5.0"]);
 
         // At 10 Hz, with the standings at 2 Hz on the same clock: after car 4 has passed the player's spot, every
         // gap is measured. Car 4 is a lap down, which does not matter on track; car 3 is in another class.
         let mut t = 1000.0;
         for n in 1..=120 {
             t = 1000.0 + f64::from(n) * 0.1;
-            step(&mut view, t, false);
+            step(&mut view, t, None);
             relative.fill(&view);
             if n % 5 == 0 {
                 standings.fill(&view);
@@ -1117,9 +1223,10 @@ DriverInfo:
             "{gaps:?}"
         );
 
-        // On pit road the pass says little: back to the estimate for that car.
-        step(&mut view, t + 0.1, true);
+        // On pit road the pass says little: back to the estimate for that car, its distance times its best lap (101 s
+        // against the 100 s it drives; it has completed no lap since the clock started).
+        step(&mut view, t + 0.1, Some(4));
         relative.fill(&view);
-        assert_eq!(shown(&relative)[1], "#2 2.7");
+        assert_eq!(shown(&relative)[0], "#4 10.1");
     }
 }
