@@ -6,14 +6,12 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use pitot_irsdk::flags::session_state;
+use pitot_irsdk::flags::{session_state, track_location};
 
 use crate::pipeline::View;
 
 use super::timing::RaceClock;
 
-/// `CarIdxTrackSurface` value for a car that is not in the world.
-const NOT_IN_WORLD: i32 = -1;
 /// Session time between observations, at least: when both widgets update within this, the second reads the first's.
 const MIN_SPACING: f64 = 0.04;
 
@@ -85,13 +83,17 @@ impl TrackClock {
                 .get(car)
                 .and_then(Option::as_ref)
                 .is_some_and(|d| !d.is_pace_car && !d.is_spectator);
-            let in_world = snap.i32(vars.car_track_surface, car) != Some(NOT_IN_WORLD);
-            if !racing || !in_world {
+            let surface = snap.i32(vars.car_track_surface, car);
+            if !racing || surface == Some(track_location::NOT_IN_WORLD) {
                 return None;
             }
+            // Lap profiles only keep laps driven on track throughout.
+            let on_track = surface.is_none_or(|s| s == track_location::ON_TRACK)
+                && snap.bool(vars.car_on_pit_road, car) != Some(true);
             Some((
                 snap.i32(vars.car_lap_completed, car)?,
                 snap.f32(vars.car_lap_dist_pct, car)?,
+                on_track,
             ))
         });
     }
