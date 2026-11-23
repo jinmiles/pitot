@@ -11,6 +11,7 @@
 //! made from its configuration and the trackers the layout's widgets share ([`Shared`]). See "Adding a widget" in
 //! `docs/overlay-rendering.md`.
 
+mod classes;
 #[allow(dead_code, reason = "read by the widgets of later batches")]
 mod gaps;
 #[allow(dead_code, reason = "read by the widgets of later batches")]

@@ -8,7 +8,7 @@ The sim publishes session info as YAML text in shared memory and in `.ibt` files
 | Section | Fields |
 |---|---|
 | `WeekendInfo` | Track ID, names, length, category, event type, official flag, number of car classes, series and session IDs |
-| `DriverInfo` | Player and pace car index, fuel capacity, the player's tire compounds (`DriverTires`: index and type), and per car: names, user ID, team, car number, car name and short name, class (ID, name, color, relative speed, estimated lap time), iRating, license and color, incidents, spectator, pace car, and AI flags |
+| `DriverInfo` | Player and pace car index, fuel capacity, the player's tire compounds (`DriverTires`: index and type), and per car: names, user ID, team, car number, car path (`CarPath`), car name and short name, class (ID, name, color, relative speed, estimated lap time), iRating, license and color, incidents, spectator, pace car, and AI flags |
 | `SessionInfo` | Per session: number, type, name, laps and time (or unlimited), and result positions |
 | `SplitTimeInfo` | Sector numbers and start positions |
 | `QualifyResultsInfo` | The qualifying result positions a race starts from, with the same fields as session results |

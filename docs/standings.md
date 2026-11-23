@@ -33,7 +33,8 @@ cars around the player, then more leaders, until every car is shown. A short wid
 player first, then fewer leaders per class (down to one), then only the player's class, so the player stays in
 view. The background ends at the last row in use, and the space below stays transparent.
 
-Header: class name in the class color, strength of field, cars in the world over cars entered, and laps: the class
+Header: class name in the class color (see [Class names](#class-names); a name too long for its place ends in
+`…`), strength of field, cars in the world over cars entered, and laps: the class
 leader's laps over the session's laps, or `≈` an estimate from the time left at the leader's pace in a timed
 session. The first header also shows the session type's letter (P, Q, R), air and track temperature to one
 decimal (`Air 21.3°C`, `Track 30.5°C` from `AirTemp`, `TrackTempCrew`), and the session time elapsed over its
@@ -58,6 +59,19 @@ Car rows, left to right:
 Cars on pit road are dimmed and show `PIT` instead of the last lap; the player's row is highlighted. The pace car
 and spectators are left out. Optional columns are dropped when the widget is too narrow: sectors first, then the
 iRating change, interval, places gained, maker, and tires.
+
+## Class names
+
+The session info has a short class name (`CarClassShortName`) and no long one. AI sessions leave the short name
+empty, so the header's label comes from the first of these that gives one:
+
+1. `CarClassShortName`, when it is not empty (online sessions: `FIA F4`, `GT3`).
+2. A few classes known by `CarClassID`, the ones seen with an empty short name: 4029 `GTP`, 2523 `LMP2`, 4011
+   `GT3`.
+3. The class's cars, when every car's `CarPath` or `CarScreenName` points to the same class: `gtp`, `lmdh`, or
+   `499p` is GTP; `lmp2` or `p217` is LMP2; `lmp3` or `p320` is LMP3; `gt3` is GT3; `gt4` is GT4; `tcr` is TCR.
+   A name with `cup` in it points nowhere (the Porsche 911 GT3 Cup races in a class of its own).
+4. The class leader's short car name (`CarScreenNameShort`), as before.
 
 ## Calculations
 

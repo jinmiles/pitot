@@ -111,6 +111,8 @@ pub struct Driver {
     pub user_id: Option<i64>,
     pub team_name: Option<String>,
     pub car_number: Option<String>,
+    /// `CarPath`: the car model's folder name, for example `bmwm4gt3`.
+    pub car_path: Option<String>,
     pub car_screen_name: Option<String>,
     pub car_screen_name_short: Option<String>,
     pub car_class_id: Option<i64>,
@@ -567,6 +569,7 @@ impl<'i> Walk<'i> {
                     "UserID" => d.user_id = int(&v),
                     "TeamName" => d.team_name = text(v),
                     "CarNumber" => d.car_number = text(v),
+                    "CarPath" => d.car_path = text(v),
                     "CarScreenName" => d.car_screen_name = text(v),
                     "CarScreenNameShort" => d.car_screen_name_short = text(v),
                     "CarClassID" => d.car_class_id = int(&v),
@@ -767,6 +770,7 @@ DriverInfo:
    UserID: 101
    TeamName: Team \\ Back
    CarNumber: \"07\"
+   CarPath: porsche992rgt3
    CarScreenName: Porsche 911 GT3 R (992)
    CarClassID: 11
    CarClassShortName: GT3
@@ -815,6 +819,7 @@ CarSetup:
             driver.car_screen_name.as_deref(),
             Some("Porsche 911 GT3 R (992)")
         );
+        assert_eq!(driver.car_path.as_deref(), Some("porsche992rgt3"));
         assert_eq!(info.qualify_results.len(), 1);
         let pole = &info.qualify_results[0];
         assert_eq!((pole.class_position, pole.car_idx), (Some(0), Some(1)));
