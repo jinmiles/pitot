@@ -55,14 +55,28 @@ at a [text size](configuration.md#text-size) of 150 the default box is 307 x 200
 
 ## Accuracy
 
-Checked by replaying captures through the overlay's clock: at 10 Hz as the widget runs, against the same clock fed
-every frame (60 Hz), for the three cars ahead and behind of every car in turn as the player. Captures: an AI race
-(41 cars in 3 classes, 10 min) and an online practice recorded on the home PC (18 cars in one class, 3.5 min).
+The clock is timed on the sim's tick count, `SessionTick` over the tick rate (60 Hz), as the sim's own lap times
+and results are. `SessionTime` slips by whole ticks against it now and then: it repeats a value for a frame and
+catches up later with a double step (7 times each way in the 10-minute AI race), which put one tick, 16.7 ms, into
+some gaps.
 
-| Capture | Measured gap error (median, 99th percentile, largest) | Estimate used |
-|---|---|---|
-| AI race | 0.0, 0.4 ms, 13.5 ms (1,347,318 gaps) | 1.5%, pass not seen yet (the start of the capture) |
-| Online practice | 0.0, 0.6 ms, 29 ms (71,482 gaps) | 25% a car on pit road, 5.5% pass not seen yet |
+Checked by replaying captures through the overlay's clock at 10 Hz, as the widget runs, in all six phases of the
+60 Hz frames, against references that do not come from the clock. Captures: an AI race (41 cars in 3 classes,
+10 min) and an online practice recorded on the home PC (18 cars in one class, 3.5 min).
+
+- **At the line**, against the official gap on track: each car's crossing is built from the results' `Time` and
+  `LastTime` alone, chained from the first car on each lap. When a car crosses the line, its gap to each of the
+  three nearest cars ahead on track (any class) matched within 0.8 ms in 2,484 of 2,484 cases (AI race; median
+  0.12 ms, 99th percentile 0.68 ms). On `SessionTime`, 100 of them (4%) were 14 to 17 ms off.
+- **Between line crossings**, against gaps interpolated frame by frame (60 Hz) from each car's lap distance,
+  without checkpoints: under green, median 1.9 ms, 90th percentile 12 ms, 99th percentile 29 ms, largest 0.41 s
+  (AI race, 614,688 gaps); practice median 0.9 ms, 99th percentile 19 ms. The error comes from the checkpoints:
+  between two, the clock assumes a steady speed over half a percent of a lap (about 30 m). So it is largest where
+  a car slows hard or nearly stops: the largest errors sit next to a car crawling off track (AI race), and next to
+  a car stopped off track a gap can be seconds off for a moment (practice, up to 7.8 s). The shown tenth differs
+  from the reference's in 4.6% of readings.
+- **Update rate**: hardly matters. The clock fed every frame differs from the 10 Hz clock by 0.34 ms at the 99th
+  percentile.
 
 No pass was older than a lap.
 

@@ -22,7 +22,7 @@ use super::fuel::is_green;
 
 /// Laps kept per car.
 pub(crate) const LAPS: usize = 100;
-/// Session time after the line within which the sim gives the lap's time; later, the lap is kept without one.
+/// Tick time after the line within which the sim gives the lap's time; later, the lap is kept without one.
 pub(crate) const TIMING_WAIT: f64 = 3.0;
 /// A longer gap between observations of a car marks its lap partial.
 const MAX_OBSERVATION_GAP: f64 = 5.0;
@@ -37,7 +37,7 @@ pub(crate) struct Lap {
     pub number: i32,
     /// Seconds, as the sim timed it; NaN when it gave no time.
     pub time: f32,
-    /// Session time of the first observation after the line.
+    /// Tick time ([`View::tick_time`]) of the first observation after the line.
     pub ended: f64,
     /// What the observations saw during the lap: [`Lap::PIT`] and the others.
     pub flags: u8,
@@ -84,7 +84,7 @@ struct Running {
     /// Completed laps as last seen; `None` until the car is seen.
     completed: Option<i32>,
     flags: u8,
-    /// Session time of the last observation.
+    /// Tick time of the last observation.
     seen: f64,
     last_time: f32,
     /// A lap that ended and waits for its time, with the time shown before it.
@@ -133,7 +133,7 @@ impl LapHistory {
     /// connection).
     pub(crate) fn observe(&mut self, view: &View) {
         let (snap, vars) = (view.snapshot(), view.vars());
-        let Some(now) = snap.f64(vars.session_time, 0) else {
+        let Some(now) = view.tick_time() else {
             return;
         };
         let session_num = snap.i32(vars.session_num, 0);
@@ -199,7 +199,7 @@ impl LapHistory {
         self.incidents = None;
     }
 
-    /// Takes one observation at session time `now`. `sample(car)` is what it saw of a car in the world, `None` for
+    /// Takes one observation at tick time `now`. `sample(car)` is what it saw of a car in the world, `None` for
     /// one that is not; `incidents` is the player's incident count.
     fn record(
         &mut self,
@@ -210,7 +210,7 @@ impl LapHistory {
         sample: impl Fn(usize) -> Option<CarSample>,
     ) {
         match self.last {
-            // A rewound replay: the laps are of another time line.
+            // A rewound replay or a tick count that started over: the laps are of another time line.
             Some(last) if now < last => self.reset(),
             Some(last) if now == last => return,
             _ => {}

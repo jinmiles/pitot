@@ -15,6 +15,9 @@ const SESSION_INFO: &[u8] = b"WeekendInfo:\n TrackID: 77\n SubSessionID: 12345\n
 const START: f64 = 100.0;
 const FRAMES: usize = 600;
 
+/// The capture's `SessionTick` at its first frame.
+const CAPTURE_TICK: i32 = 6000;
+
 /// A capture of session 0 from `START`: 600 frames, the player on track, throttle and car 1's lap distance
 /// rising from 0 to 1.
 fn capture_folder(name: &str) -> PathBuf {
@@ -25,23 +28,27 @@ fn capture_folder(name: &str) -> PathBuf {
         VarHeader::new(VarType::Bool, 20, 1, "IsOnTrack").expect("valid"),
         VarHeader::new(VarType::Bool, 21, 1, "IsReplayPlaying").expect("valid"),
         VarHeader::new(VarType::Float, 24, 4, "CarIdxLapDistPct").expect("valid"),
+        VarHeader::new(VarType::Int, 40, 1, "SessionTick").expect("valid"),
     ];
     let mut items = vec![Item::Session(1, SESSION_INFO.to_vec())];
     for i in 0..FRAMES {
-        let mut row = vec![0u8; 40];
+        let mut row = vec![0u8; 44];
         row[8..16].copy_from_slice(&(START + i as f64 / 60.0).to_le_bytes());
         row[16..20].copy_from_slice(&(i as f32 / FRAMES as f32).to_le_bytes());
         row[20] = 1;
         row[28..32].copy_from_slice(&(i as f32 / FRAMES as f32).to_le_bytes());
+        row[40..44].copy_from_slice(&(CAPTURE_TICK + i as i32).to_le_bytes());
         items.push(Item::Frame(1000 + i as i32, row));
     }
     let dir = std::env::temp_dir().join(format!("pitot-replay-{name}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("creates the folder");
-    std::fs::write(dir.join("race.ptc"), build(&vars, 40, 60, &items)).expect("writes");
+    std::fs::write(dir.join("race.ptc"), build(&vars, 44, 60, &items)).expect("writes");
     dir
 }
 
-const ROW: usize = 32 + 72 * 4;
+/// Where the sim's row has `SessionTick`, after the per-car array.
+const TICK_AT: usize = 32 + 72 * 4;
+const ROW: usize = TICK_AT + 4;
 
 /// The sim's row: other order and sizes than the capture's. `with_speed` adds `ReplayPlaySpeed` after it.
 fn sim_publisher(names: &SdkNames, with_speed: bool) -> Publisher {
@@ -54,6 +61,7 @@ fn sim_publisher(names: &SdkNames, with_speed: bool) -> Publisher {
         VarHeader::new(VarType::Bool, 28, 1, "IsOnTrack").expect("valid"),
         VarHeader::new(VarType::Bool, 29, 1, "IsReplayPlaying").expect("valid"),
         VarHeader::new(VarType::Float, 32, 72, "CarIdxLapDistPct").expect("valid"),
+        VarHeader::new(VarType::Int, TICK_AT as i32, 1, "SessionTick").expect("valid"),
     ];
     if with_speed {
         vars.push(VarHeader::new(VarType::Int, ROW as i32, 1, "ReplayPlaySpeed").expect("valid"));
@@ -76,6 +84,7 @@ fn sim_publisher(names: &SdkNames, with_speed: bool) -> Publisher {
 fn sim_row(live_time: f64, replay_time: Option<f64>, speed: Option<i32>) -> Vec<u8> {
     let mut row = vec![0u8; ROW];
     row[0..8].copy_from_slice(&live_time.to_le_bytes());
+    row[TICK_AT..TICK_AT + 4].copy_from_slice(&((live_time * 60.0).round() as i32).to_le_bytes());
     match replay_time {
         Some(t) => {
             row[8..16].copy_from_slice(&t.to_le_bytes());
@@ -170,6 +179,8 @@ fn replays_show_the_capture_at_the_replayed_moment() {
     });
     assert_eq!(view.source(), Some(Source::Sim));
     assert_eq!(throttle(&view), Some(0.9));
+    let live_tick = view.tick_time().expect("tick time");
+    assert!(live_tick > 500.0, "the live tick count: {live_tick}");
 
     // The replay shows frame 300; the sim's own values say nothing about it.
     wait_for(&mut view, &mut sim, Some(frame(300)), "the capture", |v| {
@@ -181,6 +192,11 @@ fn replays_show_the_capture_at_the_replayed_moment() {
         "the player was on track then"
     );
     assert_eq!(throttle(&view), Some(0.5));
+    assert_eq!(
+        view.tick_time(),
+        Some(f64::from(CAPTURE_TICK + 300) / 60.0),
+        "the capture's tick count times durations"
+    );
     let vars = *view.vars();
     assert_eq!(view.snapshot().f32(vars.car_lap_dist_pct, 1), Some(0.5));
     assert_eq!(

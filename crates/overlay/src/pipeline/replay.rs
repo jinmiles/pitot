@@ -169,6 +169,8 @@ pub struct Player {
     finished: bool,
     /// The trace holds samples up to the current frame.
     trace_current: bool,
+    /// The capture's tick rate, which times its frames' `SessionTick`.
+    ticks_per_second: f64,
 }
 
 impl std::fmt::Debug for Player {
@@ -185,13 +187,20 @@ impl Player {
     pub fn new(found: Found, set: &VarSet, template: &Snapshot) -> Self {
         let layout = found.seeker.layout();
         let map = RowMap::new(set, template, &layout.vars, layout.buf_len);
+        let ticks_per_second = super::ticks_per_second(layout.tick_rate);
         Self {
             map,
             snapshot: template.clone(),
             seeker: found.seeker,
             finished: found.finished,
             trace_current: false,
+            ticks_per_second,
         }
+    }
+
+    /// The capture's tick rate.
+    pub fn ticks_per_second(&self) -> f64 {
+        self.ticks_per_second
     }
 
     /// The latest frame, in the live layout.

@@ -9,6 +9,10 @@
 //! gap in the race (laps count); on track it is the gap by lap distance alone, whatever the laps. It also keeps
 //! each car's last usable lap as checkpoint times, so the time a car takes between two spots can be estimated
 //! when its latest pass was not seen.
+//!
+//! Times are tick time: seconds on the sim's tick count (`View::tick_time`), which the sim's own lap times and
+//! results follow. `SessionTime` would put a whole tick into a time now and then, as it slips against the ticks.
+//! Only differences are used.
 
 use pitot_irsdk::session::SessionInfo;
 
@@ -68,7 +72,7 @@ pub(crate) struct SectorClock {
     pub last: [f32; MAX_SECTORS],
     /// Best time of each sector since the clock was reset, or 0 when not timed yet.
     pub best: [f32; MAX_SECTORS],
-    /// Session time at which each sector's last time ended, or negative when not timed yet.
+    /// Tick time at which each sector's last time ended, or negative when not timed yet.
     pub done: [f64; MAX_SECTORS],
 }
 
@@ -91,7 +95,7 @@ fn sector_of(starts: &[f32], pct: f32) -> usize {
 }
 
 impl SectorClock {
-    /// Feeds the car's lap distance at session time `time`. `valid` is false off track, in the pits, or not in
+    /// Feeds the car's lap distance at tick time `time`. `valid` is false off track, in the pits, or not in
     /// the world; timing then restarts.
     pub(crate) fn observe(&mut self, starts: &[f32], pct: f32, time: f64, valid: bool) {
         if !valid || starts.len() < 2 || !(0.0..=1.0).contains(&pct) {
@@ -166,7 +170,7 @@ const MAX_PROFILE_GAP: f64 = 1.0;
 pub(crate) enum Standing {
     /// Laps completed plus lap distance, as last seen.
     Running(f64),
-    /// Took the checkered flag with this many laps at this session time.
+    /// Took the checkered flag with this many laps at this tick time.
     Finished { laps: i32, at: f64 },
 }
 
@@ -193,12 +197,12 @@ pub(crate) enum Gap {
 struct Progress {
     /// Laps completed plus lap distance, kept continuous across the line; NaN until seen.
     value: f64,
-    /// Session time of the last observation, or of the finish.
+    /// Tick time of the last observation, or of the finish.
     time: f64,
     /// The last observation was valid, so the next one continues from it.
     tracking: bool,
     finished: bool,
-    /// Session time since which `value` has been a lap off the sim's counters, or NaN.
+    /// Tick time since which `value` has been a lap off the sim's counters, or NaN.
     corrected: f64,
     /// The last observation was on the racing surface.
     clean: bool,
@@ -222,7 +226,7 @@ impl Default for Progress {
 }
 
 impl Progress {
-    /// A car that took the checkered flag at `line` laps at session time `at`.
+    /// A car that took the checkered flag at `line` laps at tick time `at`.
     fn finished(line: f64, at: f64) -> Self {
         Self {
             value: line,
@@ -237,7 +241,7 @@ impl Progress {
 enum Finish {
     /// No checkered flag yet.
     Pending,
-    /// The overall leader took the checkered flag at this session time.
+    /// The overall leader took the checkered flag at this tick time.
     At(f64),
     /// The checkered flag came out before the leader's finish could be timed.
     Unknown,
@@ -250,7 +254,7 @@ enum Finish {
 #[derive(Debug)]
 pub(crate) struct RaceClock {
     cars: Vec<Progress>,
-    /// Session time each car last passed each checkpoint, `CHECKPOINTS` per car.
+    /// Tick time each car last passed each checkpoint, `CHECKPOINTS` per car.
     times: Vec<f64>,
     /// Which pass each time belongs to: `laps * CHECKPOINTS + checkpoint`, or `i32::MIN` for none.
     marks: Vec<i32>,
@@ -298,7 +302,7 @@ impl RaceClock {
         self.cars.len()
     }
 
-    /// Session time of the latest observation.
+    /// Tick time of the latest observation.
     #[cfg(test)]
     pub(crate) fn now(&self) -> f64 {
         self.last
@@ -313,7 +317,7 @@ impl RaceClock {
         self.finish = Finish::Pending;
     }
 
-    /// Feeds every car at session time `now`. `sample(car)` gives `CarIdxLapCompleted`, `CarIdxLapDistPct`, and
+    /// Feeds every car at tick time `now`. `sample(car)` gives `CarIdxLapCompleted`, `CarIdxLapDistPct`, and
     /// whether the car is on the racing surface (on track, not on pit road) for a car in the world, and `None` for
     /// a car that is not (its place is kept) or not racing (the pace car). `checkered` is true once the session
     /// state is checkered or cool-down.
@@ -459,7 +463,7 @@ impl RaceClock {
         }
     }
 
-    /// Keeps `lap`, which `car` completed at session time `end`, as its profile if every checkpoint of the lap was
+    /// Keeps `lap`, which `car` completed at tick time `end`, as its profile if every checkpoint of the lap was
     /// passed. Runs before the line's checkpoint is overwritten with the next lap.
     fn keep_profile(&mut self, car: usize, lap: i32, end: f64) {
         let base = car * CHECKPOINTS;
@@ -533,7 +537,7 @@ impl RaceClock {
             .flatten()
     }
 
-    /// Session time at which `car` was at `progress` (laps plus lap distance), interpolated between checkpoints.
+    /// Tick time at which `car` was at `progress` (laps plus lap distance), interpolated between checkpoints.
     pub(crate) fn time_at(&self, car: usize, progress: f64) -> Option<f64> {
         let c = self.cars.get(car)?;
         if !c.value.is_finite() || !progress.is_finite() || progress > c.value {
