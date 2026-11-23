@@ -20,6 +20,9 @@ use pitot_irsdk::session::SessionInfo;
 pub(crate) const MAX_SECTORS: usize = 12;
 /// A gap in observations longer than this restarts sector timing for a car.
 const MAX_OBSERVATION_GAP: f64 = 5.0;
+/// Lap distances taken as on the lap. At the line the sim can report a lap distance a hair below zero (or above
+/// one); -1 means the car is not in the world.
+pub(crate) const LAP_DISTANCE: std::ops::RangeInclusive<f32> = -0.01..=1.01;
 
 /// Where the sectors of the track start, as lap distance, in order.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -96,13 +99,15 @@ fn sector_of(starts: &[f32], pct: f32) -> usize {
 
 impl SectorClock {
     /// Feeds the car's lap distance at tick time `time`. `valid` is false off track, in the pits, or not in
-    /// the world; timing then restarts.
+    /// the world; timing then restarts. A lap distance a hair outside the lap (within [`LAP_DISTANCE`]) is the
+    /// line.
     pub(crate) fn observe(&mut self, starts: &[f32], pct: f32, time: f64, valid: bool) {
-        if !valid || starts.len() < 2 || !(0.0..=1.0).contains(&pct) {
+        if !valid || starts.len() < 2 || !LAP_DISTANCE.contains(&pct) {
             self.pct = -1.0;
             self.entered = -1.0;
             return;
         }
+        let pct = pct.clamp(0.0, 1.0);
         let sector = sector_of(starts, pct);
         let continued =
             self.pct >= 0.0 && time > self.time && time - self.time <= MAX_OBSERVATION_GAP;
@@ -343,7 +348,7 @@ impl RaceClock {
             }
             // At the line the sim can report a lap distance a hair below zero; -1 means not in the world.
             let Some((laps, pct, clean)) =
-                sample(car).filter(|&(_, p, _)| (-0.01..=1.01).contains(&p))
+                sample(car).filter(|&(_, p, _)| LAP_DISTANCE.contains(&p))
             else {
                 self.cars[car].tracking = false;
                 continue;
@@ -643,6 +648,33 @@ mod tests {
         // In the pits nothing is timed.
         clock.observe(&starts, 0.71, 11.0, false);
         assert_eq!(clock.last, [0.0; MAX_SECTORS]);
+        assert_eq!(clock.current(), None);
+    }
+
+    #[test]
+    fn a_lap_distance_a_hair_below_zero_at_the_line_is_the_line() {
+        // 100 s laps at a steady speed, sectors from 0 and 0.5, observed every second from 0.30 on and more often
+        // around the line: 0.998, then -1e-6 where the car is at the line, then 0.004.
+        let starts = [0.0, 0.5];
+        let mut clock = SectorClock::default();
+        let times = (30..100)
+            .map(f64::from)
+            .chain([99.8, 100.0, 100.4])
+            .chain((101..=160).map(f64::from));
+        for t in times {
+            let pct = if t == 100.0 {
+                -1.0e-6
+            } else {
+                (t / 100.0).fract() as f32
+            };
+            clock.observe(&starts, pct, t, LAP_DISTANCE.contains(&pct));
+        }
+        // Sector 1 from 50 s to the line at 100 s, then sector 0 from the line to 150 s.
+        assert!((clock.last[1] - 50.0).abs() < 0.01, "{:?}", clock.last);
+        assert!((clock.last[0] - 50.0).abs() < 0.01, "{:?}", clock.last);
+        assert!((clock.done[1] - 100.0).abs() < 0.01, "{:?}", clock.done);
+        // -1 still means not in the world: timing restarts.
+        clock.observe(&starts, -1.0, 160.1, LAP_DISTANCE.contains(&-1.0));
         assert_eq!(clock.current(), None);
     }
 

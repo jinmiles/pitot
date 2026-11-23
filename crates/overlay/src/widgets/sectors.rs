@@ -370,7 +370,8 @@ impl SectorsWidget {
             let pct = snap.f32(vars.car_lap_dist_pct, car).unwrap_or(-1.0);
             let in_world = snap.i32(vars.car_track_surface, car) != Some(NOT_IN_WORLD);
             let pit = snap.bool(vars.car_on_pit_road, car).unwrap_or(false);
-            clock.observe(starts, pct, now, in_world && !pit && pct >= 0.0);
+            // A hair below zero at the line is on the lap; -1 means not in the world.
+            clock.observe(starts, pct, now, in_world && !pit && pct >= -0.01);
         }
 
         let Some(player) = snap
