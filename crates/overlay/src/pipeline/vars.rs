@@ -78,6 +78,7 @@ pub(crate) use var_group;
 
 vars! {
     session_time => "SessionTime",
+    session_tick => "SessionTick",
     session_num => "SessionNum",
     session_state => "SessionState",
     session_flags => "SessionFlags",
