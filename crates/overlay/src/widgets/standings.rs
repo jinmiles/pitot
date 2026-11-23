@@ -18,7 +18,7 @@ use crate::config::{NoOptions, WidgetConfig};
 use crate::pipeline::View;
 use crate::render::{Align, Canvas, Color, Rect};
 
-use super::classes::class_label;
+use super::classes::{ClassLabel, class_label};
 use super::text::FixedText;
 use super::timing::{Gap, RaceClock, SectorClock, SectorStarts};
 use super::trackclock::{SharedTrackClock, TrackClock};
@@ -788,9 +788,11 @@ fn write_header(
     let driver = leader.and_then(|l| info.driver_info.drivers.get(l.car)?.as_ref());
     header.color = driver.and_then(|d| d.car_class_color).unwrap_or(0xFF_FFFF);
     header.first = first;
-    header
-        .name
-        .set(driver.map_or("Class", |d| class_label(&info.driver_info.drivers, d)));
+    header.name.clear();
+    let label = driver.map_or(ClassLabel::Number(Some(class.id)), |d| {
+        class_label(&info.driver_info.drivers, d)
+    });
+    let _ = write!(header.name, "{label}");
     header.sof.clear();
     if let Some(sof) = strength_of_field(class_entries.iter().map(|e| e.rating)) {
         let _ = write!(header.sof, "SOF {:.1}k", sof / 1000.0);

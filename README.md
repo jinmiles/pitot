@@ -10,11 +10,14 @@ release builds.
 
 - Source: https://github.com/tariknz/irdashies
 - License: MIT
-- Used in: `crates/bench/src/replay/irdt.rs`, `crates/overlay/src/widgets/relative.rs`
+- Used in: `crates/bench/src/replay/irdt.rs`, `crates/overlay/src/widgets/relative.rs`,
+  `crates/overlay/src/widgets/classes.rs`
 - Ported: the `.irdt` v1 telemetry tape layout (file header, record header, record kinds, and FNV-1a checksums),
   reimplemented as a reader; the idea of comparing `CarIdxEstTime` across car classes by each car's
   `CarClassEstLapTime`, reimplemented for the relative's estimated gap (here the resulting share of a lap is
-  multiplied by the leading car's best lap)
+  multiplied by the leading car's best lap); the order of the rules that name a car class without a short name
+  (the class's short name, then a category every car of the class shares, then the one car model's name, then the
+  class number), reimplemented with categories from each car's `CarPath`
 
 ```text
 MIT License

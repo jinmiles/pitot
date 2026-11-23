@@ -63,15 +63,18 @@ iRating change, interval, places gained, maker, and tires.
 ## Class names
 
 The session info has a short class name (`CarClassShortName`) and no long one. AI sessions leave the short name
-empty, so the header's label comes from the first of these that gives one:
+empty, so the header's label comes from the first of these that gives one (the order follows irDashies):
 
-1. `CarClassShortName`, when it is not empty (online sessions: `FIA F4`, `GT3`).
-2. A few classes known by `CarClassID`, the ones seen with an empty short name: 4029 `GTP`, 2523 `LMP2`, 4011
-   `GT3`.
-3. The class's cars, when every car's `CarPath` or `CarScreenName` points to the same class: `gtp`, `lmdh`, or
-   `499p` is GTP; `lmp2` or `p217` is LMP2; `lmp3` or `p320` is LMP3; `gt3` is GT3; `gt4` is GT4; `tcr` is TCR.
-   A name with `cup` in it points nowhere (the Porsche 911 GT3 Cup races in a class of its own).
-4. The class leader's short car name (`CarScreenNameShort`), as before.
+1. The first `CarClassShortName` of the class's cars that is not empty (online sessions: `FIA F4`, `GT3`).
+2. The category every car of the class has by its car model's `CarPath`. A few paths are listed as they are
+   (`ferrari499p` and `bmwlmdh` are GTP, `dallarap217` is LMP2); otherwise a path containing `gtp` or `lmdh` is
+   GTP, `lmp2` LMP2, `lmp3` LMP3, `gt3` GT3, `gt4` GT4, and `tcr` TCR. A path with `cup` in it has no category
+   (the Porsche 911 GT3 Cup races in a class of its own). The category belongs to the car, not the class:
+   `CarClassID`s are made per series, so the same GT3 cars have other class IDs in other series.
+3. When the class has a single car model, its short name (`CarScreenNameShort`).
+4. `Class` and the class ID (`Class 4011`).
+
+The pace car and spectators do not count.
 
 ## Calculations
 
