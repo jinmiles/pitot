@@ -9,6 +9,10 @@
 //! gap in the race (laps count); on track it is the gap by lap distance alone, whatever the laps. It also keeps
 //! each car's last usable lap as checkpoint times, so the time a car takes between two spots can be estimated
 //! when its latest pass was not seen.
+//!
+//! Times are tick time: seconds on the sim's tick count (`View::tick_time`), which the sim's own lap times and
+//! results follow. `SessionTime` would put a whole tick into a time now and then, as it slips against the ticks.
+//! Only differences are used.
 
 use pitot_irsdk::session::SessionInfo;
 
@@ -16,6 +20,9 @@ use pitot_irsdk::session::SessionInfo;
 pub(crate) const MAX_SECTORS: usize = 12;
 /// A gap in observations longer than this restarts sector timing for a car.
 const MAX_OBSERVATION_GAP: f64 = 5.0;
+/// Lap distances taken as on the lap. At the line the sim can report a lap distance a hair below zero (or above
+/// one); -1 means the car is not in the world.
+pub(crate) const LAP_DISTANCE: std::ops::RangeInclusive<f32> = -0.01..=1.01;
 
 /// Where the sectors of the track start, as lap distance, in order.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -68,7 +75,7 @@ pub(crate) struct SectorClock {
     pub last: [f32; MAX_SECTORS],
     /// Best time of each sector since the clock was reset, or 0 when not timed yet.
     pub best: [f32; MAX_SECTORS],
-    /// Session time at which each sector's last time ended, or negative when not timed yet.
+    /// Tick time at which each sector's last time ended, or negative when not timed yet.
     pub done: [f64; MAX_SECTORS],
 }
 
@@ -91,14 +98,16 @@ fn sector_of(starts: &[f32], pct: f32) -> usize {
 }
 
 impl SectorClock {
-    /// Feeds the car's lap distance at session time `time`. `valid` is false off track, in the pits, or not in
-    /// the world; timing then restarts.
+    /// Feeds the car's lap distance at tick time `time`. `valid` is false off track, in the pits, or not in
+    /// the world; timing then restarts. A lap distance a hair outside the lap (within [`LAP_DISTANCE`]) is the
+    /// line.
     pub(crate) fn observe(&mut self, starts: &[f32], pct: f32, time: f64, valid: bool) {
-        if !valid || starts.len() < 2 || !(0.0..=1.0).contains(&pct) {
+        if !valid || starts.len() < 2 || !LAP_DISTANCE.contains(&pct) {
             self.pct = -1.0;
             self.entered = -1.0;
             return;
         }
+        let pct = pct.clamp(0.0, 1.0);
         let sector = sector_of(starts, pct);
         let continued =
             self.pct >= 0.0 && time > self.time && time - self.time <= MAX_OBSERVATION_GAP;
@@ -149,8 +158,15 @@ impl SectorClock {
     }
 }
 
-/// Checkpoints per lap for race gaps: one every half percent of the lap.
-const CHECKPOINTS: usize = 200;
+/// Checkpoints per lap for race gaps: one every tenth of a percent of the lap (4 to 7 m on most tracks).
+const CHECKPOINTS: usize = 1000;
+/// Pass times are kept in this unit after [`RaceClock`]'s base, in an `i32`: rounded to 0.05 ms, whatever the
+/// session's length.
+const TIME_UNIT: f64 = 1.0e-4;
+/// An `i32` of [`TIME_UNIT`] holds 59 hours; a clock running longer than this since its base starts over.
+const MAX_SPAN: f64 = 48.0 * 3600.0;
+/// No pass in a checkpoint slot.
+const NO_PASS: i16 = i16::MIN;
 /// Within this lap distance of the line, `CarIdxLapDistPct` can wrap a moment before or after
 /// `CarIdxLapCompleted` counts the lap.
 const NEAR_LINE: f32 = 0.1;
@@ -166,7 +182,7 @@ const MAX_PROFILE_GAP: f64 = 1.0;
 pub(crate) enum Standing {
     /// Laps completed plus lap distance, as last seen.
     Running(f64),
-    /// Took the checkered flag with this many laps at this session time.
+    /// Took the checkered flag with this many laps at this tick time.
     Finished { laps: i32, at: f64 },
 }
 
@@ -193,12 +209,12 @@ pub(crate) enum Gap {
 struct Progress {
     /// Laps completed plus lap distance, kept continuous across the line; NaN until seen.
     value: f64,
-    /// Session time of the last observation, or of the finish.
+    /// Tick time of the last observation, or of the finish.
     time: f64,
     /// The last observation was valid, so the next one continues from it.
     tracking: bool,
     finished: bool,
-    /// Session time since which `value` has been a lap off the sim's counters, or NaN.
+    /// Tick time since which `value` has been a lap off the sim's counters, or NaN.
     corrected: f64,
     /// The last observation was on the racing surface.
     clean: bool,
@@ -222,7 +238,7 @@ impl Default for Progress {
 }
 
 impl Progress {
-    /// A car that took the checkered flag at `line` laps at session time `at`.
+    /// A car that took the checkered flag at `line` laps at tick time `at`.
     fn finished(line: f64, at: f64) -> Self {
         Self {
             value: line,
@@ -237,7 +253,7 @@ impl Progress {
 enum Finish {
     /// No checkered flag yet.
     Pending,
-    /// The overall leader took the checkered flag at this session time.
+    /// The overall leader took the checkered flag at this tick time.
     At(f64),
     /// The checkered flag came out before the leader's finish could be timed.
     Unknown,
@@ -246,19 +262,23 @@ enum Finish {
 /// Every car's progress through a race and the times it passed checkpoints around the lap, observed a few times
 /// per second. Gives the live order and time gaps that do not wait for the line.
 ///
-/// Storage is sized once per connection by [`RaceClock::resize`]; observing does not allocate.
+/// Storage is sized once per connection by [`RaceClock::resize`]; observing does not allocate. A checkpoint pass
+/// takes 6 bytes: its time as an `i32` of [`TIME_UNIT`] after `base`, and its lap as an `i16`.
 #[derive(Debug)]
 pub(crate) struct RaceClock {
     cars: Vec<Progress>,
-    /// Session time each car last passed each checkpoint, `CHECKPOINTS` per car.
-    times: Vec<f64>,
-    /// Which pass each time belongs to: `laps * CHECKPOINTS + checkpoint`, or `i32::MIN` for none.
-    marks: Vec<i32>,
+    /// When each car last passed each checkpoint, `CHECKPOINTS` per car: [`TIME_UNIT`]s after `base`.
+    times: Vec<i32>,
+    /// The lap each of those passes belongs to (the pass is at `laps * CHECKPOINTS + checkpoint` checkpoints), or
+    /// [`NO_PASS`].
+    pass_laps: Vec<i16>,
     /// Each car's last usable lap: seconds from the line to each checkpoint and back to the line, `CHECKPOINTS + 1`
     /// per car.
     profiles: Vec<f32>,
     /// The lap each car's profile is of, or `i32::MIN` for none yet.
     profile_laps: Vec<i32>,
+    /// Tick time the pass times count from: the first observation since the clock started over, or NaN before it.
+    base: f64,
     last: f64,
     finish: Finish,
 }
@@ -268,9 +288,10 @@ impl Default for RaceClock {
         Self {
             cars: Vec::new(),
             times: Vec::new(),
-            marks: Vec::new(),
+            pass_laps: Vec::new(),
             profiles: Vec::new(),
             profile_laps: Vec::new(),
+            base: f64::NAN,
             last: f64::NEG_INFINITY,
             finish: Finish::Pending,
         }
@@ -283,22 +304,34 @@ impl RaceClock {
         self.cars.clear();
         self.cars.resize(cars, Progress::default());
         self.times.clear();
-        self.times.resize(cars * CHECKPOINTS, 0.0);
-        self.marks.clear();
-        self.marks.resize(cars * CHECKPOINTS, i32::MIN);
+        self.times.resize(cars * CHECKPOINTS, 0);
+        self.pass_laps.clear();
+        self.pass_laps.resize(cars * CHECKPOINTS, NO_PASS);
         self.profiles.clear();
         self.profiles.resize(cars * (CHECKPOINTS + 1), 0.0);
         self.profile_laps.clear();
         self.profile_laps.resize(cars, i32::MIN);
+        self.base = f64::NAN;
         self.last = f64::NEG_INFINITY;
         self.finish = Finish::Pending;
+    }
+
+    /// Bytes the clock keeps for its cars.
+    #[cfg(test)]
+    fn storage_bytes(&self) -> usize {
+        use std::mem::size_of_val;
+        size_of_val(self.cars.as_slice())
+            + size_of_val(self.times.as_slice())
+            + size_of_val(self.pass_laps.as_slice())
+            + size_of_val(self.profiles.as_slice())
+            + size_of_val(self.profile_laps.as_slice())
     }
 
     pub(crate) fn len(&self) -> usize {
         self.cars.len()
     }
 
-    /// Session time of the latest observation.
+    /// Tick time of the latest observation.
     #[cfg(test)]
     pub(crate) fn now(&self) -> f64 {
         self.last
@@ -307,13 +340,25 @@ impl RaceClock {
     /// Forgets everything, keeping the storage.
     pub(crate) fn reset(&mut self) {
         self.cars.iter_mut().for_each(|c| *c = Progress::default());
-        self.marks.iter_mut().for_each(|m| *m = i32::MIN);
+        self.pass_laps.iter_mut().for_each(|l| *l = NO_PASS);
         self.profile_laps.iter_mut().for_each(|l| *l = i32::MIN);
+        self.base = f64::NAN;
         self.last = f64::NEG_INFINITY;
         self.finish = Finish::Pending;
     }
 
-    /// Feeds every car at session time `now`. `sample(car)` gives `CarIdxLapCompleted`, `CarIdxLapDistPct`, and
+    /// Tick time `t` as kept in `times`.
+    fn stamp(&self, t: f64) -> i32 {
+        // Within `MAX_SPAN` of the base this fits; `as` saturates otherwise.
+        ((t - self.base) / TIME_UNIT).round() as i32
+    }
+
+    /// The tick time a value of `times` stands for.
+    fn time_of(&self, stamp: i32) -> f64 {
+        self.base + f64::from(stamp) * TIME_UNIT
+    }
+
+    /// Feeds every car at tick time `now`. `sample(car)` gives `CarIdxLapCompleted`, `CarIdxLapDistPct`, and
     /// whether the car is on the racing surface (on track, not on pit road) for a car in the world, and `None` for
     /// a car that is not (its place is kept) or not racing (the pace car). `checkered` is true once the session
     /// state is checkered or cool-down.
@@ -323,12 +368,16 @@ impl RaceClock {
         checkered: bool,
         sample: impl Fn(usize) -> Option<(i32, f32, bool)>,
     ) {
-        if now < self.last {
-            // Time went back (a replay was rewound): the history no longer applies.
+        if now < self.last || now - self.base > MAX_SPAN {
+            // Time went back (a replay was rewound): the history no longer applies. Or the pass times would no
+            // longer fit their `i32`s (two days on).
             self.reset();
         } else if now == self.last {
             // The same moment again (two widgets reading one tick) would break continuity at the line.
             return;
+        }
+        if self.base.is_nan() {
+            self.base = now;
         }
         self.last = now;
         let finish = self.finish;
@@ -339,7 +388,7 @@ impl RaceClock {
             }
             // At the line the sim can report a lap distance a hair below zero; -1 means not in the world.
             let Some((laps, pct, clean)) =
-                sample(car).filter(|&(_, p, _)| (-0.01..=1.01).contains(&p))
+                sample(car).filter(|&(_, p, _)| LAP_DISTANCE.contains(&p))
             else {
                 self.cars[car].tracking = false;
                 continue;
@@ -445,36 +494,34 @@ impl RaceClock {
             let at = mark as f64 / k;
             let time = t0 + (t1 - t0) * (at - from) / (to - from);
             let checkpoint = mark.rem_euclid(CHECKPOINTS as i32) as usize;
-            if checkpoint == 0 {
-                let lap = mark.div_euclid(CHECKPOINTS as i32) - 1;
-                if unclean < f64::from(lap) {
-                    self.keep_profile(car, lap, time);
-                }
+            let lap = mark.div_euclid(CHECKPOINTS as i32);
+            if checkpoint == 0 && unclean < f64::from(lap - 1) {
+                self.keep_profile(car, lap - 1, time);
             }
             let slot = car * CHECKPOINTS + checkpoint;
-            if let (Some(t), Some(m)) = (self.times.get_mut(slot), self.marks.get_mut(slot)) {
-                *t = time;
-                *m = mark;
+            let stamp = self.stamp(time);
+            if let (Some(t), Some(l)) = (self.times.get_mut(slot), self.pass_laps.get_mut(slot)) {
+                *t = stamp;
+                *l = i16::try_from(lap).unwrap_or(NO_PASS);
             }
         }
     }
 
-    /// Keeps `lap`, which `car` completed at session time `end`, as its profile if every checkpoint of the lap was
+    /// Keeps `lap`, which `car` completed at tick time `end`, as its profile if every checkpoint of the lap was
     /// passed. Runs before the line's checkpoint is overwritten with the next lap.
     fn keep_profile(&mut self, car: usize, lap: i32, end: f64) {
-        let base = car * CHECKPOINTS;
-        let start_mark = lap * CHECKPOINTS as i32;
-        let (Some(marks), Some(times)) = (
-            self.marks.get(base..base + CHECKPOINTS),
-            self.times.get(base..base + CHECKPOINTS),
+        let first = car * CHECKPOINTS;
+        let Ok(lap16) = i16::try_from(lap) else {
+            return;
+        };
+        let (Some(laps), Some(times)) = (
+            self.pass_laps.get(first..first + CHECKPOINTS),
+            self.times.get(first..first + CHECKPOINTS),
         ) else {
             return;
         };
-        let complete = marks
-            .iter()
-            .zip(start_mark..)
-            .all(|(&mark, expected)| mark == expected);
-        let start = times[0];
+        let complete = lap16 != NO_PASS && laps.iter().all(|&l| l == lap16);
+        let start = self.base + f64::from(times[0]) * TIME_UNIT;
         if !complete || end <= start {
             return;
         }
@@ -482,8 +529,8 @@ impl RaceClock {
         let Some(profile) = self.profiles.get_mut(at..at + CHECKPOINTS + 1) else {
             return;
         };
-        for (out, &time) in profile.iter_mut().zip(times) {
-            *out = (time - start) as f32;
+        for (out, &stamp) in profile.iter_mut().zip(times) {
+            *out = (f64::from(stamp - times[0]) * TIME_UNIT) as f32;
         }
         profile[CHECKPOINTS] = (end - start) as f32;
         if let Some(l) = self.profile_laps.get_mut(car) {
@@ -528,12 +575,15 @@ impl RaceClock {
     fn crossing(&self, car: usize, progress: f64) -> Option<f64> {
         let mark = (progress * CHECKPOINTS as f64).round() as i32;
         let slot = car * CHECKPOINTS + mark.rem_euclid(CHECKPOINTS as i32) as usize;
-        (self.marks.get(slot) == Some(&mark))
-            .then(|| self.times.get(slot).copied())
+        let lap = i16::try_from(mark.div_euclid(CHECKPOINTS as i32))
+            .ok()
+            .filter(|&l| l != NO_PASS)?;
+        (self.pass_laps.get(slot) == Some(&lap))
+            .then(|| self.times.get(slot).map(|&s| self.time_of(s)))
             .flatten()
     }
 
-    /// Session time at which `car` was at `progress` (laps plus lap distance), interpolated between checkpoints.
+    /// Tick time at which `car` was at `progress` (laps plus lap distance), interpolated between checkpoints.
     pub(crate) fn time_at(&self, car: usize, progress: f64) -> Option<f64> {
         let c = self.cars.get(car)?;
         if !c.value.is_finite() || !progress.is_finite() || progress > c.value {
@@ -639,6 +689,33 @@ mod tests {
         // In the pits nothing is timed.
         clock.observe(&starts, 0.71, 11.0, false);
         assert_eq!(clock.last, [0.0; MAX_SECTORS]);
+        assert_eq!(clock.current(), None);
+    }
+
+    #[test]
+    fn a_lap_distance_a_hair_below_zero_at_the_line_is_the_line() {
+        // 100 s laps at a steady speed, sectors from 0 and 0.5, observed every second from 0.30 on and more often
+        // around the line: 0.998, then -1e-6 where the car is at the line, then 0.004.
+        let starts = [0.0, 0.5];
+        let mut clock = SectorClock::default();
+        let times = (30..100)
+            .map(f64::from)
+            .chain([99.8, 100.0, 100.4])
+            .chain((101..=160).map(f64::from));
+        for t in times {
+            let pct = if t == 100.0 {
+                -1.0e-6
+            } else {
+                (t / 100.0).fract() as f32
+            };
+            clock.observe(&starts, pct, t, LAP_DISTANCE.contains(&pct));
+        }
+        // Sector 1 from 50 s to the line at 100 s, then sector 0 from the line to 150 s.
+        assert!((clock.last[1] - 50.0).abs() < 0.01, "{:?}", clock.last);
+        assert!((clock.last[0] - 50.0).abs() < 0.01, "{:?}", clock.last);
+        assert!((clock.done[1] - 100.0).abs() < 0.01, "{:?}", clock.done);
+        // -1 still means not in the world: timing restarts.
+        clock.observe(&starts, -1.0, 160.1, LAP_DISTANCE.contains(&-1.0));
         assert_eq!(clock.current(), None);
     }
 
@@ -812,6 +889,44 @@ mod tests {
         // A reset forgets the profiles.
         clock.reset();
         assert_eq!(clock.lap_time_between(0, 0.25, 0.40), None);
+    }
+
+    #[test]
+    fn storage_for_72_cars() {
+        let mut clock = RaceClock::default();
+        clock.resize(72);
+        // Per car: a 4-byte time and a 2-byte lap per checkpoint, the lap profile, its lap, and the progress.
+        let per_car =
+            CHECKPOINTS * (4 + 2) + (CHECKPOINTS + 1) * 4 + 4 + std::mem::size_of::<Progress>();
+        assert_eq!(clock.storage_bytes(), 72 * per_car);
+        assert!(
+            clock.storage_bytes() < 720 * 1024,
+            "{}",
+            clock.storage_bytes()
+        );
+    }
+
+    #[test]
+    fn pass_times_keep_their_precision_in_long_sessions() {
+        // Two cars 2 s apart on 100 s laps, first seen at 1,000 s and followed again 40 hours later; then the same
+        // 70 hours later, past the 59 hours an `i32` of pass time holds: the clock started over at two days.
+        for hours in [40.0, 70.0] {
+            let mut clock = RaceClock::default();
+            clock.resize(2);
+            clock.observe(1000.0, false, |car| sample(0.5 - 0.02 * car as f64));
+            let start = 1000.0 + hours * 3600.0;
+            for n in 0..=1500 {
+                let t = start + f64::from(n) * 0.1;
+                clock.observe(t, false, |car| {
+                    sample(0.5 + (t - start) / 100.0 - 0.02 * car as f64)
+                });
+            }
+            let gap = clock.track_gap(0, 1).unwrap_or(f64::NAN);
+            assert!((gap - 2.0).abs() < 1e-4, "{hours} h: {gap}");
+            let lap = clock.time_at(0, 1.9).unwrap_or(f64::NAN)
+                - clock.time_at(0, 1.4).unwrap_or(f64::NAN);
+            assert!((lap - 50.0).abs() < 1e-4, "{hours} h: {lap}");
+        }
     }
 
     #[test]

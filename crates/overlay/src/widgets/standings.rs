@@ -519,7 +519,7 @@ impl StandingsWidget {
         let is_qualifying = session
             .and_then(|s| s.session_type.as_deref())
             .is_some_and(is_qualifying_type);
-        let now = snap.f64(vars.session_time, 0).unwrap_or(0.0);
+        let now = view.tick_time().unwrap_or(0.0);
 
         // Out laps, followed in every session and shown in qualifying.
         for (car, (on_pit, out_lap_of)) in self.on_pit.iter_mut().zip(&mut self.out_lap_of).enumerate() {
@@ -556,7 +556,8 @@ impl StandingsWidget {
             let pct = snap.f32(vars.car_lap_dist_pct, car).unwrap_or(-1.0);
             let in_world = snap.i32(vars.car_track_surface, car) != Some(NOT_IN_WORLD);
             let pit = snap.bool(vars.car_on_pit_road, car).unwrap_or(false);
-            clock.observe(starts, pct, now, in_world && !pit && pct >= 0.0);
+            // A hair below zero at the line is on the lap; -1 means not in the world.
+            clock.observe(starts, pct, now, in_world && !pit && pct >= -0.01);
         }
 
         // Classes present, fastest first.
@@ -2007,7 +2008,8 @@ SplitTimeInfo:
     }
 
     const RACE_CARS: usize = 5;
-    const RACE_ROW: usize = 20 + RACE_CARS * 4 * 4;
+    const RACE_TICK: usize = 20 + RACE_CARS * 4 * 4;
+    const RACE_ROW: usize = RACE_TICK + 4;
 
     const RACE_SESSION: &str = "---
 WeekendInfo:
@@ -2077,6 +2079,7 @@ DriverInfo:
     fn race_row(t: f64, state: i32) -> Vec<u8> {
         let mut row = vec![0u8; RACE_ROW];
         row[0..8].copy_from_slice(&t.to_le_bytes());
+        row[RACE_TICK..RACE_TICK + 4].copy_from_slice(&((t * 60.0).round() as i32).to_le_bytes());
         row[12..16].copy_from_slice(&3i32.to_le_bytes());
         row[16..20].copy_from_slice(&state.to_le_bytes());
         let put = |row: &mut Vec<u8>, k: usize, car: usize, bytes: [u8; 4]| {
@@ -2115,6 +2118,7 @@ DriverInfo:
                 array(VarType::Int, 1, "CarIdxLapCompleted"),
                 array(VarType::Int, 2, "CarIdxTrackSurface"),
                 array(VarType::Float, 3, "CarIdxF2Time"),
+                VarHeader::new(VarType::Int, RACE_TICK as i32, 1, "SessionTick").expect("valid"),
             ],
             buf_len: RACE_ROW,
             num_buf: 3,

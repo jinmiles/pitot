@@ -230,12 +230,12 @@ moment does the work for all.
 
 | Tracker | Read by | What |
 |---|---|---|
-| `shared.clock()` | standings, relative | every car's progress and the times it passed 200 checkpoints a lap: race gaps (`RaceClock::gap`) and gaps on track (`RaceClock::track_gap`) |
+| `shared.clock()` | standings, relative | every car's progress and the times it passed 1,000 checkpoints a lap: race gaps (`RaceClock::gap`) and gaps on track (`RaceClock::track_gap`) |
 | `shared.pit()` | pit, track map | other cars' pit stops, the refueling speed, and the pit lane loss ([pit](pit.md)) |
 | `shared.gaps()` | widgets to come: battle, faster class, rejoin, side by side | the gap history (below) |
 | `shared.laps()` | widgets to come: lap log, lap times, lap time spread, stints | the lap history (below) |
 
-**Gap history** (`widgets/gaps.rs`). Every 0.5 s of session time it samples, for each car in the world, the gap on
+**Gap history** (`widgets/gaps.rs`). Every 0.5 s of tick time (`View::tick_time`) it samples, for each car in the world, the gap on
 track to the player and to the next cars ahead and behind it on track, as the clock measured them: the time since
 the car in front passed the spot where the other one is now, whatever their laps. Pit road is included as
 measured. A sample is a `GapSample { time, to_player, ahead, behind }`: `to_player` is positive when the car is
@@ -243,7 +243,7 @@ ahead of the player within half a lap, negative behind, 0 for the player, NaN wh
 `ahead` and `behind` are `Some((car, seconds))` with NaN seconds when not measured. `latest(car)`, `samples(car)`
 (oldest first), and `ago(car, seconds)` (for how a gap changed) read it. 240 samples, two minutes, of 16 bytes
 per car: 276 KB for 72 cars, allocated at the first observation and again only when the car count changes. A
-replay going back in time or a new session starts it over.
+replay going back in time, a tick count that starts over, or a new session starts it over.
 
 **Lap history** (`widgets/laps.rs`). A car's lap ends when `CarIdxLapCompleted` goes up. Its time is the sim's
 `CarIdxLastLapTime`, which changes 2 to 63 ticks after the line in the public AI race capture, so the lap joins the

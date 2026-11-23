@@ -53,7 +53,7 @@ pub(crate) struct Stop {
     pub(crate) lap: i32,
     /// Laps the car had completed when it left pit road: its next stint starts there.
     pub(crate) left_lap: i32,
-    /// Session time at which it left pit road.
+    /// Tick time at which it left pit road.
     pub(crate) left_at: f64,
     /// Time on pit road, from entry to exit.
     pub(crate) lane_time: f32,
@@ -70,9 +70,9 @@ struct Visit {
     entered_at: f64,
     entered_pct: f32,
     lap: i32,
-    /// Session time of the observation where the current standing run began, or NaN while moving.
+    /// Tick time of the observation where the current standing run began, or NaN while moving.
     still_from: f64,
-    /// Session time of the run's last standing observation.
+    /// Tick time of the run's last standing observation.
     still_last: f64,
     stationary: f64,
 }
@@ -101,7 +101,7 @@ pub(crate) struct PitStops {
 
 impl PitStops {
     /// Feeds one observation of every car: whether it is on pit road, its track surface, lap distance, completed
-    /// laps, and its pace (lap time) for the lane loss. `time` is the session time.
+    /// laps, and its pace (lap time) for the lane loss. `time` is the tick time ([`View::tick_time`]).
     pub(crate) fn observe(
         &mut self,
         time: f64,
@@ -448,7 +448,7 @@ impl PitTracker {
             return;
         }
         self.last_tick = Some(tick);
-        let Some(time) = snap.f64(vars.session_time, 0) else {
+        let Some(time) = view.tick_time() else {
             return;
         };
         self.follow_session(snap, vars, session);

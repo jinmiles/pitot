@@ -364,13 +364,14 @@ impl SectorsWidget {
             self.behind = Rival::default();
         }
 
-        let now = snap.f64(vars.session_time, 0).unwrap_or(0.0);
+        let now = view.tick_time().unwrap_or(0.0);
         let starts = self.sectors.as_slice();
         for (car, clock) in self.clocks.iter_mut().enumerate() {
             let pct = snap.f32(vars.car_lap_dist_pct, car).unwrap_or(-1.0);
             let in_world = snap.i32(vars.car_track_surface, car) != Some(NOT_IN_WORLD);
             let pit = snap.bool(vars.car_on_pit_road, car).unwrap_or(false);
-            clock.observe(starts, pct, now, in_world && !pit && pct >= 0.0);
+            // A hair below zero at the line is on the lap; -1 means not in the world.
+            clock.observe(starts, pct, now, in_world && !pit && pct >= -0.01);
         }
 
         let Some(player) = snap
@@ -736,6 +737,8 @@ mod pipeline_tests {
 
     const CARS: usize = 4;
     const BASE: usize = 16;
+    /// `SessionTick`, in the third of the four per-car blocks, which the arrays leave free.
+    const TICK_AT: usize = BASE + 2 * CARS * 4;
     const ROW: usize = BASE + CARS * 4 * 4;
 
     const SESSION: &str = "---
@@ -800,6 +803,7 @@ SplitTimeInfo:
     fn row(t: f64) -> Vec<u8> {
         let mut row = vec![0u8; ROW];
         row[0..8].copy_from_slice(&t.to_le_bytes());
+        row[TICK_AT..TICK_AT + 4].copy_from_slice(&((t * 60.0).round() as i32).to_le_bytes());
         row[12..16].copy_from_slice(&2i32.to_le_bytes());
         let put = |row: &mut Vec<u8>, k: usize, car: usize, bytes: [u8; 4]| {
             let at = BASE + k * CARS * 4 + car * 4;
@@ -832,6 +836,7 @@ SplitTimeInfo:
                 VarHeader::new(VarType::Int, 12, 1, "PlayerCarIdx").expect("valid"),
                 array(VarType::Float, at(0), "CarIdxLapDistPct"),
                 array(VarType::Int, at(1), "CarIdxTrackSurface"),
+                VarHeader::new(VarType::Int, TICK_AT as i32, 1, "SessionTick").expect("valid"),
             ],
             buf_len: ROW,
             num_buf: 3,

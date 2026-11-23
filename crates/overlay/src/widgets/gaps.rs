@@ -1,7 +1,7 @@
 //! Every car's measured gaps on track over the last two minutes, for widgets that follow how gaps change: a battle
 //! with the car ahead, a faster class closing in, a car approaching while the player rejoins, a car alongside.
 //!
-//! Every [`INTERVAL`] of session time the history takes a sample: for each car in the world, the gap on track to
+//! Every [`INTERVAL`] of tick time ([`View::tick_time`]) the history takes a sample: for each car in the world, the gap on track to
 //! the player and to the next cars ahead and behind it on track, as the shared [`TrackClock`] measured them. A gap
 //! is the time since the car in front passed the spot where the other one is now, whatever their laps; pit road
 //! is included as measured. Storage is sized per connection from the car count; sampling does not allocate.
@@ -18,7 +18,7 @@ use crate::pipeline::View;
 
 use super::trackclock::SharedTrackClock;
 
-/// Session time between samples.
+/// Tick time between samples.
 pub(crate) const INTERVAL: f64 = 0.5;
 /// Samples kept per car: two minutes.
 pub(crate) const SAMPLES: usize = 240;
@@ -31,7 +31,7 @@ pub(crate) type SharedGapHistory = Rc<RefCell<GapHistory>>;
 /// One car at one sample, as read back.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct GapSample {
-    /// Session time of the sample.
+    /// Tick time of the sample.
     pub time: f64,
     /// Seconds to the player on track: positive when the car is ahead of the player (within half a lap), negative
     /// when it is behind, 0 for the player. NaN when the pass was not measured or the car was not in the world.
@@ -67,7 +67,7 @@ impl Entry {
 pub(crate) struct GapHistory {
     clock: SharedTrackClock,
     cars: usize,
-    /// Session time of each slot.
+    /// Tick time of each slot.
     times: Vec<f64>,
     /// `SAMPLES` entries per car.
     entries: Vec<Entry>,
@@ -108,7 +108,7 @@ impl GapHistory {
             clock.observe(view);
         }
         let (snap, vars) = (view.snapshot(), view.vars());
-        let Some(now) = snap.f64(vars.session_time, 0) else {
+        let Some(now) = view.tick_time() else {
             return;
         };
         let session_num = snap.i32(vars.session_num, 0);
@@ -167,7 +167,7 @@ impl GapHistory {
         self.last = None;
     }
 
-    /// Takes a sample at session time `now` when one is due. `pct(car)` is a car's lap distance while it is in the
+    /// Takes a sample at tick time `now` when one is due. `pct(car)` is a car's lap distance while it is in the
     /// world, and `gap(ahead, behind)` the clock's gap on track from `ahead` back to `behind`.
     fn record(
         &mut self,
@@ -180,7 +180,7 @@ impl GapHistory {
             return;
         }
         match self.last {
-            // A rewound replay: the samples are of another time line.
+            // A rewound replay or a tick count that started over: the samples are of another time line.
             Some(last) if now < last => self.reset(),
             Some(last) if now - last < INTERVAL => return,
             _ => {}

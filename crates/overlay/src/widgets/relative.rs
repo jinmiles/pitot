@@ -1073,9 +1073,10 @@ mod pipeline_tests {
     use crate::widgets::StandingsWidget;
 
     const CARS: usize = 5;
-    /// Per-car arrays of four bytes from byte 16, then the pit road flags (one byte each).
+    /// Per-car arrays of four bytes from byte 16, then the pit road flags (one byte each), then the tick count.
     const PIT_AT: usize = 16 + 5 * CARS * 4;
-    const ROW: usize = PIT_AT + CARS;
+    const TICK_AT: usize = PIT_AT + 8;
+    const ROW: usize = TICK_AT + 4;
 
     /// A practice session: the sim estimates the player's lap at 90 s, the cars do 100 s laps.
     const SESSION: &str = "---
@@ -1114,6 +1115,7 @@ DriverInfo:
     fn row(t: f64, pit: Option<usize>) -> Vec<u8> {
         let mut row = vec![0u8; ROW];
         row[0..8].copy_from_slice(&t.to_le_bytes());
+        row[TICK_AT..TICK_AT + 4].copy_from_slice(&((t * 60.0).round() as i32).to_le_bytes());
         row[12..16].copy_from_slice(&1i32.to_le_bytes());
         let put = |row: &mut Vec<u8>, k: usize, car: usize, bytes: [u8; 4]| {
             let at = 16 + k * CARS * 4 + car * 4;
@@ -1153,6 +1155,7 @@ DriverInfo:
                 array(VarType::Int, 4, "CarIdxClassPosition"),
                 VarHeader::new(VarType::Bool, PIT_AT as i32, CARS as i32, "CarIdxOnPitRoad")
                     .expect("valid"),
+                VarHeader::new(VarType::Int, TICK_AT as i32, 1, "SessionTick").expect("valid"),
             ],
             buf_len: ROW,
             num_buf: 3,
