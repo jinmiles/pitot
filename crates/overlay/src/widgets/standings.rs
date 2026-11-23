@@ -18,7 +18,7 @@ use crate::config::{NoOptions, WidgetConfig};
 use crate::pipeline::View;
 use crate::render::{Align, Canvas, Color, Rect};
 
-use super::relative::{in_pits, track_out_lap};
+use super::relative::{on_pit_road, track_out_lap};
 use super::text::FixedText;
 use super::timing::{Gap, RaceClock, SectorClock, SectorStarts};
 use super::trackclock::{SharedTrackClock, TrackClock};
@@ -526,7 +526,7 @@ impl StandingsWidget {
             track_out_lap(
                 on_pit,
                 out_lap_of,
-                in_pits(view, car),
+                on_pit_road(view, car),
                 snap.i32(vars.car_lap_completed, car),
             );
         }

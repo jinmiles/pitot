@@ -228,24 +228,29 @@ fn split_license(license: &str, class: &mut FixedText, rating: &mut FixedText) {
     rating.set(std::str::from_utf8(&digits[..n]).unwrap_or(""));
 }
 
-/// Whether a car counts as in the pits for [`track_out_lap`]: on pit road, or out of the world.
-pub(crate) fn in_pits(view: &View, car: usize) -> bool {
+/// Whether a car is on pit road, for [`track_out_lap`]; `None` while it is out of the world.
+pub(crate) fn on_pit_road(view: &View, car: usize) -> Option<bool> {
     let (snap, vars) = (view.snapshot(), view.vars());
-    snap.bool(vars.car_on_pit_road, car).unwrap_or(false)
-        || snap.i32(vars.car_track_surface, car) == Some(track_location::NOT_IN_WORLD)
+    (snap.i32(vars.car_track_surface, car) != Some(track_location::NOT_IN_WORLD))
+        .then(|| snap.bool(vars.car_on_pit_road, car).unwrap_or(false))
 }
 
 /// Follows one car's out lap: it starts when the car leaves pit road and ends when the car completes a lap or is
-/// on pit road again. `pit` is true on pit road and out of the world (a car in its garage), so going to the garage
-/// is not leaving the pits. `laps` is `CarIdxLapCompleted`, which is -1 until a car first reaches the line, so a
-/// car's first run out of the pits is an out lap too. `out_lap_of` is the completed-lap count during the out lap,
-/// or `None`. The standings use the same rule in qualifying.
+/// on pit road again. `laps` is `CarIdxLapCompleted`, which is -1 until a car first reaches the line, so a car's
+/// first run out of the pits is an out lap too. `out_lap_of` is the completed-lap count during the out lap, or
+/// `None`. The standings use the same rule in qualifying.
+///
+/// A car out of the world (`pit` is `None`) changes nothing: online, cars on track drop out of the world for a few
+/// seconds at a time (reading lap count -1 and pit road false), and a car in its garage comes back on pit road.
 pub(crate) fn track_out_lap(
     on_pit: &mut bool,
     out_lap_of: &mut Option<i32>,
-    pit: bool,
+    pit: Option<bool>,
     laps: Option<i32>,
 ) {
+    let Some(pit) = pit else {
+        return;
+    };
     if *on_pit && !pit {
         *out_lap_of = laps;
     } else if pit || *out_lap_of != laps {
@@ -385,7 +390,7 @@ impl RelativeWidget {
             track_out_lap(
                 &mut self.on_pit[car],
                 &mut self.out_lap_of[car],
-                in_pits(view, car),
+                on_pit_road(view, car),
                 snap.i32(vars.car_lap_completed, car),
             );
         }
@@ -880,31 +885,44 @@ mod tests {
 
     #[test]
     fn out_laps_run_from_pit_exit_to_the_line() {
+        let (on_track, on_pit_road, away) = (Some(false), Some(true), None);
         let (mut pit, mut out) = (false, None);
-        track_out_lap(&mut pit, &mut out, false, Some(3));
+        track_out_lap(&mut pit, &mut out, on_track, Some(3));
         assert_eq!(out, None, "driving");
-        track_out_lap(&mut pit, &mut out, true, Some(3));
+        track_out_lap(&mut pit, &mut out, on_pit_road, Some(3));
         assert_eq!(out, None, "on pit road");
-        track_out_lap(&mut pit, &mut out, false, Some(3));
+        track_out_lap(&mut pit, &mut out, on_track, Some(3));
         assert_eq!(out, Some(3), "left the pits");
-        track_out_lap(&mut pit, &mut out, false, Some(3));
+        track_out_lap(&mut pit, &mut out, on_track, Some(3));
         assert_eq!(out, Some(3), "still the out lap");
-        track_out_lap(&mut pit, &mut out, false, Some(4));
+        // Out of the world for a moment, as cars on track are online: the lap count reads -1 then.
+        track_out_lap(&mut pit, &mut out, away, Some(-1));
+        track_out_lap(&mut pit, &mut out, on_track, Some(3));
+        assert_eq!(out, Some(3), "out of the world for a moment");
+        track_out_lap(&mut pit, &mut out, on_track, Some(4));
         assert_eq!(out, None, "crossed the line");
-        track_out_lap(&mut pit, &mut out, true, Some(4));
-        track_out_lap(&mut pit, &mut out, false, Some(4));
-        track_out_lap(&mut pit, &mut out, true, Some(4));
+        track_out_lap(&mut pit, &mut out, away, Some(-1));
+        track_out_lap(&mut pit, &mut out, on_track, Some(4));
+        assert_eq!(out, None, "coming back on track is not leaving the pits");
+        track_out_lap(&mut pit, &mut out, on_pit_road, Some(4));
+        track_out_lap(&mut pit, &mut out, on_track, Some(4));
+        track_out_lap(&mut pit, &mut out, on_pit_road, Some(4));
         assert_eq!(out, None, "back on pit road");
+        // To the garage and back to the pit stall.
+        track_out_lap(&mut pit, &mut out, away, Some(-1));
+        track_out_lap(&mut pit, &mut out, on_pit_road, Some(4));
+        track_out_lap(&mut pit, &mut out, on_track, Some(4));
+        assert_eq!(out, Some(4), "out again");
 
         // A car's first run out of the pits, before it has reached the line.
         let (mut pit, mut out) = (true, None);
-        track_out_lap(&mut pit, &mut out, false, Some(-1));
+        track_out_lap(&mut pit, &mut out, on_track, Some(-1));
         assert_eq!(out, Some(-1), "the first out lap");
-        track_out_lap(&mut pit, &mut out, false, Some(0));
+        track_out_lap(&mut pit, &mut out, on_track, Some(0));
         assert_eq!(out, None, "reached the line");
         // Without the lap count, no out lap.
         let (mut pit, mut out) = (true, None);
-        track_out_lap(&mut pit, &mut out, false, None);
+        track_out_lap(&mut pit, &mut out, on_track, None);
         assert_eq!(out, None);
     }
 
