@@ -97,10 +97,12 @@ green flag, so the first gaps are ready at the start. The relative uses the same
   its finish while it drives its cool-down lap, so finishers stay in the order they took the flag (cars with more
   laps first, then the earlier finish), which is the order the results give. If the overlay connects after the
   checkered flag, the leader's finish was not seen and the results' order is shown.
-- **Gaps**: for each car, the overlay keeps the time it last passed each of 200 checkpoints around the lap (every
-  half percent of lap distance), interpolated by distance between updates like the sector times. Times are on the
-  sim's tick count, `SessionTick` over the tick rate, as the sim's lap times and results are; `SessionTime` slips
-  by whole ticks against it now and then (see the [relative's accuracy](relative.md#accuracy)). The interval to
+- **Gaps**: for each car, the overlay keeps the time it last passed each of 1,000 checkpoints around the lap
+  (every tenth of a percent of lap distance), interpolated by distance between updates like the sector times.
+  Times are on the sim's tick count, `SessionTick` over the tick rate, as the sim's lap times and results are;
+  `SessionTime` slips by whole ticks against it now and then (see the [relative's accuracy](relative.md#accuracy)).
+  They are kept as whole 0.1 ms after the clock's start (within 0.05 ms however long the session), so a pass takes
+  6 bytes: 707 KiB for 72 cars with the relative's lap profiles. The interval to
   the car ahead is the time since the car ahead passed the spot where this car is now; the gap to the class leader
   the same with the leader. A car more than a lap behind shows whole laps, `+1L`. For a finisher, the gap is taken
   at its finish. Until the car ahead has passed the spot since the overlay connected, the gap falls back to the
@@ -116,14 +118,16 @@ code at 10 Hz in all six phases of the 60 Hz frames, against references that do 
   only 10 matched there. Between crossings the live order never contradicted the cars' progress (199,504 adjacent
   pairs).
 - **Lap times** from the clock's line crossings against `CarIdxLastLapTime`: 636 of 636 within 0.8 ms (106 laps
-  after the first, median 0.12 ms). On `SessionTime`, only 34% were within 1 ms; the rest were one tick, 16.7 ms,
+  after the first, median 0.1 ms). On `SessionTime`, only 34% were within 1 ms; the rest were one tick, 16.7 ms,
   off.
 - **At the line**, intervals against the results' `Time` (time behind the leader at the line) differences: median
-  0.09 ms, largest 0.8 ms (780 intervals); gaps to the class leader: median 0.13 ms, largest 0.7 ms (810).
+  0.1 ms, largest 0.8 ms (780 intervals); gaps to the class leader: median 0.1 ms, largest 0.7 ms (810).
 - **Between line crossings**, against gaps interpolated frame by frame (60 Hz) from each car's lap distance,
-  without checkpoints, under green: median 1.8 ms, 90th percentile 12 ms, 99th percentile 28 ms, largest 0.37 s
-  (382,832 gaps). The error comes from the checkpoint spacing and is largest next to a very slow car (see the
-  [relative's accuracy](relative.md#accuracy)); the update rate hardly matters.
+  without checkpoints, under green: median 0.14 ms, 90th percentile 0.7 ms, 99th percentile 1.5 ms, largest
+  43 ms (382,832 gaps); the shown tenth differs from the reference's in 0.3% of readings. The error comes from the
+  checkpoint spacing and is largest next to a very slow car (see the [relative's accuracy](relative.md#accuracy));
+  the update rate hardly matters. With 200 checkpoints, before #195: median 1.8 ms, 99th percentile 28 ms,
+  largest 0.37 s.
 - **`CarIdxF2Time`** equals the results' `Time` once it updates, a median of 1.6 s (up to 2.7 s) after the car
   crosses the line. Its differences are exact but late, so it is only the fallback until a gap is timed.
 

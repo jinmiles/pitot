@@ -13,7 +13,7 @@ at a [text size](configuration.md#text-size) of 150 the default box is 307 x 200
   behind, the time since the player was last where that car is. Laps and classes do not matter, so lapped and
   lapping cars and other classes are timed like any other, in practice, qualifying, and races alike. The passes
   come from the clock the standings use (see [standings.md](standings.md#live-race-order-and-gaps)): every car's
-  laps and lap distance at each update of either widget, with the time each car passed each of 200 checkpoints
+  laps and lap distance at each update of either widget, with the time each car passed each of 1,000 checkpoints
   around the lap, interpolated between updates. The gap shows without a sign (`1.4`): rows above the player are
   ahead, rows below are behind.
 - **Estimated gap**: used when the pass has not been seen yet (the overlay just connected, or a car just came out
@@ -21,7 +21,7 @@ at a [text size](configuration.md#text-size) of 150 the default box is 307 x 200
   is older than the player's lap time. Like the measured gap, it follows the car ahead of the two on track (the
   leading car), so a car of another class is timed at its own pace, not the player's. In order:
   1. **Lap profile**: the time the leading car took on its last usable lap from the other car's lap distance to
-     its own, interpolated between the clock's 200 checkpoints, across the line when needed. A lap is usable when
+     its own, interpolated between the clock's 1,000 checkpoints, across the line when needed. A lap is usable when
      the clock saw every checkpoint of it, with observations at most 1 s apart, and the car stayed on track all
      the way (`CarIdxTrackSurface` on track and not `CarIdxOnPitRoad`: no pit road, pit stall, pit approach, or
      off-track excursion, any of which distorts the stretch it covers). Each usable lap replaces the car's
@@ -48,8 +48,8 @@ at a [text size](configuration.md#text-size) of 150 the default box is 307 x 200
   elapsed time over its length.
 - **Excluded**: the pace car, spectators, and cars not in the world (`CarIdxTrackSurface` of -1).
 - Per-car arrays come from the connection, sized by the sim's `CarIdx*` length. Names and numbers come from the
-  session info. The clock's lap profiles take 201 values per car, allocated with the rest of the clock once per
-  connection.
+  session info. The clock keeps about 10 KB per car (707 KiB for 72 cars): 1,000 checkpoint passes of 6 bytes
+  each and a lap profile of 1,001 values, allocated once per connection.
 - Text buffers have fixed capacity and are reused, so updates do not allocate. An update that changes nothing
   shown draws nothing; a change draws the widget's window again whole.
 
@@ -67,14 +67,18 @@ Checked by replaying captures through the overlay's clock at 10 Hz, as the widge
 - **At the line**, against the official gap on track: each car's crossing is built from the results' `Time` and
   `LastTime` alone, chained from the first car on each lap. When a car crosses the line, its gap to each of the
   three nearest cars ahead on track (any class) matched within 0.8 ms in 2,484 of 2,484 cases (AI race; median
-  0.12 ms, 99th percentile 0.68 ms). On `SessionTime`, 100 of them (4%) were 14 to 17 ms off.
+  0.1 ms, 99th percentile 0.7 ms). On `SessionTime`, 100 of them (4%) were 14 to 17 ms off.
 - **Between line crossings**, against gaps interpolated frame by frame (60 Hz) from each car's lap distance,
-  without checkpoints: under green, median 1.9 ms, 90th percentile 12 ms, 99th percentile 29 ms, largest 0.41 s
-  (AI race, 614,688 gaps); practice median 0.9 ms, 99th percentile 19 ms. The error comes from the checkpoints:
-  between two, the clock assumes a steady speed over half a percent of a lap (about 30 m). So it is largest where
-  a car slows hard or nearly stops: the largest errors sit next to a car crawling off track (AI race), and next to
-  a car stopped off track a gap can be seconds off for a moment (practice, up to 7.8 s). The shown tenth differs
-  from the reference's in 4.6% of readings.
+  without checkpoints: under green, median 0.14 ms, 90th percentile 0.7 ms, 99th percentile 1.5 ms, largest
+  47 ms (AI race, 614,688 gaps); practice median 0.09 ms, 99th percentile 1.3 ms. The error comes from the
+  checkpoints: between two, the clock assumes a steady speed over a tenth of a percent of a lap (4 to 7 m on most
+  tracks). So it is largest where a car slows hard or nearly stops: the largest errors sit next to a car crawling
+  off track (AI race), and next to a car stopped off track a gap can be seconds off for a moment (practice, up to
+  4.0 s). The shown tenth differs from the reference's in 0.3% of readings. With 200 checkpoints (every half
+  percent, about 30 m), before #195, the same check gave a median of 1.9 ms, a 99th percentile of 29 ms, a
+  largest error of 0.41 s, and 4.6% of shown tenths differed.
+- **Stored times**: pass times are kept as whole 0.1 ms after the clock's start, so each is within 0.05 ms however
+  long the session; a clock running two days since its start starts over.
 - **Update rate**: hardly matters. The clock fed every frame differs from the 10 Hz clock by 0.34 ms at the 99th
   percentile.
 
@@ -83,7 +87,7 @@ No pass was older than a lap.
 ### Estimates
 
 Every estimate was forced for every pair that has a measured gap on the every-frame clock, which stands for the
-truth, and compared with it. Error of the gap shown, in seconds: median, 90th and 99th percentile, largest. Pairs
+truth, and compared with it (measured with the clock's earlier 200 checkpoints). Error of the gap shown, in seconds: median, 90th and 99th percentile, largest. Pairs
 with neither car on pit road:
 
 | Estimate | AI race, same class | AI race, other class | Practice, same class |

@@ -230,7 +230,7 @@ moment does the work for all.
 
 | Tracker | Read by | What |
 |---|---|---|
-| `shared.clock()` | standings, relative | every car's progress and the times it passed 200 checkpoints a lap: race gaps (`RaceClock::gap`) and gaps on track (`RaceClock::track_gap`) |
+| `shared.clock()` | standings, relative | every car's progress and the times it passed 1,000 checkpoints a lap: race gaps (`RaceClock::gap`) and gaps on track (`RaceClock::track_gap`) |
 | `shared.pit()` | pit, track map | other cars' pit stops, the refueling speed, and the pit lane loss ([pit](pit.md)) |
 | `shared.gaps()` | widgets to come: battle, faster class, rejoin, side by side | the gap history (below) |
 | `shared.laps()` | widgets to come: lap log, lap times, lap time spread, stints | the lap history (below) |
