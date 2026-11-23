@@ -1,17 +1,19 @@
 # Wind widget
 
 Shows the wind as one value, its speed in km/h, and, on a dial that turns with the car, where the air flows
-relative to it. Updates at 10 Hz by default.
+relative to it. The direction is shown by the dial's arrow only; it is not written out as a compass point.
+Updates at 10 Hz by default.
 
 - **Dial**: the car's nose is at the top (orange mark). The arrow runs from the side the wind comes from to the
-  side it blows to: pointing down is a headwind, up a tailwind, sideways a crosswind. `N` and the ticks of the
-  other compass points turn with the car. Its color follows the speed: grey below 10 km/h, white below 25,
-  yellow below 40, red above. Below 1 km/h the air counts as calm and there is no arrow.
+  side it blows to: pointing down is a headwind, up a tailwind, sideways a crosswind. Its color follows the
+  speed: grey below 10 km/h, white below 25, yellow below 40, red above. Below 1 km/h the air counts as calm and
+  there is no arrow, and without the car's heading there is none either. The dial's north mark (`N`) and the
+  ticks of the other compass points turn with the car.
 - **Speed**: `WindVel` in whole km/h with its unit on the same line (`12 km/h`), `--` without data. The speed is
   not split into parts along and across the car; the arrow shows where it hits the car.
-- **From**: the compass point (of eight) the wind comes from.
 
-The text column sits right of the dial, centered on it: the `Wind` label, the speed, and the compass point.
+The text column sits right of the dial: the `Wind` label above the speed, the pair centered vertically on the
+dial's middle at any size and text size.
 
 ## Where the values come from
 
