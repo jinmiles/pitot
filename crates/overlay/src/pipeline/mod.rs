@@ -17,6 +17,11 @@
 //!
 //! The render thread can also ask the session thread for the sim's own telemetry files of the session (see `ibt`),
 //! which the tire widget shows during replays.
+//!
+//! Durations follow the sim's tick count: [`View::tick_time`] is `SessionTick` over the connection's tick rate.
+//! `SessionTime` slips by whole ticks against it (it repeats a value for a frame, then steps twice), while the
+//! sim's own timing (`CarIdxLastLapTime`, the results' `Time`) follows the ticks. `SessionTime` is read only as the
+//! session clock: the elapsed time shown, and replay positions, which the sim gives in `SessionTime`.
 
 #[cfg(windows)]
 mod ibt;
@@ -60,6 +65,19 @@ pub enum Display {
 /// Samples the ring holds: about eight seconds at 60 Hz, far more than one late frame.
 pub const SAMPLE_CAPACITY: usize = 512;
 
+/// The sim's tick rate, for a source whose header gives none.
+const DEFAULT_TICK_RATE: i32 = 60;
+
+/// Ticks per second from a header's `tickRate`: 60 when it is not positive.
+fn ticks_per_second(rate: i32) -> f64 {
+    f64::from(if rate > 0 { rate } else { DEFAULT_TICK_RATE })
+}
+
+/// Seconds on the tick count: `SessionTick` over the tick rate. Only differences are used.
+fn tick_seconds(tick: i32, ticks_per_second: f64) -> f64 {
+    f64::from(tick) / ticks_per_second
+}
+
 /// Readies the session info buffer for a new connection: room for the whole session info `area`, so copies
 /// during the connection do not allocate. The buffer still holds the previous connection's text, so reserving
 /// without clearing it first would grow the buffer to twice the area.
@@ -87,7 +105,7 @@ mod threads {
     use super::replay::{self, CaptureCache, Found, Plan, Player, SessionIds};
     use super::{
         Display, InputSample, SAMPLE_CAPACITY, SampleRing, SeqBuffer, VarGroup, Vars,
-        ready_session_buffer,
+        ready_session_buffer, tick_seconds, ticks_per_second,
     };
     use crate::wake::{Wake, reason};
 
@@ -134,18 +152,37 @@ mod threads {
         /// While recording, every snapshot starts with the tick's whole row for the recorder; only the requested
         /// variables after it go to the render thread.
         row_len: usize,
+        /// The source's tick rate, for [`View::tick_time`].
+        ticks_per_second: f64,
+    }
+
+    /// What a connection's buffers are sized and timed by.
+    #[derive(Debug, Clone, Copy)]
+    struct Shape {
+        car_count: usize,
+        row_len: usize,
+        ticks_per_second: f64,
     }
 
     impl Connection {
-        fn new(template: &Snapshot, car_count: usize, source: Source, row_len: usize) -> Arc<Self> {
+        fn new(template: &Snapshot, shape: Shape, source: Source) -> Arc<Self> {
             Arc::new(Self {
                 template: template.clone(),
-                latest: SeqBuffer::new(template.bytes().len().saturating_sub(row_len)),
+                latest: SeqBuffer::new(template.bytes().len().saturating_sub(shape.row_len)),
                 samples: SampleRing::new(SAMPLE_CAPACITY),
-                car_count,
+                car_count: shape.car_count,
                 source,
-                row_len,
+                row_len: shape.row_len,
+                ticks_per_second: shape.ticks_per_second,
             })
+        }
+
+        fn shape(&self) -> Shape {
+            Shape {
+                car_count: self.car_count,
+                row_len: self.row_len,
+                ticks_per_second: self.ticks_per_second,
+            }
         }
 
         /// The part of a snapshot the render thread gets.
@@ -504,7 +541,11 @@ mod threads {
             let source = Source::Capture {
                 first: !replay.started,
             };
-            let fresh = Connection::new(live, current.car_count, source, current.row_len);
+            let shape = Shape {
+                ticks_per_second: player.ticks_per_second(),
+                ..current.shape()
+            };
+            let fresh = Connection::new(live, shape, source);
             if player
                 .restart(at, |s| {
                     fresh.samples.push(sample(s, vars, 0));
@@ -592,7 +633,14 @@ mod threads {
                         );
                     }
                     recorded_update = None;
-                    let fresh = Connection::new(&snapshot, car_count, Source::Sim, row_len);
+                    let shape = Shape {
+                        car_count,
+                        row_len,
+                        ticks_per_second: ticks_per_second(
+                            reader.layout().map_or(0, |l| l.tick_rate),
+                        ),
+                    };
+                    let fresh = Connection::new(&snapshot, shape, Source::Sim);
                     ready_session_buffer(
                         &mut session_text,
                         reader.session_info_capacity().unwrap_or(0),
@@ -647,12 +695,13 @@ mod threads {
                     if replay.showing {
                         // Back to live values: widgets reset, and the live session info is sent again.
                         replay.showing = false;
-                        let fresh = Connection::new(
-                            &snapshot,
-                            current.car_count,
-                            Source::SimAgain,
-                            current.row_len,
-                        );
+                        let shape = Shape {
+                            ticks_per_second: ticks_per_second(
+                                reader.layout().map_or(0, |l| l.tick_rate),
+                            ),
+                            ..current.shape()
+                        };
+                        let fresh = Connection::new(&snapshot, shape, Source::SimAgain);
                         if channels
                             .to_render
                             .send(Message::Connected(Arc::clone(&fresh)))
@@ -839,6 +888,16 @@ mod threads {
             &self.snapshot
         }
 
+        /// Seconds on the sim's tick count at the latest tick: `SessionTick` over the source's tick rate. Every
+        /// duration and time difference is taken on it, as the sim's own timing is, rather than on `SessionTime`,
+        /// which slips by whole ticks. Only differences mean anything: the count may start anywhere, and it jumps
+        /// or starts over across sessions and connections. `None` while disconnected or without `SessionTick`.
+        pub fn tick_time(&self) -> Option<f64> {
+            let rate = self.connection.as_ref()?.ticks_per_second;
+            let tick = self.snapshot.i32(self.vars.session_tick, 0)?;
+            Some(tick_seconds(tick, rate))
+        }
+
         pub fn session(&self) -> Option<&SessionInfo> {
             self.session.as_deref()
         }
@@ -922,7 +981,18 @@ mod threads {
 
 #[cfg(test)]
 mod tests {
-    use super::ready_session_buffer;
+    use super::{ready_session_buffer, tick_seconds, ticks_per_second};
+
+    #[test]
+    fn tick_time_is_the_tick_count_over_the_tick_rate() {
+        assert_eq!(ticks_per_second(60), 60.0);
+        assert_eq!(ticks_per_second(0), 60.0, "a header without a rate");
+        assert_eq!(ticks_per_second(-5), 60.0);
+        assert_eq!(tick_seconds(90, 60.0), 1.5);
+        // A difference of one tick is one tick period whatever the count, up to the largest `SessionTick`.
+        let late = tick_seconds(i32::MAX, 60.0) - tick_seconds(i32::MAX - 1, 60.0);
+        assert!((late - 1.0 / 60.0).abs() < 1e-6, "{late}");
+    }
 
     #[test]
     fn session_buffer_keeps_its_size_across_connections() {
