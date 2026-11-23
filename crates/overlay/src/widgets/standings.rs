@@ -18,6 +18,7 @@ use crate::config::{NoOptions, WidgetConfig};
 use crate::pipeline::View;
 use crate::render::{Align, Canvas, Color, Rect};
 
+use super::classes::{ClassLabel, class_label};
 use super::text::FixedText;
 use super::timing::{Gap, RaceClock, SectorClock, SectorStarts};
 use super::trackclock::{SharedTrackClock, TrackClock};
@@ -787,16 +788,11 @@ fn write_header(
     let driver = leader.and_then(|l| info.driver_info.drivers.get(l.car)?.as_ref());
     header.color = driver.and_then(|d| d.car_class_color).unwrap_or(0xFF_FFFF);
     header.first = first;
-    // AI sessions leave the class name empty; the leader's car name is the next best label.
-    let label = driver
-        .and_then(|d| {
-            d.car_class_short_name
-                .as_deref()
-                .filter(|n| !n.trim().is_empty())
-        })
-        .or_else(|| driver.and_then(|d| d.car_screen_name_short.as_deref()))
-        .unwrap_or("Class");
-    header.name.set(label);
+    header.name.clear();
+    let label = driver.map_or(ClassLabel::Number(Some(class.id)), |d| {
+        class_label(&info.driver_info.drivers, d)
+    });
+    let _ = write!(header.name, "{label}");
     header.sof.clear();
     if let Some(sof) = strength_of_field(class_entries.iter().map(|e| e.rating)) {
         let _ = write!(header.sof, "SOF {:.1}k", sof / 1000.0);
@@ -1128,6 +1124,56 @@ fn text_in(canvas: &mut Canvas<'_>, text: &str, rect: Rect, size: f32, align: Al
     }
 }
 
+/// The header's class name: its place, and the room kept clear before the next item.
+const NAME_WIDTH: f32 = 96.0;
+const NAME_GAP: f32 = 6.0;
+/// Longest text, in bytes, [`text_cut`] shortens; longer text is cut to this first.
+const MAX_CUT: usize = 64;
+
+const ELLIPSIS: &str = "\u{2026}";
+
+/// The first `chars` characters of `text` (at most [`MAX_CUT`] bytes) without trailing spaces, then an ellipsis,
+/// written into `buf`.
+fn shortened<'a>(text: &str, chars: usize, buf: &'a mut [u8; MAX_CUT + ELLIPSIS.len()]) -> &'a str {
+    let end = text
+        .char_indices()
+        .nth(chars)
+        .map_or(text.len(), |(i, _)| i)
+        .min(MAX_CUT);
+    let end = (0..=end)
+        .rev()
+        .find(|&i| text.is_char_boundary(i))
+        .unwrap_or(0);
+    let prefix = text[..end].trim_end();
+    let len = prefix.len() + ELLIPSIS.len();
+    buf[..prefix.len()].copy_from_slice(prefix.as_bytes());
+    buf[prefix.len()..len].copy_from_slice(ELLIPSIS.as_bytes());
+    std::str::from_utf8(&buf[..len]).unwrap_or(ELLIPSIS)
+}
+
+/// Draws `text` left-aligned in `rect`, or when it is wider, as much of it as fits followed by an ellipsis.
+fn text_cut(canvas: &mut Canvas<'_>, text: &str, rect: Rect, color: Color) {
+    if canvas.fits(text, rect, TEXT_SIZE) {
+        text_in(canvas, text, rect, TEXT_SIZE, Align::Left, color);
+        return;
+    }
+    let mut buf = [0u8; MAX_CUT + ELLIPSIS.len()];
+    // The most characters that fit, found by halving: a few measurements, each kept by the text cache.
+    let (mut fits, mut too_many) = (0, text.chars().count());
+    while too_many - fits > 1 {
+        let mid = (fits + too_many) / 2;
+        if canvas.fits(shortened(text, mid, &mut buf), rect, TEXT_SIZE) {
+            fits = mid;
+        } else {
+            too_many = mid;
+        }
+    }
+    if fits > 0 {
+        let cut = shortened(text, fits, &mut buf);
+        text_in(canvas, cut, rect, TEXT_SIZE, Align::Left, color);
+    }
+}
+
 const WHITE: u32 = 0xF0_F2F5;
 const DIM: u32 = 0xA0_A6AE;
 const GREEN: u32 = 0x3D_D68C;
@@ -1250,12 +1296,29 @@ impl StandingsWidget {
                 Color::rgb(header.color, 1.0),
             );
         }
-        segment(
-            canvas,
-            header.name.as_str(),
-            96.0,
-            Color::rgb(header.color, 1.0),
-        );
+        // A long class name ends in an ellipsis a little before the next item instead of running into it.
+        if x + NAME_WIDTH <= w {
+            text_cut(
+                canvas,
+                header.name.as_str(),
+                Rect::new(x, y, NAME_WIDTH - NAME_GAP, ROW_HEIGHT),
+                Color::rgb(header.color, 1.0),
+            );
+            x += NAME_WIDTH;
+        }
+        let mut segment = |canvas: &mut Canvas<'_>, text: &str, width: f32, color: Color| {
+            if !text.is_empty() && x + width <= w {
+                text_in(
+                    canvas,
+                    text,
+                    Rect::new(x, y, width, ROW_HEIGHT),
+                    TEXT_SIZE,
+                    Align::Left,
+                    color,
+                );
+                x += width;
+            }
+        };
         segment(canvas, header.sof.as_str(), 74.0, white);
         segment(canvas, header.cars.as_str(), 52.0, dim);
         segment(canvas, header.laps.as_str(), 84.0, white);
@@ -1675,6 +1738,21 @@ mod tests {
         assert_eq!(out.as_str(), "10:05.123");
         write_lap_time(&mut out, -1.0);
         assert_eq!(out.as_str(), "");
+    }
+
+    #[test]
+    fn long_names_are_shortened_with_an_ellipsis() {
+        let mut buf = [0u8; MAX_CUT + ELLIPSIS.len()];
+        assert_eq!(shortened("Dallara P217 LMP2", 7, &mut buf), "Dallara\u{2026}");
+        assert_eq!(
+            shortened("Dallara P217 LMP2", 8, &mut buf),
+            "Dallara\u{2026}",
+            "no space before the ellipsis"
+        );
+        assert_eq!(shortened("Ü-Wagen", 1, &mut buf), "Ü\u{2026}", "whole characters");
+        assert_eq!(shortened("GT3", 0, &mut buf), "\u{2026}");
+        let long = "x".repeat(100);
+        assert_eq!(shortened(&long, 90, &mut buf).len(), MAX_CUT + ELLIPSIS.len());
     }
 
     #[test]
