@@ -57,13 +57,15 @@ Car rows, left to right:
   faster), as many sectors as fit.
 
 Cars on pit road are dimmed and show `PIT` instead of the last lap; the player's row is highlighted. The pace car
-and spectators are left out.
+and spectators are left out. Optional columns are dropped when the widget is too narrow: sectors first, then the
+iRating change, interval, places gained, maker, and tires.
 
 In qualifying (a `SessionType` containing "Qualify": open, lone, or plain qualifying), an out lap runs from leaving
 pit road until the car completes a lap or is on pit road again, the relative's rule. It includes a car's first run
-out of the pits, while `CarIdxLapCompleted` is still -1. A car whose pit exit the overlay did not see (it was
-already on track when the overlay connected) is not marked. Practice and race rows show no out laps. Optional columns are dropped when the widget is too narrow: sectors first, then the
-iRating change, interval, places gained, maker, and tires.
+out of the pits, while `CarIdxLapCompleted` is still -1. Moments out of the world change nothing: online, cars on
+track drop out of the world for a few seconds at a time, and a car in its garage comes back on pit road. A car
+whose pit exit the overlay did not see (it was already on track when the overlay connected) is not marked.
+Practice and race rows show no out laps.
 
 ## Calculations
 
