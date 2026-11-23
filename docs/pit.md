@@ -32,8 +32,9 @@ onto the track. A car that appears in its stall from the garage, or leaves the w
 a stop. A car is standing still while it is in its pit stall and its lap distance does not change between
 updates. A standing run seen from one update to another started somewhere in the step before and ended somewhere
 in the step after, so it is counted one update interval longer than the updates span. If updates pause for more
-than 2 s (the widget was hidden) or the session time goes back, visits in progress are dropped, since their start
-or end was not seen.
+than 2 s (the widget was hidden) or the tick count goes back, visits in progress are dropped, since their start
+or end was not seen. Lane, standing, and refueling times are on the sim's tick count (`SessionTick`), not on
+`SessionTime`, which slips by whole ticks.
 
 ## Fuel
 

@@ -16,6 +16,14 @@ GPUI's thread, see [rendering](overlay-rendering.md#schedule)) without locks and
 
 - **Latest tick**: a sequence-locked buffer of atomic words (`SeqBuffer`). The data thread writes the requested
   variables. The render thread copies them into its own `Snapshot` and retries if a write overlapped the copy.
+- **Tick time**: `View::tick_time` is `SessionTick` over the connection's tick rate (the header's `tickRate`; a
+  capture's own while one plays). Every duration and time difference the widgets and trackers take is on it: lap,
+  sector, and gap times, pit lane and standing times, the refueling speed, history sample times, and the checks
+  for stale observations or time going back. The sim's own timing (`CarIdxLastLapTime`, the results' `Time`)
+  follows the tick count, while `SessionTime` slips by whole ticks against it: it repeats a value for a frame and
+  catches up with a double step later (7 times each way in the 10-minute AI race capture). `SessionTime` is read
+  only as the session clock: the elapsed time the widgets show, and replay positions (`ReplaySessionTime`, the
+  capture and telemetry file lookups), which the sim gives in `SessionTime`.
 - **Input samples**: a bounded single-producer, single-consumer ring of atomic words (`SampleRing`, 512 samples,
   about 8.5 s at 60 Hz). Every tick's throttle, brake, clutch, steering, and ABS state is queued, so the input
   trace draws every sample even when a frame is late. Samples carry the number of ticks the reader missed just

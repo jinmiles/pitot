@@ -695,6 +695,7 @@ fn sectors_widget_does_not_allocate_per_update() {
         vars: vec![
             VarHeader::new(VarType::Double, 0, 1, "SessionTime").expect("valid"),
             VarHeader::new(VarType::Int, 8, 1, "PlayerCarIdx").expect("valid"),
+            VarHeader::new(VarType::Int, 12, 1, "SessionTick").expect("valid"),
             VarHeader::new(VarType::Float, 16, 72, "CarIdxLapDistPct").expect("valid"),
             VarHeader::new(VarType::Int, 16 + 288, 72, "CarIdxTrackSurface").expect("valid"),
         ],
@@ -738,6 +739,7 @@ fn sectors_widget_does_not_allocate_per_update() {
     let mut cycle = |n: u32, view: &mut View, widget: &mut SectorsWidget| {
         let t = f64::from(n) * 0.25;
         row[0..8].copy_from_slice(&t.to_le_bytes());
+        row[12..16].copy_from_slice(&(n as i32 * 15).to_le_bytes());
         for (car, lap, offset) in [(0usize, 9.8f64, 1.0f64), (1, 10.0, 0.5), (2, 10.3, 0.0)] {
             let pct = (((t + offset) % lap) / lap) as f32;
             let at = 16 + car * 4;
@@ -822,7 +824,8 @@ SplitTimeInfo:
    SectorStartPct: 0.500000
 ...
 ";
-const STANDINGS_ROW: usize = 16 + 72 * 4 * 3;
+const STANDINGS_TICK: usize = 16 + 72 * 4 * 3;
+const STANDINGS_ROW: usize = STANDINGS_TICK + 4;
 
 /// The standings and the relative in a live race: the order changes as cars pass each other and gaps are timed on
 /// every update.
@@ -845,6 +848,7 @@ fn standings_and_relative_do_not_allocate_per_update() {
             VarHeader::new(VarType::Float, 16, 72, "CarIdxLapDistPct").expect("valid"),
             VarHeader::new(VarType::Int, 16 + 288, 72, "CarIdxLapCompleted").expect("valid"),
             VarHeader::new(VarType::Int, 16 + 576, 72, "CarIdxTrackSurface").expect("valid"),
+            VarHeader::new(VarType::Int, STANDINGS_TICK as i32, 1, "SessionTick").expect("valid"),
         ],
         buf_len: STANDINGS_ROW,
         num_buf: 3,
@@ -890,6 +894,7 @@ fn standings_and_relative_do_not_allocate_per_update() {
     let mut cycle = |n: u32, view: &mut View, widgets: &mut (StandingsWidget, RelativeWidget)| {
         let t = f64::from(n) * 0.5;
         row[0..8].copy_from_slice(&t.to_le_bytes());
+        row[STANDINGS_TICK..STANDINGS_TICK + 4].copy_from_slice(&(n as i32 * 30).to_le_bytes());
         for (car, lap, offset) in [(0usize, 10.4f64, 0.6f64), (1, 10.0, 0.3), (2, 9.7, 0.0)] {
             let progress = 1.0 + offset / lap + t / lap;
             let laps = progress.floor();
@@ -930,7 +935,8 @@ fn standings_and_relative_do_not_allocate_per_update() {
 }
 
 const MAP_CARS: usize = 8;
-const MAP_ROW: usize = 36 + MAP_CARS * 9;
+const MAP_TICK: usize = 36 + MAP_CARS * 9;
+const MAP_ROW: usize = MAP_TICK + 4;
 /// A round track of radius 300 m: one lap at 50 m/s is about 2,262 ticks.
 const MAP_RADIUS: f64 = 300.0;
 const MAP_SPEED: f64 = 50.0;
@@ -979,6 +985,7 @@ fn track_map_does_not_allocate_per_update() {
                 .expect("valid"),
             VarHeader::new(VarType::Bool, at(2), MAP_CARS as i32, "CarIdxOnPitRoad")
                 .expect("valid"),
+            VarHeader::new(VarType::Int, MAP_TICK as i32, 1, "SessionTick").expect("valid"),
         ],
         buf_len: MAP_ROW,
         num_buf: 3,
@@ -1026,6 +1033,7 @@ fn track_map_does_not_allocate_per_update() {
             let heading = (std::f64::consts::FRAC_PI_2 - pct * std::f64::consts::TAU)
                 .rem_euclid(std::f64::consts::TAU);
             row[0..8].copy_from_slice(&(f64::from(n) / 60.0).to_le_bytes());
+            row[MAP_TICK..MAP_TICK + 4].copy_from_slice(&(n as i32).to_le_bytes());
             row[8] = 1;
             row[12..16].copy_from_slice(&3i32.to_le_bytes());
             row[20..24].copy_from_slice(&(MAP_SPEED as f32).to_le_bytes());
@@ -1131,10 +1139,12 @@ fn track_map_does_not_allocate_per_update() {
 }
 
 const PIT_CARS: usize = 8;
-/// Single values first (time, session, player, fuel, laps), then seven per-car arrays and the pit road flags.
+/// Single values first (time, session, player, fuel, laps), then seven per-car arrays, the pit road flags, and the
+/// tick count.
 const PIT_ARRAYS: usize = 36;
 const PIT_ON_PIT_ROAD: usize = PIT_ARRAYS + PIT_CARS * 4 * 7;
-const PIT_ROW: usize = PIT_ON_PIT_ROAD + PIT_CARS;
+const PIT_TICK: usize = PIT_ON_PIT_ROAD + PIT_CARS;
+const PIT_ROW: usize = PIT_TICK + 4;
 const PIT_SESSION: &[u8] = b"WeekendInfo:
  TrackID: 7
 SessionInfo:
@@ -1175,6 +1185,7 @@ fn pit_row(n: u32, stopper: usize, start: u32) -> [u8; PIT_ROW] {
     };
     let player = f64::from(n) * 0.01;
     row[0..8].copy_from_slice(&(f64::from(n) * 0.1).to_le_bytes());
+    row[PIT_TICK..PIT_TICK + 4].copy_from_slice(&(n as i32 * 6).to_le_bytes());
     row[20..24].copy_from_slice(&((40.0 - player * 2.0) as f32).to_le_bytes());
     row[24..28].copy_from_slice(&(player as i32).to_le_bytes());
     row[28..32].copy_from_slice(&(player.fract() as f32).to_le_bytes());
@@ -1257,6 +1268,7 @@ fn pit_widget_does_not_allocate_per_update() {
                 "CarIdxOnPitRoad",
             )
             .expect("valid"),
+            VarHeader::new(VarType::Int, PIT_TICK as i32, 1, "SessionTick").expect("valid"),
         ],
         buf_len: PIT_ROW,
         num_buf: 3,
@@ -1423,7 +1435,8 @@ fn fuel_widget_does_not_allocate_per_update() {
     drop(pipeline);
 }
 
-const EVERY_ROW: usize = 32 + 72 * 4 * 4 + 72;
+const EVERY_TICK: usize = 32 + 72 * 4 * 4 + 72;
+const EVERY_ROW: usize = EVERY_TICK + 4;
 
 /// Every widget of the list at its defaults, as the render loop makes them, and the shared gap and lap histories:
 /// three cars race on 10 s laps, their lap times arrive a second after the line, the player has incidents and
@@ -1455,6 +1468,7 @@ fn every_widget_and_the_histories_do_not_allocate_per_update() {
             var(VarType::Float, array(2), 72, "CarIdxLastLapTime"),
             var(VarType::Int, array(3), 72, "CarIdxTrackSurface"),
             var(VarType::Bool, array(4), 72, "CarIdxOnPitRoad"),
+            var(VarType::Int, EVERY_TICK, 1, "SessionTick"),
         ],
         buf_len: EVERY_ROW,
         num_buf: 3,
@@ -1493,6 +1507,7 @@ fn every_widget_and_the_histories_do_not_allocate_per_update() {
     let mut cycle = |n: u32, view: &mut View, widgets: &mut AllWidgets| -> (usize, usize) {
         let t = f64::from(n) * 0.5;
         row[0..8].copy_from_slice(&t.to_le_bytes());
+        put(&mut row, EVERY_TICK, (n as i32 * 30).to_le_bytes());
         put(&mut row, 28, ((n / 50) as i32).to_le_bytes());
         for (car, lap, offset) in [(0usize, 10.4f64, 0.6f64), (1, 10.0, 0.3), (2, 9.7, 0.0)] {
             let progress = 1.0 + offset / lap + t / lap;
