@@ -229,7 +229,7 @@ fn split_license(license: &str, class: &mut FixedText, rating: &mut FixedText) {
 }
 
 /// Whether a car is on pit road, for [`track_out_lap`]; `None` while it is out of the world.
-pub(crate) fn on_pit_road(view: &View, car: usize) -> Option<bool> {
+fn on_pit_road(view: &View, car: usize) -> Option<bool> {
     let (snap, vars) = (view.snapshot(), view.vars());
     (snap.i32(vars.car_track_surface, car) != Some(track_location::NOT_IN_WORLD))
         .then(|| snap.bool(vars.car_on_pit_road, car).unwrap_or(false))
@@ -238,11 +238,11 @@ pub(crate) fn on_pit_road(view: &View, car: usize) -> Option<bool> {
 /// Follows one car's out lap: it starts when the car leaves pit road and ends when the car completes a lap or is
 /// on pit road again. `laps` is `CarIdxLapCompleted`, which is -1 until a car first reaches the line, so a car's
 /// first run out of the pits is an out lap too. `out_lap_of` is the completed-lap count during the out lap, or
-/// `None`. The standings use the same rule in qualifying.
+/// `None`.
 ///
 /// A car out of the world (`pit` is `None`) changes nothing: online, cars on track drop out of the world for a few
 /// seconds at a time (reading lap count -1 and pit road false), and a car in its garage comes back on pit road.
-pub(crate) fn track_out_lap(
+fn track_out_lap(
     on_pit: &mut bool,
     out_lap_of: &mut Option<i32>,
     pit: Option<bool>,
