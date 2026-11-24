@@ -217,7 +217,6 @@ impl HeaderRow {
 struct CarRow {
     player: bool,
     leader: bool,
-    in_pit: bool,
     /// A line above: the rows before are the class leaders, these are the cars around the player.
     break_before: bool,
     color: u32,
@@ -249,7 +248,6 @@ impl CarRow {
         Self {
             player: false,
             leader: false,
-            in_pit: false,
             break_before: false,
             color: 0,
             position: FixedText::new(4),
@@ -278,7 +276,6 @@ impl CarRow {
         let Self {
             player,
             leader,
-            in_pit,
             break_before,
             color,
             position,
@@ -302,7 +299,6 @@ impl CarRow {
         } = self;
         *player == other.player
             && *leader == other.leader
-            && *in_pit == other.in_pit
             && *break_before == other.break_before
             && *color == other.color
             && *position == other.position
@@ -892,7 +888,6 @@ fn write_car(row: &mut CarRow, entry: &Entry, cx: &RowContext<'_>) {
         .and_then(Option::as_ref);
     row.player = Some(car) == cx.player;
     row.leader = car == cx.leader.car;
-    row.in_pit = snap.bool(vars.car_on_pit_road, car).unwrap_or(false);
     row.color = driver.and_then(|d| d.car_class_color).unwrap_or(0xFF_FFFF);
     row.position.clear();
     if entry.position != i32::MAX {
@@ -1341,9 +1336,8 @@ impl StandingsWidget {
         if car.break_before {
             canvas.fill(Rect::new(0.0, y, w, 1.0), Color::rgb(DIM, 0.5));
         }
-        let alpha = if car.in_pit { 0.45 } else { 1.0 };
-        let text = Color::rgb(WHITE, alpha);
-        let muted = Color::rgb(DIM, alpha);
+        let text = Color::rgb(WHITE, 1.0);
+        let muted = Color::rgb(DIM, 1.0);
         let cell = |x: f32, width: f32| Rect::new(x, y, width, ROW_HEIGHT);
         canvas.fill(
             Rect::new(0.0, y + 2.0, 4.0, ROW_HEIGHT - 4.0),
@@ -1371,7 +1365,7 @@ impl StandingsWidget {
                 cell(x + 2.0, 12.0),
                 10.0,
                 Align::Center,
-                Color::rgb(color, alpha),
+                Color::rgb(color, 1.0),
             );
             text_in(
                 canvas,
@@ -1379,7 +1373,7 @@ impl StandingsWidget {
                 cell(x + 14.0, 18.0),
                 TEXT_SIZE,
                 Align::Left,
-                Color::rgb(color, alpha),
+                Color::rgb(color, 1.0),
             );
         }
         text_in(
@@ -1401,7 +1395,7 @@ impl StandingsWidget {
         if !car.license.as_str().is_empty() {
             canvas.fill(
                 Rect::new(cols.license, y + 4.0, 38.0, ROW_HEIGHT - 8.0),
-                Color::rgb(car.license_color, 0.85 * alpha),
+                Color::rgb(car.license_color, 0.85),
             );
             text_in(
                 canvas,
@@ -1409,7 +1403,7 @@ impl StandingsWidget {
                 cell(cols.license, 38.0),
                 12.0,
                 Align::Center,
-                Color::rgb(BACKGROUND, alpha),
+                Color::rgb(BACKGROUND, 1.0),
             );
         }
         text_in(
@@ -1434,7 +1428,7 @@ impl StandingsWidget {
                 cell(x + 4.0, 10.0),
                 9.0,
                 Align::Center,
-                Color::rgb(color, alpha),
+                Color::rgb(color, 1.0),
             );
             text_in(
                 canvas,
@@ -1442,7 +1436,7 @@ impl StandingsWidget {
                 cell(x + 14.0, 26.0),
                 TEXT_SIZE,
                 Align::Left,
-                Color::rgb(color, alpha),
+                Color::rgb(color, 1.0),
             );
         }
         if let Some(x) = cols.maker {
@@ -1462,7 +1456,7 @@ impl StandingsWidget {
                 (x + 8.0, y + ROW_HEIGHT / 2.0),
                 5.0,
                 2.5,
-                Color::rgb(car.tire, alpha),
+                Color::rgb(car.tire, 1.0),
             );
         }
         if car.leader {
@@ -1497,14 +1491,9 @@ impl StandingsWidget {
                 );
             }
         }
-        let last = if car.in_pit {
-            "PIT"
-        } else {
-            car.last_lap.as_str()
-        };
         text_in(
             canvas,
-            last,
+            car.last_lap.as_str(),
             cell(cols.last, LAST_WIDTH - 4.0),
             TEXT_SIZE,
             Align::Right,
@@ -1515,15 +1504,13 @@ impl StandingsWidget {
             LapMark::Personal => Some(GREEN),
             LapMark::None => None,
         };
-        if let Some(color) = underline
-            && !car.in_pit
-        {
+        if let Some(color) = underline {
             let base = y + ROW_HEIGHT - 4.0;
             canvas.line(
                 (cols.last + 10.0, base),
                 (cols.last + LAST_WIDTH - 4.0, base),
                 2.0,
-                Color::rgb(color, alpha),
+                Color::rgb(color, 1.0),
             );
         }
         let (sx, count) = cols.sectors;
@@ -1539,7 +1526,7 @@ impl StandingsWidget {
                 cell(sx + s as f32 * SECTOR_WIDTH, SECTOR_WIDTH - 4.0),
                 TEXT_SIZE,
                 Align::Right,
-                Color::rgb(color, alpha),
+                Color::rgb(color, 1.0),
             );
         }
     }

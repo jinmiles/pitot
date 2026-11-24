@@ -56,10 +56,11 @@ Car rows, left to right:
 - per sector, the car's last time in that sector minus the player's (green when the car was slower, red when
   faster), as many sectors as fit.
 
-Cars on pit road are dimmed and show `PIT` instead of the last lap; the player's row is highlighted. The pace car
-and spectators are left out. Optional columns are dropped when the widget is too narrow: sectors first, then the
-iRating change, interval, places gained, maker, and tires. The standings show no `OUT` or flag badges in any
-session; the [relative](relative.md) has them.
+The player's row is highlighted. The pace car and spectators are left out. Optional columns are dropped when the
+widget is too narrow: sectors first, then the iRating change, interval, places gained, maker, and tires.
+
+The standings show no badges in any session: no `PIT`, `OUT`, or flags, and rows of cars on pit road look like
+any other row, with their last lap. Badges are shown only in the [relative](relative.md).
 
 ## Class names
 
