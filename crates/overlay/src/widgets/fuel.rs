@@ -14,6 +14,7 @@ use crate::config::{NoOptions, WidgetConfig};
 use crate::pipeline::View;
 use crate::render::{Align, Canvas, Color, Rect};
 
+use super::palette::{DIM, FAINT, GAIN, LOSS, SURFACE, TEXT};
 use super::text::FixedText;
 use super::{Build, MAX_LAYERS, Redraw, Register, Widget};
 
@@ -294,15 +295,6 @@ const FOUR_COLUMNS_WIDTH: f32 = 380.0;
 /// From this height the last lap's estimate shows below the average's.
 const SIX_LINES_HEIGHT: f32 = 120.0;
 
-const WHITE: u32 = 0xF0_F2F5;
-const DIM: u32 = 0xA0_A6AE;
-const AVERAGE: u32 = 0x82_B1FF;
-const LAST: u32 = 0xF2_C14E;
-const SHORT: u32 = 0xFF_6B5E;
-/// The pit window is open on the current lap.
-const OPEN: u32 = 0x3D_D68C;
-const BACKGROUND: u32 = 0x10_1418;
-
 impl Register for FuelWidget {
     type Vars = ();
     type Options = NoOptions;
@@ -389,10 +381,10 @@ impl Widget for FuelWidget {
         let (w, h) = (self.width as f32, self.height as f32);
         canvas.fill_background(
             Rect::new(0.0, 0.0, w, h),
-            Color::rgb(BACKGROUND, self.opacity),
+            Color::rgb(SURFACE, self.opacity),
         );
         let dim = Color::rgb(DIM, 1.0);
-        let white = Color::rgb(WHITE, 1.0);
+        let white = Color::rgb(TEXT, 1.0);
         // Six lines: labels and values of the current state, then the average's and the last lap's. A short widget
         // leaves out the last lap's, and a narrow one the fourth column.
         let six = h >= SIX_LINES_HEIGHT;
@@ -422,8 +414,8 @@ impl Widget for FuelWidget {
         );
         let window_ink = match l.window_state {
             WindowState::Later => white,
-            WindowState::Open => Color::rgb(OPEN, 1.0),
-            WindowState::Closing => Color::rgb(SHORT, 1.0),
+            WindowState::Open => Color::rgb(GAIN, 1.0),
+            WindowState::Closing => Color::rgb(LOSS, 1.0),
         };
         canvas.text(
             l.window.as_str(),
@@ -441,30 +433,15 @@ impl Widget for FuelWidget {
             .enumerate()
             .take(if four { 4 } else { 3 })
         {
-            canvas.text(
-                name,
-                cell(col as f32, 2.0),
-                label,
-                Align::Left,
-                if col == 0 {
-                    Color::rgb(AVERAGE, 1.0)
-                } else {
-                    dim
-                },
-            );
+            canvas.text(name, cell(col as f32, 2.0), label, Align::Left, dim);
         }
         if six {
-            canvas.text(
-                "Last",
-                cell(0.0, 4.0),
-                label,
-                Align::Left,
-                Color::rgb(LAST, 1.0),
-            );
+            canvas.text("Last", cell(0.0, 4.0), label, Align::Left, dim);
         }
-        let estimates = [(3.0, &l.average, AVERAGE), (5.0, &l.last, LAST)];
+        // The average's estimate is the one to go by; the last lap's is secondary, so it is dimmed, not colored.
+        let estimates = [(3.0, &l.average, TEXT), (5.0, &l.last, DIM)];
         for &(row, estimate, color) in estimates.iter().take(if six { 2 } else { 1 }) {
-            let at_end = if estimate.short { SHORT } else { color };
+            let at_end = if estimate.short { LOSS } else { color };
             for (col, text, ink) in [
                 (0.0, &estimate.per_lap, color),
                 (1.0, &estimate.laps_left, color),
@@ -500,9 +477,9 @@ impl FuelWidget {
             line * 1.2,
         );
         let (frame, ink) = if self.lines.pit {
-            (Color::rgb(SHORT, 1.0), Color::rgb(SHORT, 1.0))
+            (Color::rgb(LOSS, 1.0), Color::rgb(LOSS, 1.0))
         } else {
-            (Color::rgb(DIM, 0.35), Color::rgb(DIM, 0.35))
+            (Color::rgb(FAINT, 0.6), Color::rgb(FAINT, 0.6))
         };
         let (x0, y0, x1, y1) = (sign.x, sign.y, sign.x + sign.w, sign.y + sign.h);
         canvas.line((x0, y0), (x1, y0), 1.5, frame);

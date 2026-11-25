@@ -12,7 +12,7 @@ use crate::config::{NoOptions, WidgetConfig};
 use crate::pipeline::{InputSample, View};
 use crate::render::{Canvas, Color, Rect};
 
-use super::{Build, LayerSpec, MAX_LAYERS, Redraw, Register, Widget};
+use super::{Build, LayerSpec, MAX_LAYERS, Redraw, Register, Widget, palette};
 
 /// The line of one input through the samples `range` of the trace: from the sample before the first (or the first,
 /// at the ring's start) to the last, `level` giving each sample's height from 0 to 1.
@@ -52,13 +52,14 @@ const MIN_SIZE: (u32, u32) = (240, 60);
 /// Trace line width.
 const LINE: f32 = 2.5;
 
-const THROTTLE: Color = Color::rgb(0x3D_D68C, 1.0);
-const BRAKE: Color = Color::rgb(0xF0_524F, 1.0);
-const ABS: Color = Color::rgb(0xFF_D23F, 1.0);
-const CLUTCH: Color = Color::rgb(0x4E_A6F2, 1.0);
-const STEERING: Color = Color::rgb(0xC8_CCD2, 0.8);
-const WHEEL: Color = Color::rgb(0xF0_F2F5, 1.0);
-const WHEEL_MARK: Color = Color::rgb(0xFF_8A3D, 1.0);
+const THROTTLE: Color = Color::rgb(palette::THROTTLE, 1.0);
+const BRAKE: Color = Color::rgb(palette::BRAKE, 1.0);
+const ABS: Color = Color::rgb(palette::CAUTION, 1.0);
+const CLUTCH: Color = Color::rgb(palette::CLUTCH, 1.0);
+const STEERING: Color = Color::rgb(palette::DIM, 0.9);
+const WHEEL: Color = Color::rgb(palette::TEXT, 1.0);
+/// The wheel's top: the player's steering, in the player's color.
+const WHEEL_MARK: Color = Color::rgb(palette::PLAYER, 1.0);
 const GRID: Color = Color::rgb(0xFF_FFFF, 0.08);
 const TRACK: Color = Color::rgb(0xFF_FFFF, 0.10);
 
@@ -214,7 +215,7 @@ impl InputTraceWidget {
         let (w, h) = (self.width as f32, self.height as f32);
         canvas.fill_background(
             Rect::new(0.0, 0.0, w, h),
-            Color::rgb(0x10_1418, self.opacity),
+            Color::rgb(palette::SURFACE, self.opacity),
         );
         let t = self.trace;
         for level in [0.25, 0.5, 0.75] {
@@ -478,7 +479,7 @@ mod tests {
         })[1]
             .1;
         assert!(
-            abs.r > 0.9 && abs.g > 0.75 && abs.b < 0.4,
+            abs.r > 0.85 && abs.g > 0.7 && abs.b < abs.g - 0.3,
             "brake turns yellow under ABS"
         );
     }

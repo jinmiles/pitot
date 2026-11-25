@@ -16,6 +16,7 @@ mod classes;
 mod gaps;
 #[allow(dead_code, reason = "read by the widgets of later batches")]
 mod laps;
+mod palette;
 mod pitstops;
 mod text;
 mod timing;

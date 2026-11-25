@@ -2,7 +2,7 @@
 
 Every car as a dot at its lap distance (`CarIdxLapDistPct`), around a circle (`shape = "circle"`, the default) or
 along the track's outline recorded from a clean lap (`shape = "outline"`). Dots are colored by class
-(`CarClassColor`); the player's is orange with a white ring and drawn on top, and cars on pit road are hollow rings
+(`CarClassColor`); the player's is amber with a white ring and drawn on top, and cars on pit road are hollow rings
 in their class color. The pace car, spectators, and cars out of the world (`CarIdxTrackSurface` -1) are left out.
 Updates at 10 Hz by default.
 
@@ -83,7 +83,7 @@ track largest is used when it is more than 3% larger than north up. The outline 
 
 ## Pit exit
 
-An orange ring marks where the player would rejoin after a stop made now: the player's lap distance moved back by
+An amber ring (the player's color) marks where the player would rejoin after a stop made now: the player's lap distance moved back by
 the stop's expected loss, converted with the player's last lap time (else the session's estimated lap time). The
 loss is the pit lane loss measured at this track plus the standing time for the fuel the stop adds (see
 [pit.md](pit.md#pit-lane-loss)), from the pit tracker the map shares with the pit widget:

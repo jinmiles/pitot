@@ -24,6 +24,10 @@ use crate::platform;
 use crate::render::{Align, Canvas, Color, Rect};
 
 use super::standings::{maker_letter, short_license, write_clock, write_length};
+use super::palette::{
+    CAUTION, CHIP, DIM, LAP_AHEAD, LAP_BEHIND, PIT, PLAYER, PLAYER_BAND, SURFACE, TEXT, UNKNOWN_CLASS,
+    UNKNOWN_LICENSE,
+};
 use super::text::FixedText;
 use super::trackclock::{SharedTrackClock, TrackClock};
 use super::{Build, MAX_LAYERS, Redraw, Register, Widget};
@@ -512,7 +516,7 @@ impl RelativeWidget {
                 d if d < 0 && !row.player => Laps::Behind,
                 _ => Laps::Same,
             };
-            row.class_color = info.and_then(|d| d.car_class_color).unwrap_or(0xFF_FFFF);
+            row.class_color = info.and_then(|d| d.car_class_color).unwrap_or(UNKNOWN_CLASS);
             row.position.clear();
             if let Some(p) = snap.i32(vars.car_class_position, i).filter(|&p| p > 0) {
                 let _ = write!(row.position, "{p}");
@@ -530,7 +534,7 @@ impl RelativeWidget {
                 &mut row.license_class,
                 &mut row.license_rating,
             );
-            row.license_color = info.and_then(|d| d.license_color).unwrap_or(0x80_8080);
+            row.license_color = info.and_then(|d| d.license_color).unwrap_or(UNKNOWN_LICENSE);
             row.rating.clear();
             if let Some(rating) = info.and_then(|d| d.irating).filter(|&r| r > 0) {
                 let _ = write!(row.rating, "{:.1}k", rating as f32 / 1000.0);
@@ -562,7 +566,7 @@ impl RelativeWidget {
         let (w, row_h) = (self.width as f32, self.row_height());
         let size = FRAME_TEXT;
         let dim = Color::rgb(DIM, 1.0);
-        let white = Color::rgb(WHITE, 1.0);
+        let white = Color::rgb(TEXT, 1.0);
         let f = &self.frame;
         let cell = |x: f32, width: f32| Rect::new(x, y, width, row_h);
         if top {
@@ -630,21 +634,21 @@ impl RelativeWidget {
         let cell = |x: f32, width: f32| Rect::new(x, y, width, row_h);
         canvas.fill(
             Rect::new(rating_x + 2.0, badge_y, 40.0, BADGE_HEIGHT),
-            Color::rgb(0xE8_EAED, 0.9 * alpha),
+            Color::rgb(CHIP, 0.9 * alpha),
         );
         canvas.text(
             row.rating.as_str(),
             cell(rating_x + 2.0, 40.0),
             small,
             Align::Center,
-            Color::rgb(BACKGROUND, alpha),
+            Color::rgb(SURFACE, alpha),
         );
         if !row.license_class.as_str().is_empty() {
             canvas.fill(
                 Rect::new(license_x, badge_y, 40.0, BADGE_HEIGHT),
                 Color::rgb(row.license_color, 0.9 * alpha),
             );
-            let ink = Color::rgb(0xFF_FFFF, alpha);
+            let ink = Color::rgb(TEXT, alpha);
             canvas.text(
                 row.license_class.as_str(),
                 cell(license_x + 3.0, 12.0),
@@ -670,13 +674,13 @@ impl RelativeWidget {
         let small = size * 0.78;
         let cell = |x: f32, width: f32| Rect::new(x, y, width, row_h);
         if row.player {
-            canvas.fill(Rect::new(0.0, y, w, row_h), Color::rgb(0xFF_FFFF, 0.10));
+            canvas.fill(Rect::new(0.0, y, w, row_h), Color::rgb(PLAYER, PLAYER_BAND));
         }
         let base = match row.laps {
-            Laps::Ahead => 0xFF_8A80,
-            Laps::Behind => 0x82_B1FF,
-            Laps::Same if row.player => 0xFF_B347,
-            Laps::Same => WHITE,
+            Laps::Ahead => LAP_AHEAD,
+            Laps::Behind => LAP_BEHIND,
+            Laps::Same if row.player => PLAYER,
+            Laps::Same => TEXT,
         };
         let alpha = if row.in_pit { 0.45 } else { 1.0 };
         let text = Color::rgb(base, alpha);
@@ -743,12 +747,13 @@ impl RelativeWidget {
                 );
             };
         if row.in_pit {
-            badge(canvas, "PIT", 0x2D_6CDF, 0xFF_FFFF, None);
+            badge(canvas, "PIT", PIT, TEXT, None);
         } else if row.out_lap {
-            badge(canvas, "OUT", 0xF2_C14E, BACKGROUND, None);
+            badge(canvas, "OUT", CAUTION, SURFACE, None);
         }
         if row.black_flag {
-            badge(canvas, "F", 0x00_0000, 0xFF_FFFF, Some(0xFF_FFFF));
+            // The flag itself: black, outlined so it shows on the dark panel.
+            badge(canvas, "F", 0x00_0000, TEXT, Some(TEXT));
         }
         canvas.text(
             row.name.as_str(),
@@ -759,10 +764,6 @@ impl RelativeWidget {
         );
     }
 }
-
-const WHITE: u32 = 0xF0_F2F5;
-const DIM: u32 = 0xA0_A6AE;
-const BACKGROUND: u32 = 0x10_1418;
 
 impl Register for RelativeWidget {
     type Vars = ();
@@ -844,7 +845,7 @@ impl Widget for RelativeWidget {
         let (w, h) = (self.width as f32, self.height as f32);
         canvas.fill_background(
             Rect::new(0.0, 0.0, w, h),
-            Color::rgb(BACKGROUND, self.opacity),
+            Color::rgb(SURFACE, self.opacity),
         );
         let row_h = self.row_height();
         let area = canvas.area();

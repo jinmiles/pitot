@@ -16,6 +16,7 @@ use crate::config::{NoOptions, WidgetConfig};
 use crate::pipeline::View;
 use crate::render::{Align, Canvas, Color, Rect};
 
+use super::palette::{BEST, DIM, GAIN, LIFT_BAND, LOSS, SURFACE, TEXT};
 use super::standings::write_lap_time;
 use super::text::FixedText;
 use super::timing::{MAX_SECTORS, SectorClock, SectorStarts};
@@ -43,13 +44,6 @@ const SAME_TIME: f32 = 5e-4;
 /// Gains and losses smaller than this are shown as even.
 const EVEN: f32 = 0.005;
 
-const WHITE: u32 = 0xF0_F2F5;
-const DIM: u32 = 0xA0_A6AE;
-const GREEN: u32 = 0x3D_D68C;
-const RED: u32 = 0xFF_6B5E;
-const PURPLE: u32 = 0xB4_5CFF;
-const BACKGROUND: u32 = 0x10_1418;
-const HIGHLIGHT: u32 = 0x2F_6F7A;
 
 /// A sector time: seconds to the millisecond under a minute (`32.456`), else `m:ss.sss`.
 fn write_sector_time(out: &mut FixedText, seconds: f32) {
@@ -542,7 +536,7 @@ impl Widget for SectorsWidget {
         let (w, h) = (self.width as f32, self.height as f32);
         canvas.fill_background(
             Rect::new(0.0, 0.0, w, h),
-            Color::rgb(BACKGROUND, self.opacity),
+            Color::rgb(SURFACE, self.opacity),
         );
         let cols = Columns::for_width(w);
         let dim = Color::rgb(DIM, 1.0);
@@ -599,8 +593,9 @@ impl Widget for SectorsWidget {
             if y + row_h <= area.y || y >= area.y + area.h || y + row_h > h + 0.5 {
                 continue;
             }
+            // The sector the player is in: a band without a hue, as every row here is the player's.
             if row.current {
-                canvas.fill(Rect::new(0.0, y, w, row_h), Color::rgb(HIGHLIGHT, 0.45));
+                canvas.fill(Rect::new(0.0, y, w, row_h), Color::rgb(TEXT, LIFT_BAND));
             }
             let alpha = if row.fresh { 1.0 } else { 0.55 };
             canvas.text(
@@ -611,9 +606,9 @@ impl Widget for SectorsWidget {
                 dim,
             );
             let time_color = match row.mark {
-                Mark::Class => PURPLE,
-                Mark::Personal => GREEN,
-                Mark::None => WHITE,
+                Mark::Class => BEST,
+                Mark::Personal => GAIN,
+                Mark::None => TEXT,
             };
             canvas.text(
                 row.time.as_str(),
@@ -628,13 +623,13 @@ impl Widget for SectorsWidget {
                     cols.cell(k, y, row_h),
                     TEXT_SIZE,
                     Align::Right,
-                    Color::rgb(WHITE, alpha),
+                    Color::rgb(TEXT, alpha),
                 );
             }
             for (k, gap) in [(3, &row.ahead), (4, &row.behind)].into_iter().take(cols.count - 3) {
                 let color = match gap.sign {
-                    -1 => GREEN,
-                    1 => RED,
+                    -1 => GAIN,
+                    1 => LOSS,
                     _ => DIM,
                 };
                 canvas.text(

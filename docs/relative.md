@@ -39,7 +39,7 @@ at a [text size](configuration.md#text-size) of 150 the default box is 307 x 200
   least a lap ahead are shown in red, cars at least a lap behind in blue.
 - **Columns**: class position, car number in the class color, driver name, badges, license class and safety
   rating in the license color (`A 1.83` as `A1.8`), iRating, the maker's letter (the first letter of
-  `CarScreenName`; no logos), and the gap. The player's name is orange.
+  `CarScreenName`; no logos), and the gap. The player's row is amber: its text, on an amber band.
 - **Badges**: `PIT` while the car is on pit road (the row is dimmed), `OUT` on its out lap (from leaving pit road
   until it completes a lap, including a car's first run out of the pits while `CarIdxLapCompleted` is -1, and
   kept through moments out of the world), and a black `F` when `CarIdxSessionFlags` has the black flag.

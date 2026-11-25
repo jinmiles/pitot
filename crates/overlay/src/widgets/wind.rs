@@ -15,6 +15,7 @@ use crate::config::{NoOptions, WidgetConfig};
 use crate::pipeline::{View, var_group};
 use crate::render::{Align, Canvas, Color, Rect};
 
+use super::palette::{CAUTION, DIM, LOSS, PLAYER, SURFACE, TEXT};
 use super::text::FixedText;
 use super::{Build, MAX_LAYERS, Redraw, Register, Widget};
 
@@ -33,18 +34,8 @@ const STEPS: i32 = (360.0 / STEP_DEGREES) as i32;
 /// Below this speed (km/h) the air counts as calm: no direction.
 const CALM_KMH: f32 = 1.0;
 
-const WHITE: u32 = 0xF0_F2F5;
-const DIM: u32 = 0xA0_A6AE;
-const BACKGROUND: u32 = 0x10_1418;
-/// The car's nose at the top of the dial, in the steering wheel marker's color.
-const NOSE: u32 = 0xFF_8A3D;
-/// Arrow colors by speed: light, moderate, strong, very strong.
-const LEVELS: [(f32, u32); 4] = [
-    (0.0, 0xA0_A6AE),
-    (10.0, 0xF0_F2F5),
-    (25.0, 0xF2_C14E),
-    (40.0, 0xFF_6B5E),
-];
+/// Arrow colors by speed: light, moderate, strong (to watch), very strong.
+const LEVELS: [(f32, u32); 4] = [(0.0, DIM), (10.0, TEXT), (25.0, CAUTION), (40.0, LOSS)];
 
 /// Where the wind comes from, clockwise from the car's nose, in radians from 0 to 2π.
 pub(crate) fn relative(wind_dir: f32, heading: f32) -> f32 {
@@ -267,21 +258,22 @@ impl Widget for WindWidget {
         let (w, h) = (self.width as f32, self.height as f32);
         canvas.fill_background(
             Rect::new(0.0, 0.0, w, h),
-            Color::rgb(BACKGROUND, self.opacity),
+            Color::rgb(SURFACE, self.opacity),
         );
         let dim = Color::rgb(DIM, 1.0);
-        let white = Color::rgb(WHITE, 1.0);
+        let white = Color::rgb(TEXT, 1.0);
         let r = &self.shown;
 
         // The dial: a ring, the nose at the top, north and the other compass points turning with the car.
         let (center, radius) = dial(w, h);
         canvas.circle(center, radius, 1.5, Color::rgb(DIM, 0.5));
+        // The player's car's nose, in the player's color.
         let nose = 7f32.to_radians();
         canvas.line(
             at(center, radius, -nose),
             at(center, radius, nose),
             3.0,
-            Color::rgb(NOSE, 1.0),
+            Color::rgb(PLAYER, 1.0),
         );
         if let Some(north) = r.north {
             let north = step_angle(north);

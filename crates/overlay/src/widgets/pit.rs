@@ -22,6 +22,7 @@ use crate::render::{Align, Canvas, Color, Rect};
 
 use super::fuel::{FuelTracker, is_green, laps_to_go};
 use super::pitstops::{PitModel, PitTracker, SharedPitTracker, Stop, player_index};
+use super::palette::{DIM, PIT, PLAYER, PLAYER_BAND, SURFACE, TEXT, UNKNOWN_CLASS};
 use super::text::FixedText;
 use super::{Build, MAX_LAYERS, Redraw, Register, Widget};
 
@@ -400,7 +401,7 @@ impl PitWidget {
             row.player = i == player;
             row.in_pit = snap.bool(vars.car_on_pit_road, i).unwrap_or(false);
             row.other_model = info.and_then(|d| d.car_screen_name.as_deref()) != player_model;
-            row.class_color = info.and_then(|d| d.car_class_color).unwrap_or(0xFF_FFFF);
+            row.class_color = info.and_then(|d| d.car_class_color).unwrap_or(UNKNOWN_CLASS);
             row.position.clear();
             if position != i32::MAX {
                 let _ = write!(row.position, "{position}");
@@ -512,7 +513,7 @@ impl PitWidget {
         let size = (row_h * 0.55).clamp(11.0, 15.0);
         let label = size * 0.85;
         let dim = Color::rgb(DIM, 1.0);
-        let white = Color::rgb(WHITE, 1.0);
+        let white = Color::rgb(TEXT, 1.0);
         let cell = |x: f32, width: f32, slot: f32| Rect::new(x, slot * row_h, width, row_h);
         let h = &self.head;
         canvas.text("Lane loss", cell(10.0, 62.0, 0.0), label, Align::Left, dim);
@@ -569,10 +570,10 @@ impl PitWidget {
         let size = (row_h * 0.6).clamp(11.0, 16.0);
         let cell = |x: f32, width: f32| Rect::new(x, y, width, row_h);
         if row.player {
-            canvas.fill(Rect::new(0.0, y, w, row_h), Color::rgb(0xFF_FFFF, 0.10));
+            canvas.fill(Rect::new(0.0, y, w, row_h), Color::rgb(PLAYER, PLAYER_BAND));
         }
         let alpha = if row.in_pit { 0.55 } else { 1.0 };
-        let base = if row.player { PLAYER } else { WHITE };
+        let base = if row.player { PLAYER } else { TEXT };
         let text = Color::rgb(base, alpha);
         let dim = Color::rgb(DIM, alpha);
         canvas.text(
@@ -602,11 +603,8 @@ impl PitWidget {
         } else {
             text
         };
-        let fuel_color = if row.other_model {
-            dim
-        } else {
-            Color::rgb(FUEL, alpha)
-        };
+        // Dim when estimated from the player's car rather than this one's.
+        let fuel_color = if row.other_model { dim } else { text };
         for (x, width, value, color) in [
             (Some(c.stint), 28.0, &row.stint, dim),
             (Some(c.stop), 36.0, &row.stop, stop_color),
@@ -622,13 +620,6 @@ impl PitWidget {
         }
     }
 }
-
-const WHITE: u32 = 0xF0_F2F5;
-const DIM: u32 = 0xA0_A6AE;
-const PLAYER: u32 = 0xFF_B347;
-const PIT: u32 = 0x6C_9BFF;
-const FUEL: u32 = 0x82_B1FF;
-const BACKGROUND: u32 = 0x10_1418;
 
 impl Register for PitWidget {
     type Vars = ();
@@ -697,7 +688,7 @@ impl Widget for PitWidget {
         let (w, h) = (self.width as f32, self.height as f32);
         canvas.fill_background(
             Rect::new(0.0, 0.0, w, h),
-            Color::rgb(BACKGROUND, self.opacity),
+            Color::rgb(SURFACE, self.opacity),
         );
         let row_h = self.row_height();
         let area = canvas.area();
