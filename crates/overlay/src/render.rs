@@ -124,7 +124,7 @@ fn is_number(text: &str) -> bool {
 }
 
 /// Characters drawn from glyphs measured alone ([`Glyphs`]) when a whole line is made of them: those of numbers. In
-/// Segoe UI semibold they have no kerning or contextual forms between them: shaped whole by GPUI, every pair and
+/// Segoe UI regular they have no kerning or contextual forms between them: shaped whole by GPUI, every pair and
 /// triple of them at the font sizes of every text size gives the glyphs measured alone, each exactly where the
 /// advances of those before it end, and the sum of the advances as the width (trailing spaces included).
 const GLYPH_CHARS: &[u8] = NUMBER_CHARS.as_bytes();
@@ -143,13 +143,14 @@ const GLYPH_INDEX: [u8; 128] = {
 /// The longest line drawn from measured glyphs; longer ones are shaped.
 const MAX_GLYPH_LINE: usize = 24;
 
-/// The widgets' font: Segoe UI semibold, made once per paint state so drawing text clones it without allocating.
+/// The widgets' font: Segoe UI regular, whose digits all have one width, so a number that changes does not move.
+/// Made once per paint state so drawing text clones it without allocating.
 pub fn widget_font() -> Font {
     Font {
         family: SharedString::new_static("Segoe UI"),
         features: FontFeatures::default(),
         fallbacks: None,
-        weight: FontWeight::SEMIBOLD,
+        weight: FontWeight::NORMAL,
         style: FontStyle::Normal,
     }
 }
