@@ -144,7 +144,7 @@ opacity = 0.80
 [widgets.standings]
 enabled = true
 x = 8
-y = 72
+y = 100
 width = 744
 height = 560
 rate_hz = 10.0
@@ -1152,26 +1152,34 @@ mod tests {
     }
 
     /// The default layout fits a 1920 x 1080 monitor 8 px inside its edges, on a 4 px grid, with every widget at
-    /// least 8 px from every other: nothing overlaps.
+    /// least 8 px from every other at any text size: nothing overlaps.
     #[test]
     fn the_default_layout_fits_full_hd_without_overlaps() {
         let config = Config::default();
+        // The status widget has no size in the file and grows with the text: 300 x 54 at 100%, so the most it
+        // takes is at the largest text size. The others keep their boxes at every text size.
+        let largest = text_scale(MAX_TEXT_SIZE);
         let rects: Vec<(&str, i32, i32, i32, i32)> = config
             .widgets()
             .filter(|(_, w)| w.enabled)
             .map(|(name, w)| {
-                // The status widget has no size of its own in the file: 300 x 54.
-                let (width, height) = (w.width.unwrap_or(300), w.height.unwrap_or(54));
-                (name, w.x, w.y, width as i32, height as i32)
+                let (width, height) = match (w.width, w.height) {
+                    (Some(width), Some(height)) => (width as i32, height as i32),
+                    _ => (
+                        (300.0 * largest).ceil() as i32,
+                        (54.0 * largest).ceil() as i32,
+                    ),
+                };
+                (name, w.x, w.y, width, height)
             })
             .collect();
         for &(name, x, y, w, h) in &rects {
             assert!(x >= 8 && y >= 8, "{name} inside the margin");
             assert!(x + w <= 1912 && y + h <= 1072, "{name} inside the margin");
-            assert!(
-                x % 4 == 0 && y % 4 == 0 && w % 4 == 0 && (h % 4 == 0 || name == "status"),
-                "{name} on the grid"
-            );
+            assert!(x % 4 == 0 && y % 4 == 0, "{name} on the grid");
+            if name != "status" {
+                assert!(w % 4 == 0 && h % 4 == 0, "{name} on the grid");
+            }
         }
         for (i, a) in rects.iter().enumerate() {
             for b in &rects[i + 1..] {
@@ -1193,7 +1201,7 @@ mod tests {
             ("status", 8, 8, None, None),
             ("inputs", 660, 952, Some((600, 120)), Some(60.0)),
             ("relative", 1456, 520, Some((456, 396)), Some(10.0)),
-            ("standings", 8, 72, Some((744, 560)), Some(10.0)),
+            ("standings", 8, 100, Some((744, 560)), Some(10.0)),
             ("fuel", 1456, 924, Some((456, 148)), Some(30.0)),
             ("pit", 760, 216, Some((400, 280)), Some(10.0)),
             ("sectors", 760, 8, Some((400, 200)), Some(10.0)),
@@ -1499,7 +1507,7 @@ mod tests {
             .zip(placed.lines())
             .filter(|(a, b)| a != b)
             .collect();
-        assert_eq!(changed, [("x = 8", "x = 1200"), ("y = 72", "y = -40")]);
+        assert_eq!(changed, [("x = 8", "x = 1200"), ("y = 100", "y = -40")]);
         assert_eq!(DEFAULT_TOML.lines().count(), placed.lines().count());
 
         let commented = "[widgets.fuel]\nx = 5 # left edge\ny = 6\n";

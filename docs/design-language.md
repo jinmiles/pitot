@@ -70,7 +70,8 @@ Four text roles, the four text sizes, defined in `crates/overlay/src/widgets/des
 - Labels are in sentence case (`Fuel level`, `Laps in race`, `Lane loss`); abbreviations stay in capitals (`GAP`,
   `INT`, `SOF`, `PIT`, `OUT`).
 - A unit follows its value as a label: smaller and grey (`44.4 °C`, `18 km/h`, `10.7 L/s`).
-- A value not known yet shows `—` in `FAINT` where a value stands beside its label; in a table it is left blank.
+- A value not known yet shows `—` in `FAINT` where a value stands beside its label, without its unit; in a table
+  it is left blank.
 - Numbers keep the formats of their widgets: lap times to the millisecond (`1:45.345`), gaps to a tenth, fuel to
   a hundredth of a liter, temperatures to a tenth of a degree.
 
@@ -117,13 +118,13 @@ graph traces, and marks that meet edge to edge stay square.
 
 ## Default layout
 
-For a 1920 x 1080 monitor, 8 px from its edges and 8 px between widgets, on the 4 px grid, with nothing
-overlapping (a test checks):
+For a 1920 x 1080 monitor, 8 px from its edges and at least 8 px between widgets, on the 4 px grid, with nothing
+overlapping at any text size (a test checks):
 
 | Widget | Place | Size |
 |---|---|---|
-| Status | 8, 8 | 300 x 54 |
-| Standings | 8, 72 | 744 x 560 |
+| Status | 8, 8 | 300 x 54, growing with the text (450 x 81 at 150%) |
+| Standings | 8, 100 | 744 x 560 |
 | Sectors | 760, 8 | 400 x 200 |
 | Pit stops | 760, 216 | 400 x 280 |
 | Input trace | 660, 952 | 600 x 120 |
@@ -133,5 +134,6 @@ overlapping (a test checks):
 | Relative | 1456, 520 | 456 x 396 |
 | Fuel | 1456, 924 | 456 x 148 |
 
-The right column is 456 px wide so the relative keeps its rating and license columns up to the largest text size.
-On another monitor size, a widget that would reach past an edge is moved inside it.
+The right column is 456 px wide so the relative still fits at the largest text size (its smallest width is 300
+widget pixels; at 150% it leaves out the rating and license columns, as below 400). On another monitor size, a
+widget that would reach past an edge is moved inside it.

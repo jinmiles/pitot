@@ -525,7 +525,10 @@ impl PitWidget {
             Align::Right,
             value_color(h.loss.as_str()),
         );
-        canvas.text("s", cell(106.0, 10.0, 0.0), label, Align::Left, dim);
+        // A unit only beside a value: not after the dash of one not known yet.
+        if h.loss.as_str() != NO_VALUE {
+            canvas.text("s", cell(106.0, 10.0, 0.0), label, Align::Left, dim);
+        }
         let w = self.width as f32;
         if w >= REFUEL_WIDTH {
             canvas.text("Refuel", cell(124.0, 44.0, 0.0), label, Align::Left, dim);
@@ -549,7 +552,9 @@ impl PitWidget {
                 Align::Right,
                 value_color(h.full.as_str()),
             );
-            canvas.text("s", cell(334.0, 10.0, 0.0), label, Align::Left, dim);
+            if h.full.as_str() != NO_VALUE {
+                canvas.text("s", cell(334.0, 10.0, 0.0), label, Align::Left, dim);
+            }
         }
         let c = self.columns();
         for (x, width, name) in [

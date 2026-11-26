@@ -35,7 +35,7 @@ opacity = 0.80
 [widgets.standings]
 enabled = true
 x = 8
-y = 72
+y = 100
 width = 744
 height = 560
 rate_hz = 10.0
