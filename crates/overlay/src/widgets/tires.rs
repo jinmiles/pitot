@@ -20,6 +20,7 @@ use crate::config::{NoOptions, WidgetConfig};
 use crate::pipeline::{Display, Source, TireSample, Vars, View};
 use crate::render::{Align, Canvas, Color, Rect};
 
+use super::design::{BODY, GUTTER, LABEL, PAD};
 use super::palette::{CAUTION, COLD, DIM, GAIN, LOSS, RAISED, SURFACE, TEXT};
 use super::text::FixedText;
 use super::{Build, MAX_LAYERS, Redraw, Register, Widget};
@@ -206,11 +207,12 @@ impl Corner {
     }
 }
 
+/// Writes `value`, or leaves `out` blank when it is not known: the blocks are tables, and a table leaves unknown
+/// values blank.
 fn write_or_dash(out: &mut FixedText, value: Option<f32>, write: impl FnOnce(&mut FixedText, f32)) {
     out.clear();
-    match value {
-        Some(v) => write(out, v),
-        None => out.push("--"),
+    if let Some(v) = value {
+        write(out, v);
     }
 }
 
@@ -414,18 +416,18 @@ impl TiresWidget {
         let mut fit = |texts: &[FixedText; ZONES]| {
             texts
                 .iter()
-                .all(|t| canvas.fits(t.as_str(), room, 14.0))
+                .all(|t| canvas.fits(t.as_str(), room, BODY))
         };
         let (temps, wear) = (fit(&corner.temps), fit(&corner.wear));
         for z in 0..ZONES {
             let cell = Rect::new(block.x + z as f32 * cell_w, block.y, cell_w, row_h);
             let swatch = Rect::new(cell.x + 1.0, cell.y + 1.0, cell.w - 2.0, cell.h - 2.0);
-            canvas.fill(swatch, Color::rgb(corner.temp_colors[z], strength));
+            canvas.fill_rounded(swatch, Color::rgb(corner.temp_colors[z], strength));
             if temps {
                 canvas.text(
                     corner.temps[z].as_str(),
                     cell,
-                    14.0,
+                    BODY,
                     Align::Center,
                     Color::rgb(ink, 1.0),
                 );
@@ -436,7 +438,7 @@ impl TiresWidget {
                 canvas.text(
                     corner.wear[z].as_str(),
                     cell,
-                    14.0,
+                    BODY,
                     Align::Center,
                     Color::rgb(corner.wear_colors[z], alpha),
                 );
@@ -449,7 +451,7 @@ impl TiresWidget {
         canvas.text(
             corner.distance.as_str(),
             distance,
-            12.0,
+            LABEL,
             Align::Right,
             Color::rgb(TEXT, 1.0),
         );
@@ -460,7 +462,7 @@ impl TiresWidget {
             row_h,
         );
         let unit_name = if replay { "kPa" } else { "km" };
-        canvas.text(unit_name, unit, 12.0, Align::Left, Color::rgb(DIM, 1.0));
+        canvas.text(unit_name, unit, LABEL, Align::Left, Color::rgb(DIM, 1.0));
     }
 
     fn draw_header(&self, canvas: &mut Canvas<'_>) {
@@ -475,7 +477,7 @@ impl TiresWidget {
             canvas.text(
                 s.compound.as_str(),
                 Rect::new(x, 0.0, w * 0.32, HEADER_HEIGHT),
-                12.0,
+                LABEL,
                 Align::Left,
                 Color::rgb(TEXT, 1.0),
             );
@@ -484,11 +486,11 @@ impl TiresWidget {
         let full = w >= FULL_HEADER_WIDTH;
         if full && !s.sets.as_str().is_empty() {
             let label = Rect::new(w * 0.40, 0.0, 30.0, HEADER_HEIGHT);
-            canvas.text("Sets", label, 12.0, Align::Left, dim);
+            canvas.text("Sets", label, LABEL, Align::Left, dim);
             canvas.text(
                 s.sets.as_str(),
                 Rect::new(label.x + label.w, 0.0, w * 0.2, HEADER_HEIGHT),
-                12.0,
+                LABEL,
                 Align::Left,
                 Color::rgb(TEXT, 1.0),
             );
@@ -500,7 +502,7 @@ impl TiresWidget {
             canvas.text(
                 "Replay",
                 right,
-                12.0,
+                LABEL,
                 Align::Right,
                 Color::rgb(CAUTION, 1.0),
             );
@@ -512,27 +514,26 @@ impl TiresWidget {
             canvas.text(
                 s.taken.as_str(),
                 number,
-                12.0,
+                LABEL,
                 Align::Right,
                 Color::rgb(TEXT, 1.0),
             );
             canvas.text(
                 "Pit lap",
                 Rect::new(right.x, 0.0, right.w - 29.0, HEADER_HEIGHT),
-                12.0,
+                LABEL,
                 Align::Right,
                 dim,
             );
         } else {
-            canvas.text("Last pit", right, 12.0, Align::Right, dim);
+            canvas.text("Last pit", right, LABEL, Align::Right, dim);
         }
     }
 }
 
-/// Header height and the margins around the tire blocks, in pixels.
+/// Header height and the space between the tire blocks, in pixels.
 const HEADER_HEIGHT: f32 = 22.0;
-const PAD: f32 = 8.0;
-const GAP: f32 = 6.0;
+const GAP: f32 = GUTTER;
 /// Each tire block's temperatures and wear; a temperature without room is left out and its color shows.
 const MIN_SIZE: (u32, u32) = (140, 110);
 /// From this width the header has room for the tire sets and the pit lap beside the compound. A large text size

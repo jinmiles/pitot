@@ -14,6 +14,9 @@ use crate::config::{NoOptions, WidgetConfig};
 use crate::pipeline::View;
 use crate::render::{Align, Canvas, Color, Rect};
 
+use super::design::{
+    BODY, GUTTER, LABEL, NO_VALUE, PAD, VALUE, empty_line, label_color, value_color,
+};
 use super::palette::{DIM, FAINT, GAIN, LOSS, SURFACE, TEXT};
 use super::text::FixedText;
 use super::{Build, MAX_LAYERS, Redraw, Register, Widget};
@@ -214,8 +217,6 @@ impl Estimate {
     }
 }
 
-/// Shown for a value not known yet.
-const NO_VALUE: &str = "--.--";
 
 fn write_value(out: &mut FixedText, value: f32) {
     out.clear();
@@ -286,7 +287,7 @@ impl FuelWidget {
     }
 }
 
-/// Three columns of values and four lines, once the pit sign, the fuel at the end, and the last lap's line are left
+/// Three columns and the average's line, once the pit sign, the fuel at the end, and the last lap's line are left
 /// out.
 const MIN_SIZE: (u32, u32) = (270, 90);
 /// From this width the fourth column shows: the pit sign and the fuel at the end. A large text size makes the
@@ -294,6 +295,14 @@ const MIN_SIZE: (u32, u32) = (270, 90);
 const FOUR_COLUMNS_WIDTH: f32 = 380.0;
 /// From this height the last lap's estimate shows below the average's.
 const SIX_LINES_HEIGHT: f32 = 120.0;
+/// The top block: a label line over a value line.
+const LABEL_LINE: f32 = 16.0;
+const VALUE_LINE: f32 = 24.0;
+/// The estimates' table: its line of column names and each row.
+const NAMES_LINE: f32 = 18.0;
+const ROW_LINE: f32 = 22.0;
+/// The width of the table's row names (`Average`, `Last`).
+const ROW_NAMES: f32 = 64.0;
 
 impl Register for FuelWidget {
     type Vars = ();
@@ -383,64 +392,88 @@ impl Widget for FuelWidget {
             Rect::new(0.0, 0.0, w, h),
             Color::rgb(SURFACE, self.opacity),
         );
-        let dim = Color::rgb(DIM, 1.0);
-        let white = Color::rgb(TEXT, 1.0);
-        // Six lines: labels and values of the current state, then the average's and the last lap's. A short widget
-        // leaves out the last lap's, and a narrow one the fourth column.
+        // On top, labels over values: the fuel, the laps in the race, the pit window, and the pit sign. Below, the
+        // estimates as a table: the average's line, and the last lap's in a tall widget. A narrow widget leaves out
+        // the fourth column.
         let six = h >= SIX_LINES_HEIGHT;
         let four = w >= FOUR_COLUMNS_WIDTH;
-        let line = h / if six { 6.0 } else { 4.0 };
-        let column = (w - 24.0) / if four { 4.0 } else { 3.0 };
-        let label = (line * 0.5).clamp(10.0, 13.0);
-        let value = (line * 0.8).clamp(14.0, 24.0);
-        let cell = |col: f32, row: f32| Rect::new(12.0 + col * column, row * line, column, line);
+        let columns = if four { 4.0 } else { 3.0 };
+        let column = (w - 2.0 * PAD) / columns;
         let l = &self.lines;
-        canvas.text("Fuel Level", cell(0.0, 0.0), label, Align::Left, dim);
-        canvas.text("Laps in Race", cell(1.0, 0.0), label, Align::Left, dim);
-        canvas.text(l.fuel.as_str(), cell(0.0, 1.0), value, Align::Left, white);
-        canvas.text(
-            l.laps_to_go.as_str(),
-            cell(1.0, 1.0),
-            value,
-            Align::Left,
-            white,
-        );
-        canvas.text(
-            l.window_label.as_str(),
-            cell(2.0, 0.0),
-            label,
-            Align::Left,
-            dim,
-        );
+        let top = |col: f32| {
+            (
+                Rect::new(PAD + col * column, PAD, column, LABEL_LINE),
+                Rect::new(PAD + col * column, PAD + LABEL_LINE, column, VALUE_LINE),
+            )
+        };
         let window_ink = match l.window_state {
-            WindowState::Later => white,
+            WindowState::Later => value_color(l.window.as_str()),
             WindowState::Open => Color::rgb(GAIN, 1.0),
             WindowState::Closing => Color::rgb(LOSS, 1.0),
         };
-        canvas.text(
-            l.window.as_str(),
-            cell(2.0, 1.0),
-            value,
-            Align::Left,
-            window_ink,
-        );
+        for (col, label, value, ink) in [
+            (0.0, "Fuel level", l.fuel.as_str(), value_color(l.fuel.as_str())),
+            (
+                1.0,
+                "Laps in race",
+                l.laps_to_go.as_str(),
+                value_color(l.laps_to_go.as_str()),
+            ),
+            (2.0, l.window_label.as_str(), l.window.as_str(), window_ink),
+        ] {
+            let (label_rect, value_rect) = top(col);
+            canvas.text(label, label_rect, LABEL, Align::Left, label_color());
+            canvas.text(value, value_rect, VALUE, Align::Left, ink);
+        }
         // The pit sign, lit when the fuel does not last to the end.
         if four {
-            self.draw_sign(canvas, column, line, label);
+            let (_, value_rect) = top(3.0);
+            self.draw_sign(canvas, value_rect);
         }
-        for (col, name) in ["Average", "Laps Remain", "Refuel", "Fuel at End"]
+
+        let table = PAD + LABEL_LINE + VALUE_LINE;
+        if l.average.per_lap.as_str() == NO_VALUE {
+            // No clean lap yet: one line instead of a table of dashes.
+            empty_line(
+                canvas,
+                "Estimates after a clean lap",
+                Rect::new(PAD, table + 4.0, w - 2.0 * PAD, NAMES_LINE + ROW_LINE),
+            );
+            return;
+        }
+        let value_column = (w - 2.0 * PAD - ROW_NAMES) / columns;
+        let cell = |col: f32, y: f32, height: f32| {
+            Rect::new(
+                PAD + ROW_NAMES + col * value_column,
+                y,
+                value_column - GUTTER,
+                height,
+            )
+        };
+        for (col, name) in ["Per lap", "Laps", "Refuel", "At end"]
             .iter()
             .enumerate()
-            .take(if four { 4 } else { 3 })
+            .take(columns as usize)
         {
-            canvas.text(name, cell(col as f32, 2.0), label, Align::Left, dim);
-        }
-        if six {
-            canvas.text("Last", cell(0.0, 4.0), label, Align::Left, dim);
+            canvas.text(
+                name,
+                cell(col as f32, table, NAMES_LINE),
+                LABEL,
+                Align::Right,
+                label_color(),
+            );
         }
         // The average's estimate is the one to go by; the last lap's is secondary, so it is dimmed, not colored.
-        let estimates = [(3.0, &l.average, TEXT), (5.0, &l.last, DIM)];
-        for &(row, estimate, color) in estimates.iter().take(if six { 2 } else { 1 }) {
+        let rows = [("Average", &l.average, TEXT), ("Last", &l.last, DIM)];
+        for (n, &(name, estimate, color)) in rows.iter().take(if six { 2 } else { 1 }).enumerate() {
+            let y = table + NAMES_LINE + n as f32 * ROW_LINE;
+            canvas.text(
+                name,
+                Rect::new(PAD, y, ROW_NAMES, ROW_LINE),
+                LABEL,
+                Align::Left,
+                label_color(),
+            );
             let at_end = if estimate.short { LOSS } else { color };
             for (col, text, ink) in [
                 (0.0, &estimate.per_lap, color),
@@ -449,13 +482,17 @@ impl Widget for FuelWidget {
                 (3.0, &estimate.at_end, at_end),
             ]
             .into_iter()
-            .take(if four { 4 } else { 3 })
+            .take(columns as usize)
             {
+                // In a table, a value not known is left blank.
+                if text.as_str() == NO_VALUE {
+                    continue;
+                }
                 canvas.text(
                     text.as_str(),
-                    cell(col, row),
-                    value,
-                    Align::Left,
+                    cell(col, y, ROW_LINE),
+                    BODY,
+                    Align::Right,
                     Color::rgb(ink, 1.0),
                 );
             }
@@ -468,32 +505,23 @@ impl Widget for FuelWidget {
 }
 
 impl FuelWidget {
-    /// The pit sign in the fourth column, lit when the fuel does not last to the end.
-    fn draw_sign(&self, canvas: &mut Canvas<'_>, column: f32, line: f32, label: f32) {
-        let sign = Rect::new(
-            12.0 + 3.0 * column + column * 0.2,
-            line * 0.4,
-            column * 0.6,
-            line * 1.2,
-        );
-        let (frame, ink) = if self.lines.pit {
-            (Color::rgb(LOSS, 1.0), Color::rgb(LOSS, 1.0))
+    /// The pit sign in `rect`'s line, lit when the fuel does not last to the end.
+    fn draw_sign(&self, canvas: &mut Canvas<'_>, rect: Rect) {
+        let sign = Rect::new(rect.x + rect.w - 48.0 - GUTTER, rect.y, 48.0, rect.h - 2.0);
+        let (fill, ink) = if self.lines.pit {
+            (Color::rgb(LOSS, 1.0), Color::rgb(SURFACE, 1.0))
         } else {
-            (Color::rgb(FAINT, 0.6), Color::rgb(FAINT, 0.6))
+            (Color::rgb(TEXT, 0.06), Color::rgb(FAINT, 1.0))
         };
-        let (x0, y0, x1, y1) = (sign.x, sign.y, sign.x + sign.w, sign.y + sign.h);
-        canvas.line((x0, y0), (x1, y0), 1.5, frame);
-        canvas.line((x0, y1), (x1, y1), 1.5, frame);
-        canvas.line((x0, y0), (x0, y1), 1.5, frame);
-        canvas.line((x1, y0), (x1, y1), 1.5, frame);
-        canvas.text("PIT", sign, label + 2.0, Align::Center, ink);
+        canvas.fill_rounded(sign, fill);
+        canvas.text("PIT", sign, LABEL, Align::Center, ink);
     }
 }
 
 impl Lines {
     /// Fills the pit window's label and value; `completed` is the laps done.
     fn fill_window(&mut self, window: PitWindow, completed: i32) {
-        self.window_label.set("Pit Window");
+        self.window_label.set("Pit window");
         self.window_state = WindowState::Later;
         match window {
             PitWindow::Unknown => self.window.set(NO_VALUE),
@@ -721,7 +749,7 @@ mod tests {
         l.fill_window(PitWindow::Unknown, 3);
         assert_eq!(
             (l.window_label.as_str(), l.window.as_str()),
-            ("Pit Window", NO_VALUE)
+            ("Pit window", NO_VALUE)
         );
         l.fill_window(PitWindow::NoStop, 3);
         assert_eq!(l.window.as_str(), "no stop");

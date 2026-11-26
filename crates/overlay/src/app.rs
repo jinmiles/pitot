@@ -1666,7 +1666,11 @@ mod tests {
         );
         assert_eq!(fresh.general.text_size, 140);
         assert_eq!(previews.text_size(&with(120)), 140);
-        assert_eq!(previews.background(&with(120)), 82, "the file's");
+        assert_eq!(
+            previews.background(&with(120)),
+            config::DEFAULT_BACKGROUND_OPACITY,
+            "the file's"
+        );
         let later = now + PREVIEW_HOLD + RELOAD_DELAY;
         let mut fresh = with(120);
         assert_eq!(

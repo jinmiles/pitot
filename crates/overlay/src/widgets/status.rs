@@ -7,7 +7,7 @@ use crate::config::NoOptions;
 use crate::pipeline::{Display, View};
 use crate::render::{Align, Canvas, Color, Rect};
 
-use super::{Build, MAX_LAYERS, Redraw, Register, Widget, palette};
+use super::{Build, MAX_LAYERS, Redraw, Register, Widget, design, palette};
 
 const WIDTH: u32 = 300;
 const HEIGHT: u32 = 54;
@@ -27,7 +27,7 @@ pub struct StatusWidget {
 
 impl Default for StatusWidget {
     fn default() -> Self {
-        Self::new(0.82)
+        Self::new(crate::config::DEFAULT_WIDGET_OPACITY)
     }
 }
 
@@ -117,18 +117,18 @@ impl Widget for StatusWidget {
             Display::Idle | Display::Replay => Color::rgb(palette::CAUTION, 1.0),
             Display::Disconnected => Color::rgb(palette::FAINT, 1.0),
         };
-        canvas.fill(Rect::new(0.0, 0.0, 4.0, h), accent);
+        canvas.fill_rounded(Rect::new(design::PAD / 2.0, 4.0, 4.0, h - 8.0), accent);
         canvas.text(
             "PITOT",
             Rect::new(14.0, 4.0, 120.0, 22.0),
-            14.0,
+            design::BODY,
             Align::Left,
             Color::rgb(palette::TEXT, 1.0),
         );
         canvas.text(
             &self.line,
             Rect::new(14.0, 26.0, w - 20.0, 22.0),
-            12.0,
+            design::LABEL,
             Align::Left,
             Color::rgb(palette::DIM, 1.0),
         );

@@ -22,6 +22,7 @@ use crate::render::{Align, Canvas, Color, Rect};
 
 use super::fuel::{FuelTracker, is_green, laps_to_go};
 use super::pitstops::{PitModel, PitTracker, SharedPitTracker, Stop, player_index};
+use super::design::{BODY, LABEL, NO_VALUE, PAD, divider, label_color, value_color};
 use super::palette::{DIM, PIT, PLAYER, PLAYER_BAND, SURFACE, TEXT, UNKNOWN_CLASS};
 use super::text::FixedText;
 use super::{Build, MAX_LAYERS, Redraw, Register, Widget};
@@ -161,7 +162,7 @@ impl Head {
             Some(loss) => {
                 let _ = write!(self.loss, "{loss:.1}");
             }
-            None => self.loss.set("--.-"),
+            None => self.loss.set(NO_VALUE),
         }
         self.rate.clear();
         let _ = write!(self.rate, "{:.1}", model.refuel_rate);
@@ -171,7 +172,7 @@ impl Head {
             Some(loss) => {
                 let _ = write!(self.full, "{loss:.1}");
             }
-            None => self.full.set("--.-"),
+            None => self.full.set(NO_VALUE),
         }
     }
 }
@@ -488,12 +489,13 @@ impl PitWidget {
 
     fn columns(&self) -> Columns {
         // From the right edge: the rejoin gap and place, the pit lap, then the fuel, stood, stop, and stint. Each
-        // value ends 4 px before what follows it, or before the edge.
+        // value ends 4 px before what follows it, or the padding before the edge.
         let w = self.width as f32;
-        let gap = (w >= REJOIN_WIDTH).then_some(w - 50.0);
+        let right = w - (PAD - 4.0);
+        let gap = (w >= REJOIN_WIDTH).then_some(right - 50.0);
         let place = gap.map(|gap| gap - 24.0);
-        let pit = (w >= PIT_LAP_WIDTH).then(|| place.map_or(w - 32.0, |place| place - 30.0));
-        let fuel = pit.map_or(w - 34.0, |pit| pit - 32.0);
+        let pit = (w >= PIT_LAP_WIDTH).then(|| place.map_or(right - 32.0, |place| place - 30.0));
+        let fuel = pit.map_or(right - 34.0, |pit| pit - 32.0);
         let stood = fuel - 38.0;
         let stop = stood - 38.0;
         let stint = stop - 30.0;
@@ -510,19 +512,18 @@ impl PitWidget {
 
     fn draw_head(&self, canvas: &mut Canvas<'_>) {
         let row_h = self.row_height();
-        let size = (row_h * 0.55).clamp(11.0, 15.0);
-        let label = size * 0.85;
-        let dim = Color::rgb(DIM, 1.0);
+        let (size, label) = (BODY, LABEL);
+        let dim = label_color();
         let white = Color::rgb(TEXT, 1.0);
         let cell = |x: f32, width: f32, slot: f32| Rect::new(x, slot * row_h, width, row_h);
         let h = &self.head;
-        canvas.text("Lane loss", cell(10.0, 62.0, 0.0), label, Align::Left, dim);
+        canvas.text("Lane loss", cell(PAD, 62.0, 0.0), label, Align::Left, dim);
         canvas.text(
             h.loss.as_str(),
             cell(68.0, 36.0, 0.0),
             size,
             Align::Right,
-            white,
+            value_color(h.loss.as_str()),
         );
         canvas.text("s", cell(106.0, 10.0, 0.0), label, Align::Left, dim);
         let w = self.width as f32;
@@ -546,7 +547,7 @@ impl PitWidget {
                 cell(296.0, 36.0, 0.0),
                 size,
                 Align::Right,
-                white,
+                value_color(h.full.as_str()),
             );
             canvas.text("s", cell(334.0, 10.0, 0.0), label, Align::Left, dim);
         }
@@ -563,14 +564,19 @@ impl PitWidget {
                 canvas.text(name, cell(x, width, 1.0), label, Align::Right, dim);
             }
         }
+        // The column names end the header; the cars follow below a divider.
+        divider(canvas, HEAD_ROWS as f32 * row_h - 1.0, self.width as f32);
     }
 
     fn draw_row(&self, canvas: &mut Canvas<'_>, y: f32, row: &Row) {
         let (w, row_h) = (self.width as f32, self.row_height());
-        let size = (row_h * 0.6).clamp(11.0, 16.0);
+        let size = BODY;
         let cell = |x: f32, width: f32| Rect::new(x, y, width, row_h);
         if row.player {
-            canvas.fill(Rect::new(0.0, y, w, row_h), Color::rgb(PLAYER, PLAYER_BAND));
+            canvas.fill_rounded(
+                Rect::new(PAD / 2.0, y + 1.0, w - PAD, row_h - 2.0),
+                Color::rgb(PLAYER, PLAYER_BAND),
+            );
         }
         let alpha = if row.in_pit { 0.55 } else { 1.0 };
         let base = if row.player { PLAYER } else { TEXT };
@@ -578,14 +584,14 @@ impl PitWidget {
         let dim = Color::rgb(DIM, alpha);
         canvas.text(
             row.position.as_str(),
-            cell(4.0, 20.0),
+            cell(PAD, 20.0),
             size,
             Align::Right,
             text,
         );
         canvas.text(
             row.number.as_str(),
-            cell(26.0, 38.0),
+            cell(30.0, 38.0),
             size,
             Align::Right,
             Color::rgb(row.class_color, alpha),
@@ -593,7 +599,7 @@ impl PitWidget {
         let c = self.columns();
         canvas.text(
             row.name.as_str(),
-            cell(70.0, (c.stint - 72.0).max(0.0)),
+            cell(74.0, (c.stint - 76.0).max(0.0)),
             size,
             Align::Left,
             text,

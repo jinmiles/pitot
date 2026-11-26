@@ -64,6 +64,23 @@ pub const COMPOUND_HARD: u32 = CHIP;
 pub const COMPOUND_INTER: u32 = GAIN;
 pub const COMPOUND_WET: u32 = COLD;
 
+/// Text on a chip of `fill`: [`TEXT`] on a dark fill, [`SURFACE`] on a light one, whichever stands out more (by
+/// the fill's relative luminance, WCAG's formula). License colors run from dark blue to yellow, so one ink does not
+/// suit them all.
+pub fn ink_on(fill: u32) -> u32 {
+    let channel = |shift: u32| {
+        let c = ((fill >> shift) & 0xFF) as f32 / 255.0;
+        if c <= 0.039_28 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    let luminance = 0.2126 * channel(16) + 0.7152 * channel(8) + 0.0722 * channel(0);
+    // Equal contrast against white and against near-black falls at a luminance of about 0.18.
+    if luminance > 0.18 { SURFACE } else { TEXT }
+}
+
 /// Shown for a class or license color the session does not give.
 pub const UNKNOWN_CLASS: u32 = 0xFF_FFFF;
 pub const UNKNOWN_LICENSE: u32 = 0x80_8080;

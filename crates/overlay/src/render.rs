@@ -143,6 +143,20 @@ const GLYPH_INDEX: [u8; 128] = {
 /// The longest line drawn from measured glyphs; longer ones are shaped.
 const MAX_GLYPH_LINE: usize = 24;
 
+/// Corner radius of panels, chips, badges, bands, and blocks, in widget pixels.
+pub const RADIUS: f32 = 4.0;
+
+/// The alpha of the shadow under text when backgrounds are off (`[general] background_opacity` = 0). It falls as the
+/// panel behind the text grows opaque, to none on an opaque panel: the shadow keeps text readable over a bright
+/// scene, and is not needed where the panel already does that.
+const SHADOW_ALPHA: f32 = 0.9;
+
+/// The alpha of the shadow under text at `[general] background_opacity` = `percent`.
+fn shadow_alpha(percent: u8) -> f32 {
+    let panel = config::background_alpha(config::DEFAULT_WIDGET_OPACITY, percent);
+    SHADOW_ALPHA * (1.0 - panel).clamp(0.0, 1.0)
+}
+
 /// The widgets' font: Segoe UI bold, whose digits all have one width, so a number that changes does not move.
 /// Made once per paint state so drawing text clones it without allocating.
 pub fn widget_font() -> Font {
@@ -551,31 +565,44 @@ impl Canvas<'_> {
         (x * self.scale, y * self.scale)
     }
 
-    /// Fills a rectangle given in layer pixels.
-    fn fill_layer(&mut self, rect: Rect, color: Color) {
+    /// Fills a rectangle given in layer pixels, its corners rounded by `radius` layer pixels.
+    fn fill_layer(&mut self, rect: Rect, color: Color, radius: f32) {
         if rect.w <= 0.0 || rect.h <= 0.0 || color.a <= 0.0 {
             return;
         }
         let bounds = self.window_bounds(rect);
-        counted!(
-            Draw,
-            self.window.paint_quad(gpui::fill(bounds, color.hsla()))
-        );
+        let quad = gpui::fill(bounds, color.hsla());
+        let quad = if radius > 0.0 {
+            // No larger than half the shorter side, so a thin bar stays a bar.
+            let radius = radius.min(rect.w / 2.0).min(rect.h / 2.0);
+            quad.corner_radii(px(radius * self.logical))
+        } else {
+            quad
+        };
+        counted!(Draw, self.window.paint_quad(quad));
     }
 
+    /// Fills a rectangle with square corners: lines, graph bars, and other marks that meet edge to edge.
     pub fn fill(&mut self, rect: Rect, color: Color) {
         let rect = self.layer_rect(rect);
-        self.fill_layer(rect, color);
+        self.fill_layer(rect, color, 0.0);
     }
 
-    /// Fills `rect` with a widget's background: its panel, or a band behind content such as a header. `color`'s
-    /// alpha is the background's own (from the widget's `opacity`), which `[general] background_opacity` scales
-    /// (see [`config::background_alpha`]). Text, graphs, lines, and markers use [`Canvas::fill`] and stay as they
-    /// are.
+    /// Fills a rectangle with corners rounded by [`RADIUS`]: a chip, a badge, a row's band, a block.
+    pub fn fill_rounded(&mut self, rect: Rect, color: Color) {
+        let rect = self.layer_rect(rect);
+        let radius = RADIUS * self.scale;
+        self.fill_layer(rect, color, radius);
+    }
+
+    /// Fills `rect` with a widget's background, corners rounded by [`RADIUS`]: its panel, or a band or block drawn
+    /// as background, such as a class header. `color`'s alpha is the background's own (from the widget's
+    /// `opacity`), which `[general] background_opacity` scales (see [`config::background_alpha`]). Text, graphs,
+    /// lines, and markers stay as they are.
     pub fn fill_background(&mut self, rect: Rect, color: Color) {
         let a = config::background_alpha(color.a, self.style.background);
         if a > 0.0 {
-            self.fill(rect, Color { a, ..color });
+            self.fill_rounded(rect, Color { a, ..color });
         }
     }
 
@@ -597,10 +624,10 @@ impl Canvas<'_> {
             let half = width / 2.0;
             if from.1 == to.1 {
                 let (x0, x1) = (from.0.min(to.0), from.0.max(to.0));
-                self.fill_layer(Rect::new(x0, from.1 - half, x1 - x0, width), color);
+                self.fill_layer(Rect::new(x0, from.1 - half, x1 - x0, width), color, 0.0);
             } else if from.0 == to.0 {
                 let (y0, y1) = (from.1.min(to.1), from.1.max(to.1));
-                self.fill_layer(Rect::new(from.0 - half, y0, width, y1 - y0), color);
+                self.fill_layer(Rect::new(from.0 - half, y0, width, y1 - y0), color, 0.0);
             } else {
                 slanted = true;
                 path_width = width;
@@ -939,45 +966,69 @@ impl Canvas<'_> {
         let mask = ContentMask {
             bounds: self.window_bounds(rect),
         };
-        let hsla = color.hsla();
         let font_size = px(font_size);
-        self.window
-            .with_content_mask(Some(mask), |window| match &line {
-                Line::Shaped(layout) => {
-                    for run in &layout.runs {
-                        for glyph in &run.glyphs {
-                            let at =
-                                point(origin.x + glyph.position.x, origin.y + glyph.position.y);
+        // A shadow one screen pixel down and right, under text the panel does not fully set off from the scene.
+        let shadow = shadow_alpha(self.style.background) * color.a;
+        let step = px(self.logical);
+        let passes = [(step, Color::rgb(0x00_0000, shadow)), (px(0.0), color)];
+        let passes = if shadow > 0.0 {
+            &passes[..]
+        } else {
+            &passes[1..]
+        };
+        self.window.with_content_mask(Some(mask), |window| {
+            for &(offset, color) in passes {
+                let hsla = color.hsla();
+                let origin = point(origin.x + offset, origin.y + offset);
+                match &line {
+                    Line::Shaped(layout) => {
+                        for run in &layout.runs {
+                            for glyph in &run.glyphs {
+                                // An emoji draws in its own colors, so it has no shadow.
+                                if glyph.is_emoji && offset > px(0.0) {
+                                    continue;
+                                }
+                                let at =
+                                    point(origin.x + glyph.position.x, origin.y + glyph.position.y);
+                                let _ = counted!(
+                                    Draw,
+                                    if glyph.is_emoji {
+                                        window.paint_emoji(
+                                            at,
+                                            run.font_id,
+                                            glyph.id,
+                                            layout.font_size,
+                                        )
+                                    } else {
+                                        window.paint_glyph(
+                                            at,
+                                            run.font_id,
+                                            glyph.id,
+                                            layout.font_size,
+                                            hsla,
+                                        )
+                                    }
+                                );
+                            }
+                        }
+                    }
+                    Line::Glyphs {
+                        font_id,
+                        glyphs,
+                        len,
+                        ..
+                    } => {
+                        for &(id, x) in &glyphs[..*len] {
+                            let at = point(origin.x + px(x), origin.y);
                             let _ = counted!(
                                 Draw,
-                                if glyph.is_emoji {
-                                    window.paint_emoji(at, run.font_id, glyph.id, layout.font_size)
-                                } else {
-                                    window.paint_glyph(
-                                        at,
-                                        run.font_id,
-                                        glyph.id,
-                                        layout.font_size,
-                                        hsla,
-                                    )
-                                }
+                                window.paint_glyph(at, *font_id, id, font_size, hsla)
                             );
                         }
                     }
                 }
-                Line::Glyphs {
-                    font_id,
-                    glyphs,
-                    len,
-                    ..
-                } => {
-                    for &(id, x) in &glyphs[..*len] {
-                        let at = point(origin.x + px(x), origin.y);
-                        let _ =
-                            counted!(Draw, window.paint_glyph(at, *font_id, id, font_size, hsla));
-                    }
-                }
-            });
+            }
+        });
     }
 
     /// Whether `text` at `size` fits the width of `rect` (both in widget pixels), as GPUI's text system measures

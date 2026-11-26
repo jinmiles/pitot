@@ -189,7 +189,7 @@ cleared and resolved over the whole window, and each path vertex goes to the GPU
 Every widget is one line of `crates/overlay/src/widgets/list.rs` ([the list](widgets.md)):
 
 ```rust
-wind: WindWidget = Spec::new("Wind", 1460, 370).size(200, 170).rate(10.0).on(),
+wind: WindWidget = Spec::new("Wind", 1456, 344).size(224, 168).rate(10.0).on(),
 ```
 
 `wind` is the module (`widgets/wind.rs`) and the widget's `[widgets.wind]` table; `WindWidget` is the type in that

@@ -16,6 +16,7 @@ use crate::config::{NoOptions, WidgetConfig};
 use crate::pipeline::View;
 use crate::render::{Align, Canvas, Color, Rect};
 
+use super::design::{BODY, GUTTER, LABEL, PAD, divider, empty_line};
 use super::palette::{BEST, DIM, GAIN, LIFT_BAND, LOSS, SURFACE, TEXT};
 use super::standings::write_lap_time;
 use super::text::FixedText;
@@ -25,8 +26,8 @@ use super::{Build, MAX_LAYERS, Redraw, Register, Widget};
 const HEADER_HEIGHT: f32 = 22.0;
 const MAX_ROW_HEIGHT: f32 = 24.0;
 const MIN_ROW_HEIGHT: f32 = 16.0;
-const TEXT_SIZE: f32 = 13.0;
-const LABEL_SIZE: f32 = 11.0;
+const TEXT_SIZE: f32 = BODY;
+const LABEL_SIZE: f32 = LABEL;
 /// Four value columns (without the car behind), and the header with six sectors' rows at their smallest.
 const MIN_SIZE: (u32, u32) = (260, 120);
 /// From this width the fifth column shows, the car behind. A large text size makes the widget narrower in widget
@@ -258,22 +259,22 @@ struct Columns {
 
 impl Columns {
     fn for_width(w: f32) -> Self {
-        let first = 30.0;
+        let first = 32.0;
         let count = if w >= FIVE_COLUMNS_WIDTH { 5 } else { 4 };
         Self {
-            number: 6.0,
+            number: PAD,
             first,
-            width: ((w - first - 6.0) / count as f32).max(0.0),
+            width: ((w - first - PAD + GUTTER) / count as f32).max(0.0),
             count,
         }
     }
 
-    /// The cell of value column `k`, inset so right-aligned values keep a margin.
+    /// The cell of value column `k`, a gutter short of the next, so right-aligned values keep apart.
     fn cell(&self, k: usize, y: f32, h: f32) -> Rect {
         Rect::new(
             self.first + k as f32 * self.width,
             y,
-            (self.width - 6.0).max(0.0),
+            (self.width - GUTTER).max(0.0),
             h,
         )
     }
@@ -571,17 +572,12 @@ impl Widget for SectorsWidget {
                 label(canvas, 4, self.header.behind.as_str(), Align::Right);
             }
         }
-        canvas.fill(
-            Rect::new(0.0, HEADER_HEIGHT - 1.0, w, 1.0),
-            Color::rgb(DIM, 0.3),
-        );
+        divider(canvas, HEADER_HEIGHT - 1.0, w);
         if self.count == 0 {
-            canvas.text(
+            empty_line(
+                canvas,
                 "No sectors yet",
-                Rect::new(cols.first, HEADER_HEIGHT, w - cols.first, MAX_ROW_HEIGHT),
-                TEXT_SIZE,
-                Align::Left,
-                dim,
+                Rect::new(PAD, HEADER_HEIGHT, w - 2.0 * PAD, MAX_ROW_HEIGHT),
             );
             return;
         }
@@ -595,7 +591,10 @@ impl Widget for SectorsWidget {
             }
             // The sector the player is in: a band without a hue, as every row here is the player's.
             if row.current {
-                canvas.fill(Rect::new(0.0, y, w, row_h), Color::rgb(TEXT, LIFT_BAND));
+                canvas.fill_rounded(
+                    Rect::new(PAD / 2.0, y + 1.0, w - PAD, row_h - 2.0),
+                    Color::rgb(TEXT, LIFT_BAND),
+                );
             }
             let alpha = if row.fresh { 1.0 } else { 0.55 };
             canvas.text(

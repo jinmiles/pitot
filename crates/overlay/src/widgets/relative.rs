@@ -24,9 +24,10 @@ use crate::platform;
 use crate::render::{Align, Canvas, Color, Rect};
 
 use super::standings::{maker_letter, short_license, write_clock, write_length};
+use super::design::{BODY, LABEL, PAD, VALUE, divider, label_color};
 use super::palette::{
     CAUTION, CHIP, DIM, LAP_AHEAD, LAP_BEHIND, PIT, PLAYER, PLAYER_BAND, SURFACE, TEXT, UNKNOWN_CLASS,
-    UNKNOWN_LICENSE,
+    UNKNOWN_LICENSE, ink_on,
 };
 use super::text::FixedText;
 use super::trackclock::{SharedTrackClock, TrackClock};
@@ -35,9 +36,9 @@ use super::{Build, MAX_LAYERS, Redraw, Register, Widget};
 /// Rows per 100 px of height: a row is 33⅓ px, so the default 300 px holds the header, three cars on each side of
 /// the player, and the footer. A taller widget shows more cars, a pair at a time; the rows share any height left.
 const ROWS_PER_100_PX: u32 = 3;
-/// Text sizes, the same at any height.
-const FRAME_TEXT: f32 = 14.0;
-const ROW_TEXT: f32 = 15.0;
+/// Text sizes, the same at any height: the header and footer's values, and the cars' rows (read while driving).
+const FRAME_TEXT: f32 = BODY;
+const ROW_TEXT: f32 = VALUE;
 /// Height of the badges and the rating and license boxes in a row.
 const BADGE_HEIGHT: f32 = 56.0 / 3.0;
 /// One car on each side of the player, and room for the name between the left and right columns once the rating
@@ -562,22 +563,25 @@ impl RelativeWidget {
         self.height as f32 / self.slots() as f32
     }
 
+    /// The header (track temperature, incidents, clock) or the footer (lap, time of day, session time), each set
+    /// off from the cars by a divider.
     fn draw_frame_line(&self, canvas: &mut Canvas<'_>, y: f32, top: bool) {
         let (w, row_h) = (self.width as f32, self.row_height());
         let size = FRAME_TEXT;
-        let dim = Color::rgb(DIM, 1.0);
+        let dim = label_color();
         let white = Color::rgb(TEXT, 1.0);
         let f = &self.frame;
         let cell = |x: f32, width: f32| Rect::new(x, y, width, row_h);
         if top {
-            let mut x = 10.0;
+            divider(canvas, y + row_h - 1.0, w);
+            let mut x = PAD;
             let mut pair = |canvas: &mut Canvas<'_>, label: &str, value: &str, unit: &str, width: f32| {
                 if value.is_empty() {
                     return;
                 }
-                canvas.text(label, cell(x, 40.0), size * 0.85, Align::Left, dim);
+                canvas.text(label, cell(x, 40.0), LABEL, Align::Left, dim);
                 canvas.text(value, cell(x + 40.0, width), size, Align::Right, white);
-                canvas.text(unit, cell(x + 41.0 + width, 20.0), size * 0.85, Align::Left, dim);
+                canvas.text(unit, cell(x + 41.0 + width, 20.0), LABEL, Align::Left, dim);
                 x += 70.0 + width;
             };
             // Wide enough for a temperature with one decimal (`58.3`) at the largest text size.
@@ -585,14 +589,15 @@ impl RelativeWidget {
             pair(canvas, "Inc", f.incidents.as_str(), "x", 26.0);
             canvas.text(
                 f.clock.as_str(),
-                cell(w - 70.0, 60.0),
+                cell(w - PAD - 60.0, 60.0),
                 size,
                 Align::Right,
                 white,
             );
         } else {
-            canvas.text("Lap", cell(10.0, 30.0), size * 0.85, Align::Left, dim);
-            canvas.text(f.lap.as_str(), cell(40.0, 30.0), size, Align::Left, white);
+            divider(canvas, y, w);
+            canvas.text("Lap", cell(PAD, 30.0), LABEL, Align::Left, dim);
+            canvas.text(f.lap.as_str(), cell(PAD + 30.0, 30.0), size, Align::Left, white);
             if w >= TIME_OF_DAY_WIDTH {
                 canvas.text(
                     f.time_of_day.as_str(),
@@ -604,14 +609,14 @@ impl RelativeWidget {
             }
             canvas.text(
                 f.session.as_str(),
-                cell(w - 220.0, 90.0),
-                size * 0.85,
+                cell(w - PAD - 212.0, 90.0),
+                LABEL,
                 Align::Right,
                 dim,
             );
             canvas.text(
                 f.session_time.as_str(),
-                cell(w - 126.0, 116.0),
+                cell(w - PAD - 116.0, 116.0),
                 size,
                 Align::Right,
                 white,
@@ -629,26 +634,29 @@ impl RelativeWidget {
         alpha: f32,
     ) {
         let row_h = self.row_height();
-        let small = ROW_TEXT * 0.78;
+        let small = LABEL;
         let badge_y = y + (row_h - BADGE_HEIGHT) / 2.0;
         let cell = |x: f32, width: f32| Rect::new(x, y, width, row_h);
-        canvas.fill(
-            Rect::new(rating_x + 2.0, badge_y, 40.0, BADGE_HEIGHT),
-            Color::rgb(CHIP, 0.9 * alpha),
-        );
-        canvas.text(
-            row.rating.as_str(),
-            cell(rating_x + 2.0, 40.0),
-            small,
-            Align::Center,
-            Color::rgb(SURFACE, alpha),
-        );
+        // No chip for a driver without an iRating (AI drivers, the pace car): an empty chip says nothing.
+        if !row.rating.as_str().is_empty() {
+            canvas.fill_rounded(
+                Rect::new(rating_x + 2.0, badge_y, 40.0, BADGE_HEIGHT),
+                Color::rgb(CHIP, 0.9 * alpha),
+            );
+            canvas.text(
+                row.rating.as_str(),
+                cell(rating_x + 2.0, 40.0),
+                small,
+                Align::Center,
+                Color::rgb(SURFACE, alpha),
+            );
+        }
         if !row.license_class.as_str().is_empty() {
-            canvas.fill(
+            canvas.fill_rounded(
                 Rect::new(license_x, badge_y, 40.0, BADGE_HEIGHT),
                 Color::rgb(row.license_color, 0.9 * alpha),
             );
-            let ink = Color::rgb(TEXT, alpha);
+            let ink = Color::rgb(ink_on(row.license_color), alpha);
             canvas.text(
                 row.license_class.as_str(),
                 cell(license_x + 3.0, 12.0),
@@ -671,10 +679,13 @@ impl RelativeWidget {
         let size = ROW_TEXT;
         // Badges and boxes keep their height, centered in the row.
         let badge_y = y + (row_h - BADGE_HEIGHT) / 2.0;
-        let small = size * 0.78;
+        let small = LABEL;
         let cell = |x: f32, width: f32| Rect::new(x, y, width, row_h);
         if row.player {
-            canvas.fill(Rect::new(0.0, y, w, row_h), Color::rgb(PLAYER, PLAYER_BAND));
+            canvas.fill_rounded(
+                Rect::new(PAD / 2.0, y + 1.0, w - PAD, row_h - 2.0),
+                Color::rgb(PLAYER, PLAYER_BAND),
+            );
         }
         let base = match row.laps {
             Laps::Ahead => LAP_AHEAD,
@@ -687,7 +698,7 @@ impl RelativeWidget {
         let dim = Color::rgb(DIM, alpha);
         canvas.text(
             row.position.as_str(),
-            cell(6.0, 22.0),
+            cell(PAD, 22.0),
             size,
             Align::Right,
             text,
@@ -701,7 +712,7 @@ impl RelativeWidget {
         );
         // Right side, from the edge: gap, maker, iRating, license, then the badges. A narrow widget leaves out the
         // iRating and the license.
-        let gap_x = w - 58.0;
+        let gap_x = w - PAD - 52.0;
         let maker_x = gap_x - 18.0;
         let rating_x = maker_x - 44.0;
         let license_x = rating_x - 44.0;
@@ -729,15 +740,14 @@ impl RelativeWidget {
                 let width = 12.0 + 8.0 * label.chars().count() as f32;
                 badge_x -= width + 4.0;
                 let rect = Rect::new(badge_x, badge_y, width, BADGE_HEIGHT);
-                canvas.fill(rect, Color::rgb(fill, 1.0));
-                if let Some(border) = border {
-                    let (l, t, r, b) = (rect.x, rect.y, rect.x + rect.w, rect.y + rect.h);
-                    let c = Color::rgb(border, 1.0);
-                    canvas.line((l, t), (r, t), 1.0, c);
-                    canvas.line((l, b), (r, b), 1.0, c);
-                    canvas.line((l, t), (l, b), 1.0, c);
-                    canvas.line((r, t), (r, b), 1.0, c);
-                }
+                // A border is the badge drawn a pixel larger in the border's color, under the badge.
+                let inner = if let Some(border) = border {
+                    canvas.fill_rounded(rect, Color::rgb(border, 1.0));
+                    Rect::new(rect.x + 1.0, rect.y + 1.0, rect.w - 2.0, rect.h - 2.0)
+                } else {
+                    rect
+                };
+                canvas.fill_rounded(inner, Color::rgb(fill, 1.0));
                 canvas.text(
                     label,
                     cell(badge_x, width),

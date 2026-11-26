@@ -19,9 +19,10 @@ use crate::pipeline::View;
 use crate::render::{Align, Canvas, Color, Rect};
 
 use super::classes::{ClassLabel, class_label};
+use super::design::{BODY, LABEL, PAD, divider};
 use super::palette::{
     BEST, COMPOUND_HARD, COMPOUND_INTER, COMPOUND_MEDIUM, COMPOUND_SOFT, COMPOUND_WET, DIM, GAIN, LOSS, PLAYER,
-    PLAYER_BAND, RAISED, SURFACE, TEXT, UNKNOWN_CLASS, UNKNOWN_LICENSE,
+    PLAYER_BAND, RAISED, SURFACE, TEXT, UNKNOWN_CLASS, UNKNOWN_LICENSE, ink_on,
 };
 use super::text::FixedText;
 use super::timing::{Gap, RaceClock, SectorClock, SectorStarts};
@@ -29,7 +30,7 @@ use super::trackclock::{SharedTrackClock, TrackClock};
 use super::{Build, MAX_LAYERS, Redraw, Register, Widget};
 
 const ROW_HEIGHT: f32 = 24.0;
-const TEXT_SIZE: f32 = 13.0;
+const TEXT_SIZE: f32 = BODY;
 /// Leaders shown per class, and cars on each side of the player in the player's class, before the rows are filled
 /// (see [`select_rows`]).
 const LEADERS: usize = 3;
@@ -1059,7 +1060,7 @@ impl Columns {
             sector_columns += 1;
         }
         // Lay out from the right edge.
-        let mut x = w - 6.0;
+        let mut x = w - PAD;
         let sectors_x = x - SECTOR_WIDTH * sector_columns as f32;
         x = sectors_x;
         let last = x - LAST_WIDTH;
@@ -1087,7 +1088,7 @@ impl Columns {
         let license = x - 42.0;
         x = license;
         // From the left edge.
-        let position = 8.0;
+        let position = PAD;
         let mut left = position + 24.0;
         let change_x = change.then(|| {
             let at = left;
@@ -1256,17 +1257,18 @@ fn used_rows(rows: &[Row]) -> usize {
 impl StandingsWidget {
     fn draw_header(&self, canvas: &mut Canvas<'_>, y: f32, header: &HeaderRow) {
         let w = self.width as f32;
+        // A band inset from the panel's edges like the player's, with the class's color at its start.
         canvas.fill_background(
-            Rect::new(0.0, y + 1.0, w, ROW_HEIGHT - 2.0),
+            Rect::new(PAD / 2.0, y + 1.0, w - PAD, ROW_HEIGHT - 2.0),
             Color::rgb(RAISED, self.opacity.max(0.6)),
         );
-        canvas.fill(
-            Rect::new(0.0, y + 1.0, 4.0, ROW_HEIGHT - 2.0),
+        canvas.fill_rounded(
+            Rect::new(PAD / 2.0, y + 1.0, 4.0, ROW_HEIGHT - 2.0),
             Color::rgb(header.color, 1.0),
         );
         let white = Color::rgb(TEXT, 1.0);
         let dim = Color::rgb(DIM, 1.0);
-        let mut x = 10.0;
+        let mut x = PAD + 4.0;
         let mut segment = |canvas: &mut Canvas<'_>, text: &str, width: f32, color: Color| {
             if !text.is_empty() && x + width <= w {
                 text_in(
@@ -1325,13 +1327,14 @@ impl StandingsWidget {
     fn draw_car(&self, canvas: &mut Canvas<'_>, y: f32, car: &CarRow, cols: &Columns) {
         let w = self.width as f32;
         if car.player {
-            canvas.fill(
-                Rect::new(0.0, y, w, ROW_HEIGHT),
+            canvas.fill_rounded(
+                Rect::new(PAD / 2.0, y + 1.0, w - PAD, ROW_HEIGHT - 2.0),
                 Color::rgb(PLAYER, PLAYER_BAND),
             );
         }
+        // Rows left out between the class's leaders and the cars around the player.
         if car.break_before {
-            canvas.fill(Rect::new(0.0, y, w, 1.0), Color::rgb(DIM, 0.5));
+            divider(canvas, y, w);
         }
         let text = Color::rgb(TEXT, 1.0);
         let muted = Color::rgb(DIM, 1.0);
@@ -1342,8 +1345,8 @@ impl StandingsWidget {
             text
         };
         let cell = |x: f32, width: f32| Rect::new(x, y, width, ROW_HEIGHT);
-        canvas.fill(
-            Rect::new(0.0, y + 2.0, 4.0, ROW_HEIGHT - 4.0),
+        canvas.fill_rounded(
+            Rect::new(PAD / 2.0, y + 2.0, 3.0, ROW_HEIGHT - 4.0),
             Color::rgb(car.color, 1.0),
         );
         text_in(
@@ -1366,7 +1369,7 @@ impl StandingsWidget {
                 canvas,
                 arrow,
                 cell(x + 2.0, 12.0),
-                10.0,
+                LABEL,
                 Align::Center,
                 Color::rgb(color, 1.0),
             );
@@ -1396,7 +1399,7 @@ impl StandingsWidget {
             own,
         );
         if !car.license.as_str().is_empty() {
-            canvas.fill(
+            canvas.fill_rounded(
                 Rect::new(cols.license, y + 4.0, 38.0, ROW_HEIGHT - 8.0),
                 Color::rgb(car.license_color, 0.85),
             );
@@ -1404,9 +1407,9 @@ impl StandingsWidget {
                 canvas,
                 car.license.as_str(),
                 cell(cols.license, 38.0),
-                12.0,
+                LABEL,
                 Align::Center,
-                Color::rgb(SURFACE, 1.0),
+                Color::rgb(ink_on(car.license_color), 1.0),
             );
         }
         text_in(
@@ -1429,7 +1432,7 @@ impl StandingsWidget {
                 canvas,
                 arrow,
                 cell(x + 4.0, 10.0),
-                9.0,
+                LABEL,
                 Align::Center,
                 Color::rgb(color, 1.0),
             );
@@ -1467,12 +1470,12 @@ impl StandingsWidget {
                 canvas,
                 "GAP",
                 cell(cols.gap, 44.0),
-                11.0,
+                LABEL,
                 Align::Right,
                 muted,
             );
             if let Some(x) = cols.interval {
-                text_in(canvas, "INT", cell(x, 44.0), 11.0, Align::Right, muted);
+                text_in(canvas, "INT", cell(x, 44.0), LABEL, Align::Right, muted);
             }
         } else {
             text_in(

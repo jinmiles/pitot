@@ -15,6 +15,7 @@ use crate::config::{NoOptions, WidgetConfig};
 use crate::pipeline::{View, var_group};
 use crate::render::{Align, Canvas, Color, Rect};
 
+use super::design::{HERO, LABEL, NO_VALUE, PAD, value_color};
 use super::palette::{CAUTION, DIM, LOSS, PLAYER, SURFACE, TEXT};
 use super::text::FixedText;
 use super::{Build, MAX_LAYERS, Redraw, Register, Widget};
@@ -100,7 +101,7 @@ impl Reading {
 
     /// Fills from the wind speed (m/s), the direction it comes from, and the car's heading, any of them unknown.
     fn fill(&mut self, speed: Option<f32>, wind_dir: Option<f32>, heading: Option<f32>) {
-        self.speed.set("--");
+        self.speed.set(NO_VALUE);
         self.arrow = None;
         let heading = heading.filter(|h| h.is_finite());
         self.north = heading.map(|h| step(-h));
@@ -156,7 +157,6 @@ const SPEED_END: f32 = 30.0;
 /// Heights of the text column's two lines: the `Wind` label, and the speed with its unit.
 const LABEL_HEIGHT: f32 = 16.0;
 const VALUE_HEIGHT: f32 = 30.0;
-const PAD: f32 = 8.0;
 /// The text column's lines apart, and a small dial beside it: a default-sized widget at the largest text size.
 const MIN_SIZE: (u32, u32) = (130, 110);
 
@@ -181,7 +181,7 @@ struct ColumnText<'a> {
 /// The text column right of the dial: the `Wind` label above the speed and its unit, the pair centered on the
 /// dial's middle. The direction is the arrow's alone, so nothing here depends on it.
 fn column(reading: &Reading, width: f32, height: f32) -> [ColumnText<'_>; 3] {
-    let x = width - COLUMN - 4.0;
+    let x = width - COLUMN - PAD;
     // The label's line box starts a little below its rectangle's top and the speed's baseline sits a little above
     // its rectangle's bottom by about as much, so centering the rectangles centers the ink.
     let top = height / 2.0 - (LABEL_HEIGHT + VALUE_HEIGHT) / 2.0;
@@ -192,14 +192,14 @@ fn column(reading: &Reading, width: f32, height: f32) -> [ColumnText<'_>; 3] {
         ColumnText {
             text: "Wind",
             rect: Rect::new(x, top, COLUMN, LABEL_HEIGHT),
-            size: 11.0,
+            size: LABEL,
             align: Align::Left,
             dim: true,
         },
         ColumnText {
             text: reading.speed.as_str(),
             rect: Rect::new(x - 12.0, value, 12.0 + SPEED_END, VALUE_HEIGHT),
-            size: 24.0,
+            size: HERO,
             align: Align::Right,
             dim: false,
         },
@@ -207,7 +207,7 @@ fn column(reading: &Reading, width: f32, height: f32) -> [ColumnText<'_>; 3] {
         ColumnText {
             text: "km/h",
             rect: Rect::new(x + unit, value + 6.0, COLUMN - unit, VALUE_HEIGHT),
-            size: 11.0,
+            size: LABEL,
             align: Align::Left,
             dim: true,
         },
@@ -290,7 +290,7 @@ impl Widget for WindWidget {
             canvas.text(
                 "N",
                 Rect::new(x - 8.0, y - 8.0, 16.0, 16.0),
-                11.0,
+                LABEL,
                 Align::Center,
                 dim,
             );
@@ -304,7 +304,13 @@ impl Widget for WindWidget {
         }
 
         for line in column(r, w, h) {
-            let color = if line.dim { dim } else { white };
+            let color = if line.dim {
+                dim
+            } else if line.text == NO_VALUE {
+                value_color(line.text)
+            } else {
+                white
+            };
             canvas.text(line.text, line.rect, line.size, line.align, color);
         }
     }
@@ -378,7 +384,7 @@ mod tests {
     fn reading_without_data_or_wind() {
         let mut r = Reading::new();
         r.fill(None, None, None);
-        assert_eq!(r.speed.as_str(), "--");
+        assert_eq!(r.speed.as_str(), NO_VALUE);
         assert_eq!((r.arrow, r.north), (None, None));
         r.fill(Some(0.1), Some(1.0), Some(0.0));
         assert_eq!(r.speed.as_str(), "0");

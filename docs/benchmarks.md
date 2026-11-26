@@ -35,11 +35,12 @@ monitor's resolution and scaling the same as the primary monitor's, and note the
 
 ## Changes to the reference set
 
-The reference set follows the widgets' default rates, so series measured with an earlier `four.toml` ran some
-widgets at other rates. Compare a series only with series of the same set:
+The reference set follows the widgets' default rates, places, and sizes, so series measured with an earlier
+`four.toml` ran some widgets differently. Compare a series only with series of the same set:
 
 | Change | Before | Since |
 |---|---|---|
+| Default layout and design rules | relative 460 x 300 (7 cars), fuel 420 x 150, backgrounds at 82 | relative 456 x 396 (9 cars), fuel 456 x 148, backgrounds at 80; text shadows, rounded panels |
 | Every widget at least 10 Hz (#181) | standings at 2 Hz | standings at 10 Hz |
 | Fuel widget at 30 Hz by default (#149) | fuel at 1 Hz | fuel at 30 Hz |
 

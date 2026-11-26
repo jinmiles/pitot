@@ -12,6 +12,7 @@
 //! `docs/overlay-rendering.md`.
 
 mod classes;
+mod design;
 #[allow(dead_code, reason = "read by the widgets of later batches")]
 mod gaps;
 #[allow(dead_code, reason = "read by the widgets of later batches")]

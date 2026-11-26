@@ -46,7 +46,8 @@ const BAR_GAP: f32 = 4.0;
 const PEDALS_WIDTH: u32 = 52;
 /// Largest steering wheel icon, in pixels.
 const WHEEL_MAX: u32 = 72;
-const PAD: u32 = 6;
+/// The design's padding ([`super::design::PAD`]) in whole pixels.
+const PAD: u32 = 8;
 /// A second of trace beside the pedal bars and a small wheel.
 const MIN_SIZE: (u32, u32) = (240, 60);
 /// Trace line width.
@@ -226,9 +227,9 @@ impl InputTraceWidget {
         let s = &self.latest;
         for (n, (level, color)) in pedal_bars(s).into_iter().enumerate() {
             let x = bars.x + BAR_GAP + n as f32 * (BAR_W + BAR_GAP);
-            canvas.fill(Rect::new(x, bars.y, BAR_W, bars.h), TRACK);
+            canvas.fill_rounded(Rect::new(x, bars.y, BAR_W, bars.h), TRACK);
             let fill = level.clamp(0.0, 1.0) * bars.h;
-            canvas.fill(Rect::new(x, bars.y + bars.h - fill, BAR_W, fill), color);
+            canvas.fill_rounded(Rect::new(x, bars.y + bars.h - fill, BAR_W, fill), color);
         }
         self.draw_wheel(canvas, s.steering);
         if self.missed > 0 {

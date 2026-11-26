@@ -30,6 +30,7 @@ use crate::pipeline::View;
 use crate::render::{Align, Canvas, Color, Rect};
 
 use super::fuel::{FuelTracker, is_green, laps_to_go};
+use super::design::LABEL;
 use super::palette::{DIM, PLAYER, ROAD, ROAD_EDGE, SURFACE, TEXT, UNKNOWN_CLASS};
 use super::pitstops::{PitTracker, SharedPitTracker, player_index};
 use super::{Build, LayerSpec, MAX_LAYERS, Redraw, Register, Widget};
@@ -65,7 +66,7 @@ const TURN_STEP: usize = 5;
 /// North up unless a turn draws the track this much larger.
 const NORTH_UP_PREFERENCE: f32 = 1.03;
 /// The pit ring's label.
-const TEXT_SIZE: f32 = 11.0;
+const TEXT_SIZE: f32 = LABEL;
 /// A circle with its pit ring and label, or an outline, still clear of the margins.
 const MIN_SIZE: (u32, u32) = (200, 150);
 
