@@ -648,6 +648,8 @@ thread_local! {
     static DRAG: Cell<Option<Drag>> = const { Cell::new(None) };
     static MOVES: RefCell<Vec<WidgetMove>> = const { RefCell::new(Vec::new()) };
     static HANDLES: RefCell<Vec<HandleInfo>> = const { RefCell::new(Vec::new()) };
+    // The other handles on the dragged handle's monitor, which the drag snaps to. They stay put while it lasts.
+    static TARGETS: RefCell<Vec<RECT>> = const { RefCell::new(Vec::new()) };
 }
 
 /// Appends the widget moves since the last call to `out`.
@@ -725,6 +727,126 @@ fn dragged(drag: &Drag, delta: POINT) -> RECT {
             .max(start.top + min_h);
     }
     rect
+}
+
+/// Physical pixels within which a dragged edge snaps to a monitor's edge or another widget's edge.
+const SNAP_DISTANCE: i32 = 10;
+
+/// The bit of a mouse message's `wparam` that is set while Ctrl is held (`MK_CONTROL` in `winuser.h`). Dragging with
+/// Ctrl places a widget freely, without snapping.
+const MK_CONTROL: usize = 0x0008;
+
+/// The handle's rectangle once the pointer moved by `delta`: [`dragged`], then [`snapped`] to its monitor and to
+/// `others` (the other handles on that monitor) unless `free`.
+fn placed(drag: &Drag, delta: POINT, others: &[RECT], free: bool) -> RECT {
+    let rect = dragged(drag, delta);
+    if free {
+        return rect;
+    }
+    snapped(
+        rect,
+        drag.edges,
+        others,
+        drag.bounds,
+        drag.min,
+        SNAP_DISTANCE,
+    )
+}
+
+/// `rect` with its moving `edges` (all four for a move) pulled to the nearest edge within `distance`, on each axis
+/// apart. An edge snaps to the monitor `bounds`' edge on its side, or to either edge of one of `others` that is near
+/// on the other axis (overlapping it, or no more than `distance` away): side by side with it, or lined up with it.
+/// A move keeps the size and stays on the monitor; a resize moves only the dragged edges, never past the monitor's
+/// edge or below the smallest size `min`.
+fn snapped(
+    rect: RECT,
+    edges: Edges,
+    others: &[RECT],
+    bounds: RECT,
+    min: (i32, i32),
+    distance: i32,
+) -> RECT {
+    let beside = |o: &&RECT| near((o.top, o.bottom), (rect.top, rect.bottom), distance);
+    let over = |o: &&RECT| near((o.left, o.right), (rect.left, rect.right), distance);
+    let (left, right) = snap_axis(
+        (rect.left, rect.right),
+        (edges.left, edges.right),
+        others.iter().filter(beside).map(|o| (o.left, o.right)),
+        (bounds.left, bounds.right),
+        min.0,
+        distance,
+    );
+    let (top, bottom) = snap_axis(
+        (rect.top, rect.bottom),
+        (edges.top, edges.bottom),
+        others.iter().filter(over).map(|o| (o.top, o.bottom)),
+        (bounds.top, bounds.bottom),
+        min.1,
+        distance,
+    );
+    RECT {
+        left,
+        top,
+        right,
+        bottom,
+    }
+}
+
+/// [`snapped`] on one axis: the dragged span `(start, end)`, which of its edges move, the spans of the others near
+/// it on the other axis, the monitor's span `(low, high)`, and the smallest length.
+fn snap_axis(
+    (start, end): (i32, i32),
+    moving: (bool, bool),
+    others: impl Iterator<Item = (i32, i32)> + Clone,
+    (low, high): (i32, i32),
+    min: i32,
+    distance: i32,
+) -> (i32, i32) {
+    // The shifts that bring `edge` onto the monitor's edge on its side or onto either edge of another widget.
+    let shifts = |edge: i32, monitor: i32| {
+        std::iter::once(monitor)
+            .chain(others.clone().flat_map(|(a, b)| [a, b]))
+            .map(move |target| target - edge)
+    };
+    match moving {
+        (true, true) => {
+            // Whichever edge is nearer a target snaps; the span keeps its length and its monitor.
+            let allowed = low..=(high - (end - start)).max(low);
+            let all = shifts(start, low).chain(shifts(end, high));
+            let shift = nearest(all.filter(|d| allowed.contains(&(start + d))), distance);
+            (start + shift, end + shift)
+        }
+        (true, false) => {
+            let allowed = low..=end - min;
+            let shift = nearest(
+                shifts(start, low).filter(|d| allowed.contains(&(start + d))),
+                distance,
+            );
+            (start + shift, end)
+        }
+        (false, true) => {
+            let allowed = start + min..=high;
+            let shift = nearest(
+                shifts(end, high).filter(|d| allowed.contains(&(end + d))),
+                distance,
+            );
+            (start, end + shift)
+        }
+        (false, false) => (start, end),
+    }
+}
+
+/// The smallest of `shifts` within `distance` (the first of equal ones), or no shift.
+fn nearest(shifts: impl Iterator<Item = i32>, distance: i32) -> i32 {
+    shifts
+        .filter(|d| d.abs() <= distance)
+        .min_by_key(|d| d.abs())
+        .unwrap_or(0)
+}
+
+/// Whether the spans `a` and `b` overlap or lie no more than `distance` apart.
+fn near(a: (i32, i32), b: (i32, i32), distance: i32) -> bool {
+    a.0.max(b.0) - a.1.min(b.1) <= distance
 }
 
 fn window_rect(hwnd: HWND) -> RECT {
@@ -815,12 +937,27 @@ unsafe extern "system" fn handle_proc(
                 ..Default::default()
             };
             // SAFETY: `hwnd` is live; `monitor` has cbSize set as GetMonitorInfoW requires.
-            let bounds = unsafe {
+            let (on, bounds) = unsafe {
                 let on = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
                 let _ = GetMonitorInfoW(on, &mut monitor);
                 // The widget's layers belong to its monitor's window, so it stays on that monitor.
-                monitor.rcMonitor
+                (on, monitor.rcMonitor)
             };
+            HANDLES.with(|handles| {
+                TARGETS.with(|targets| {
+                    let mut targets = targets.borrow_mut();
+                    targets.clear();
+                    for other in handles.borrow().iter().filter(|i| i.hwnd != hwnd) {
+                        // SAFETY: handles leave the list before their windows are destroyed, so `other.hwnd` is a
+                        // live window of this thread.
+                        let other_on =
+                            unsafe { MonitorFromWindow(other.hwnd, MONITOR_DEFAULTTONEAREST) };
+                        if other_on == on {
+                            targets.push(window_rect(other.hwnd));
+                        }
+                    }
+                });
+            });
             let start = window_rect(hwnd);
             let point = client_point(lparam);
             DRAG.with(|drag| {
@@ -849,7 +986,9 @@ unsafe extern "system" fn handle_proc(
                     x: rect.left + point.x - drag.press.x,
                     y: rect.top + point.y - drag.press.y,
                 };
-                let to = dragged(&drag, delta);
+                // Ctrl places freely; Alt would reach the sim's menu.
+                let free = wparam.0 & MK_CONTROL != 0;
+                let to = TARGETS.with(|targets| placed(&drag, delta, &targets.borrow(), free));
                 if to != rect {
                     let (width, height) = size_of_rect(to);
                     // SAFETY: moves and sizes this thread's window without changing its order or activation.
@@ -1368,6 +1507,345 @@ mod tests {
         assert_eq!(rect(right, 20, 99), (100, 100, 420, 300), "one edge only");
         // A move keeps the size.
         assert_eq!(rect(Edges::MOVE, 20, -500), (120, 0, 420, 200));
+    }
+
+    const MONITOR: RECT = RECT {
+        left: 0,
+        top: 0,
+        right: 1920,
+        bottom: 1080,
+    };
+
+    fn rect(left: i32, top: i32, right: i32, bottom: i32) -> RECT {
+        RECT {
+            left,
+            top,
+            right,
+            bottom,
+        }
+    }
+
+    fn sides(r: RECT) -> (i32, i32, i32, i32) {
+        (r.left, r.top, r.right, r.bottom)
+    }
+
+    fn edges(left: bool, top: bool, right: bool, bottom: bool) -> Edges {
+        Edges {
+            left,
+            top,
+            right,
+            bottom,
+        }
+    }
+
+    /// A move of `r` among `others` on a 1920 x 1080 monitor, snapped.
+    fn snap_move(r: RECT, others: &[RECT]) -> (i32, i32, i32, i32) {
+        sides(snapped(
+            r,
+            Edges::MOVE,
+            others,
+            MONITOR,
+            (100, 50),
+            SNAP_DISTANCE,
+        ))
+    }
+
+    /// A resize of `r`'s `edges` among `others` on a 1920 x 1080 monitor, at least 100 x 50, snapped.
+    fn snap_resize(r: RECT, edges: Edges, others: &[RECT]) -> (i32, i32, i32, i32) {
+        sides(snapped(r, edges, others, MONITOR, (100, 50), SNAP_DISTANCE))
+    }
+
+    #[test]
+    fn moves_snap_to_the_monitor_edges() {
+        assert_eq!(
+            snap_move(rect(7, 500, 307, 600), &[]),
+            (0, 500, 300, 600),
+            "left"
+        );
+        assert_eq!(
+            snap_move(rect(10, 4, 310, 104), &[]),
+            (0, 0, 300, 100),
+            "10 px away snaps, on each axis apart"
+        );
+        assert_eq!(
+            snap_move(rect(1615, 975, 1915, 1075), &[]),
+            (1620, 980, 1920, 1080),
+            "right and bottom"
+        );
+        assert_eq!(
+            snap_move(rect(11, 989, 311, 1069), &[]),
+            (11, 989, 311, 1069),
+            "11 px away does not"
+        );
+        assert_eq!(snap_move(rect(0, 0, 300, 100), &[]), (0, 0, 300, 100));
+        // A widget edge just past the monitor's edge leaves the widget on the monitor.
+        assert_eq!(
+            snap_move(rect(1712, 500, 1916, 600), &[rect(1922, 400, 2100, 700)]),
+            (1716, 500, 1920, 600)
+        );
+    }
+
+    #[test]
+    fn moves_snap_side_by_side_with_near_widgets() {
+        let other = [rect(500, 300, 800, 500)];
+        assert_eq!(
+            snap_move(rect(806, 350, 1006, 450), &other),
+            (800, 350, 1000, 450),
+            "my left to its right"
+        );
+        assert_eq!(
+            snap_move(rect(296, 350, 496, 450), &other),
+            (300, 350, 500, 450),
+            "my right to its left"
+        );
+        assert_eq!(
+            snap_move(rect(550, 507, 750, 607), &other),
+            (550, 500, 750, 600),
+            "my top to its bottom"
+        );
+        assert_eq!(
+            snap_move(rect(550, 192, 750, 292), &other),
+            (550, 200, 750, 300),
+            "my bottom to its top"
+        );
+    }
+
+    #[test]
+    fn moves_line_up_with_near_widgets() {
+        let other = [rect(500, 300, 800, 500)];
+        assert_eq!(
+            snap_move(rect(503, 380, 603, 420), &other),
+            (500, 380, 600, 420),
+            "left to left"
+        );
+        assert_eq!(
+            snap_move(rect(694, 380, 794, 420), &other),
+            (700, 380, 800, 420),
+            "right to right"
+        );
+        assert_eq!(
+            snap_move(rect(600, 297, 700, 347), &other),
+            (600, 300, 700, 350),
+            "top to top"
+        );
+        assert_eq!(
+            snap_move(rect(600, 455, 700, 492), &other),
+            (600, 463, 700, 500),
+            "bottom to bottom"
+        );
+        assert_eq!(
+            snap_move(rect(497, 506, 697, 606), &other),
+            (500, 500, 700, 600),
+            "stacked below it, lined up on the left"
+        );
+    }
+
+    #[test]
+    fn only_widgets_near_on_the_other_axis_pull() {
+        let other = [rect(500, 300, 800, 500)];
+        assert_eq!(
+            snap_move(rect(805, 600, 1005, 700), &other),
+            (805, 600, 1005, 700),
+            "100 px below it, its right edge does not pull my left edge"
+        );
+        assert_eq!(
+            snap_move(rect(805, 511, 1005, 611), &other),
+            (805, 511, 1005, 611),
+            "11 px below it, still not"
+        );
+        assert_eq!(
+            snap_move(rect(805, 510, 1005, 610), &other),
+            (800, 500, 1000, 600),
+            "10 px below it, it does"
+        );
+        assert_eq!(
+            snap_move(rect(280, 296, 480, 396), &other),
+            (280, 296, 480, 396),
+            "20 px to its left, its top does not pull mine"
+        );
+    }
+
+    #[test]
+    fn the_nearest_edge_wins() {
+        let others = [rect(500, 300, 800, 500), rect(810, 400, 1000, 700)];
+        assert_eq!(
+            snap_move(rect(806, 350, 1006, 450), &others),
+            (810, 350, 1010, 450),
+            "4 px to one widget's left edge beats 6 px to the other's right edge"
+        );
+        assert_eq!(
+            snap_move(rect(802, 350, 996, 450), &others),
+            (800, 350, 994, 450),
+            "of a move's two edges, the nearer one snaps"
+        );
+        assert_eq!(
+            snap_move(rect(6, 600, 206, 700), &[rect(209, 550, 400, 800)]),
+            (9, 600, 209, 700),
+            "a widget 3 px away beats the monitor's edge 6 px away"
+        );
+    }
+
+    #[test]
+    fn resizing_snaps_only_the_dragged_edges() {
+        let other = [rect(500, 150, 800, 400)];
+        // The left edge near the monitor's and the bottom near the widget's bottom are not dragged and stay.
+        assert_eq!(
+            snap_resize(
+                rect(5, 100, 495, 403),
+                edges(false, false, true, false),
+                &other
+            ),
+            (5, 100, 500, 403),
+            "the right edge touches its left"
+        );
+        assert_eq!(
+            snap_resize(
+                rect(806, 100, 1200, 300),
+                edges(true, false, false, false),
+                &other
+            ),
+            (800, 100, 1200, 300),
+            "the left edge touches its right"
+        );
+        assert_eq!(
+            snap_resize(
+                rect(600, 407, 700, 700),
+                edges(false, true, false, false),
+                &other
+            ),
+            (600, 400, 700, 700),
+            "the top lines up with its bottom"
+        );
+        assert_eq!(
+            snap_resize(
+                rect(100, 0, 794, 146),
+                edges(false, false, true, true),
+                &other
+            ),
+            (100, 0, 800, 150),
+            "a corner snaps on both axes"
+        );
+    }
+
+    #[test]
+    fn resizing_limits_win_over_snapping() {
+        let left = edges(true, false, false, false);
+        // At the smallest width (100), a widget edge 5 px further in does not pull the left edge.
+        assert_eq!(
+            snap_resize(rect(200, 100, 300, 300), left, &[rect(100, 0, 205, 400)]),
+            (200, 100, 300, 300)
+        );
+        assert_eq!(
+            snap_resize(
+                rect(200, 100, 300, 300),
+                left,
+                &[rect(100, 0, 205, 400), rect(50, 0, 193, 90)]
+            ),
+            (193, 100, 300, 300),
+            "a farther edge that keeps the smallest size does"
+        );
+        assert_eq!(
+            snap_resize(
+                rect(100, 100, 300, 150),
+                edges(false, false, false, true),
+                &[rect(0, 145, 90, 300)]
+            ),
+            (100, 100, 300, 150),
+            "the smallest height"
+        );
+        assert_eq!(
+            snap_resize(
+                rect(1500, 100, 1920, 300),
+                edges(false, false, true, false),
+                &[rect(1600, 300, 1915, 500)]
+            ),
+            (1500, 100, 1920, 300),
+            "an edge held at the monitor's edge stays"
+        );
+    }
+
+    #[test]
+    fn ctrl_places_freely() {
+        let drag = |edges| Drag {
+            hwnd: HWND::default(),
+            id: 0,
+            edges,
+            start: rect(100, 100, 300, 200),
+            press: POINT { x: 150, y: 150 },
+            bounds: MONITOR,
+            min: (100, 50),
+        };
+        let others = [rect(500, 100, 700, 300)];
+        let delta = POINT { x: 196, y: -96 };
+        let moved = |free| sides(placed(&drag(Edges::MOVE), delta, &others, free));
+        assert_eq!(
+            moved(false),
+            (300, 0, 500, 100),
+            "the right edge touches the widget, the top the monitor's edge"
+        );
+        assert_eq!(moved(true), (296, 4, 496, 104), "with Ctrl");
+        // Resizing past the smallest width, the right edge stops at it, then snaps out to the widget 5 px away.
+        let narrow = |free| {
+            let drag = drag(edges(false, false, true, false));
+            let others = [rect(205, 0, 400, 100)];
+            sides(placed(&drag, POINT { x: -150, y: 0 }, &others, free))
+        };
+        assert_eq!(narrow(false), (100, 100, 205, 200));
+        assert_eq!(narrow(true), (100, 100, 200, 200), "with Ctrl");
+    }
+
+    #[test]
+    fn a_dragged_handle_snaps_and_ctrl_frees_it() {
+        // Hidden, so nothing shows. They are on the primary monitor, whose top-left corner is (0, 0), and far from
+        // its other edges.
+        let create = |id, x, y, width, height| {
+            let rect = ScreenRect {
+                x,
+                y,
+                width,
+                height,
+            };
+            MoveHandle::create_shown(id, rect, (20, 20), false).expect("handle")
+        };
+        let handle = create(1, 200, 200, 100, 50);
+        let _other = create(2, 420, 180, 80, 120);
+        let lparam = |x: i32, y: i32| LPARAM(((y as isize) << 16) | (x as isize & 0xFFFF));
+        let send = |msg, keys: usize, x, y| {
+            // SAFETY: sends a mouse message to a window of this thread; its procedure runs synchronously.
+            unsafe { SendMessageW(handle.hwnd, msg, Some(WPARAM(keys)), Some(lparam(x, y))) };
+        };
+        let at = || sides(window_rect(handle.hwnd));
+        // Pressed at (250, 225) on the screen. Mouse messages carry the pointer relative to the handle as it is.
+        send(WM_LBUTTONDOWN, 0, 50, 25);
+        // 114 px right: the right edge, 6 px from the other handle's left edge, touches it.
+        send(WM_MOUSEMOVE, 0, 164, 25);
+        assert_eq!(at(), (320, 200, 420, 250));
+        // 116 px right with Ctrl: where the pointer says.
+        send(WM_MOUSEMOVE, MK_CONTROL, 46, 25);
+        assert_eq!(at(), (316, 200, 416, 250));
+        // To 7 px from the monitor's left edge and 4 px from its top: the corner.
+        send(WM_MOUSEMOVE, 0, -259, -171);
+        assert_eq!(at(), (0, 0, 100, 50));
+        send(WM_LBUTTONUP, 0, 0, 0);
+        let mut moves = Vec::new();
+        take_moves(&mut moves);
+        let moved = |x, y, done| WidgetMove {
+            id: 1,
+            x,
+            y,
+            width: 100,
+            height: 50,
+            done,
+        };
+        assert_eq!(
+            moves,
+            [
+                moved(320, 200, false),
+                moved(316, 200, false),
+                moved(0, 0, false),
+                moved(0, 0, true)
+            ]
+        );
     }
 
     #[test]

@@ -13,9 +13,11 @@ own executable again with `--window`.
   update waits, an *Update to vX.Y.Z* button sits below it ([Updates](#updates)). Both stay in place; the
   sections below them scroll when they do not fit.
 - **Overlay**: whether the overlay runs, with *Show widgets* (off is the tray menu's *Hide widgets*) and *Move
-  widgets* (the tray menu's *Move widgets*, which places and resizes widgets with the mouse). A change on either
-  side shows on the other at once. When no overlay runs, a *Start the overlay* row starts the overlay
-  (`pitot.exe` without arguments).
+  widgets* (the tray menu's *Move widgets*, which places and resizes widgets with the mouse and snaps them to the
+  display's edges and to each other: see
+  [Moving and resizing widgets](configuration.md#moving-and-resizing-widgets)). A change on either side shows on
+  the other at once. When no overlay runs, a *Start the overlay* row starts the overlay (`pitot.exe` without
+  arguments).
 - **Display**: where the widgets show. One row per choice, with a round mark on the right that is filled, and a
   tinted row, for the current one:
   - *Primary display (follow Windows)*, with which display that is now (*Now Display 1 · DELL P2419H*). It leaves

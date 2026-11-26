@@ -171,6 +171,14 @@ corner.
 - **Resize**: drag an edge (6 px wide) or a corner (16 px along each edge, the grip among them); the cursor shows
   which. The widget takes the new size as it is dragged. It stays on its monitor and gets no smaller than its
   smallest size (below) at the current [text size](#text-size). The opposite edges stay where they are.
+- **Snapping**: a dragged edge that comes within 10 px (physical pixels) of an edge it can snap to lands exactly on
+  it. Those edges are the monitor's edges and the edges of the other widgets on the same monitor, so a widget can
+  sit side by side with another (its left edge on the other's right edge, its top on the other's bottom, and so on)
+  or line up with it (left with left, top with top, and so on). Another widget's edges count only when it is near
+  on the other axis: beside or overlapping it, or no more than 10 px away; the monitor's edges always count. Each
+  axis snaps on its own, to the nearest such edge. A move keeps the size and snaps whichever of the widget's two
+  edges on an axis is nearer an edge; a resize snaps only the dragged edges, and the monitor's edge and the smallest
+  size still stop it. Hold **Ctrl** while dragging to place a widget freely, without snapping.
 
 Releasing the button saves what changed to `config.toml`: `x` and `y` after a move, `width` and `height` after a
 resize, and all four when a left or top edge moved. Only those numbers change in the file, so comments and layout
