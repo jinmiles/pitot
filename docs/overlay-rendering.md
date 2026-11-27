@@ -76,7 +76,10 @@ that both use GPUI, and left for a later change.
   or resize cursor for the spot under the pointer, and captures the mouse while the button is held. Dragging the
   inside moves the handle and the widget's window. Dragging an edge or a corner resizes the handle, within its
   monitor and down to the widget's `min_size()`; the app calls the widget's `resize`, resizes its window, and GPUI
-  draws it. Releasing the button saves what changed ([configuration](configuration.md#moving-and-resizing-widgets)).
+  draws it. On button down the handle notes the rectangles of the other handles on its monitor; each
+  `WM_MOUSEMOVE` then snaps the dragged edges within 10 px to the monitor's edges and to those rectangles, unless
+  its `wparam` has `MK_CONTROL` (Ctrl held). Releasing the button saves what changed
+  ([configuration](configuration.md#moving-and-resizing-widgets)).
   The widget windows themselves stay click-through. The handles are made after the widget windows, so they are
   above them.
 - `WM_CLOSE` to the tray window or to a widget window quits like Quit, so tools that close apps the usual way (End
