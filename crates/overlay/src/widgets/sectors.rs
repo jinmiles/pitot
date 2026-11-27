@@ -16,6 +16,8 @@ use crate::config::{NoOptions, WidgetConfig};
 use crate::pipeline::View;
 use crate::render::{Align, Canvas, Color, Rect};
 
+use super::design::{BODY, GUTTER, LABEL, PAD, divider, empty_line};
+use super::palette::{BEST, DIM, GAIN, LIFT_BAND, LOSS, SURFACE, TEXT};
 use super::standings::write_lap_time;
 use super::text::FixedText;
 use super::timing::{MAX_SECTORS, SectorClock, SectorStarts};
@@ -24,8 +26,8 @@ use super::{Build, MAX_LAYERS, Redraw, Register, Widget};
 const HEADER_HEIGHT: f32 = 22.0;
 const MAX_ROW_HEIGHT: f32 = 24.0;
 const MIN_ROW_HEIGHT: f32 = 16.0;
-const TEXT_SIZE: f32 = 13.0;
-const LABEL_SIZE: f32 = 11.0;
+const TEXT_SIZE: f32 = BODY;
+const LABEL_SIZE: f32 = LABEL;
 /// Four value columns (without the car behind), and the header with six sectors' rows at their smallest.
 const MIN_SIZE: (u32, u32) = (260, 120);
 /// From this width the fifth column shows, the car behind. A large text size makes the widget narrower in widget
@@ -43,13 +45,6 @@ const SAME_TIME: f32 = 5e-4;
 /// Gains and losses smaller than this are shown as even.
 const EVEN: f32 = 0.005;
 
-const WHITE: u32 = 0xF0_F2F5;
-const DIM: u32 = 0xA0_A6AE;
-const GREEN: u32 = 0x3D_D68C;
-const RED: u32 = 0xFF_6B5E;
-const PURPLE: u32 = 0xB4_5CFF;
-const BACKGROUND: u32 = 0x10_1418;
-const HIGHLIGHT: u32 = 0x2F_6F7A;
 
 /// A sector time: seconds to the millisecond under a minute (`32.456`), else `m:ss.sss`.
 fn write_sector_time(out: &mut FixedText, seconds: f32) {
@@ -264,22 +259,22 @@ struct Columns {
 
 impl Columns {
     fn for_width(w: f32) -> Self {
-        let first = 30.0;
+        let first = 32.0;
         let count = if w >= FIVE_COLUMNS_WIDTH { 5 } else { 4 };
         Self {
-            number: 6.0,
+            number: PAD,
             first,
-            width: ((w - first - 6.0) / count as f32).max(0.0),
+            width: ((w - first - PAD + GUTTER) / count as f32).max(0.0),
             count,
         }
     }
 
-    /// The cell of value column `k`, inset so right-aligned values keep a margin.
+    /// The cell of value column `k`, a gutter short of the next, so right-aligned values keep apart.
     fn cell(&self, k: usize, y: f32, h: f32) -> Rect {
         Rect::new(
             self.first + k as f32 * self.width,
             y,
-            (self.width - 6.0).max(0.0),
+            (self.width - GUTTER).max(0.0),
             h,
         )
     }
@@ -542,7 +537,7 @@ impl Widget for SectorsWidget {
         let (w, h) = (self.width as f32, self.height as f32);
         canvas.fill_background(
             Rect::new(0.0, 0.0, w, h),
-            Color::rgb(BACKGROUND, self.opacity),
+            Color::rgb(SURFACE, self.opacity),
         );
         let cols = Columns::for_width(w);
         let dim = Color::rgb(DIM, 1.0);
@@ -577,17 +572,12 @@ impl Widget for SectorsWidget {
                 label(canvas, 4, self.header.behind.as_str(), Align::Right);
             }
         }
-        canvas.fill(
-            Rect::new(0.0, HEADER_HEIGHT - 1.0, w, 1.0),
-            Color::rgb(DIM, 0.3),
-        );
+        divider(canvas, HEADER_HEIGHT - 1.0, w);
         if self.count == 0 {
-            canvas.text(
+            empty_line(
+                canvas,
                 "No sectors yet",
-                Rect::new(cols.first, HEADER_HEIGHT, w - cols.first, MAX_ROW_HEIGHT),
-                TEXT_SIZE,
-                Align::Left,
-                dim,
+                Rect::new(PAD, HEADER_HEIGHT, w - 2.0 * PAD, MAX_ROW_HEIGHT),
             );
             return;
         }
@@ -599,8 +589,12 @@ impl Widget for SectorsWidget {
             if y + row_h <= area.y || y >= area.y + area.h || y + row_h > h + 0.5 {
                 continue;
             }
+            // The sector the player is in: a band without a hue, as every row here is the player's.
             if row.current {
-                canvas.fill(Rect::new(0.0, y, w, row_h), Color::rgb(HIGHLIGHT, 0.45));
+                canvas.fill_rounded(
+                    Rect::new(PAD / 2.0, y + 1.0, w - PAD, row_h - 2.0),
+                    Color::rgb(TEXT, LIFT_BAND),
+                );
             }
             let alpha = if row.fresh { 1.0 } else { 0.55 };
             canvas.text(
@@ -611,9 +605,9 @@ impl Widget for SectorsWidget {
                 dim,
             );
             let time_color = match row.mark {
-                Mark::Class => PURPLE,
-                Mark::Personal => GREEN,
-                Mark::None => WHITE,
+                Mark::Class => BEST,
+                Mark::Personal => GAIN,
+                Mark::None => TEXT,
             };
             canvas.text(
                 row.time.as_str(),
@@ -628,13 +622,13 @@ impl Widget for SectorsWidget {
                     cols.cell(k, y, row_h),
                     TEXT_SIZE,
                     Align::Right,
-                    Color::rgb(WHITE, alpha),
+                    Color::rgb(TEXT, alpha),
                 );
             }
             for (k, gap) in [(3, &row.ahead), (4, &row.behind)].into_iter().take(cols.count - 3) {
                 let color = match gap.sign {
-                    -1 => GREEN,
-                    1 => RED,
+                    -1 => GAIN,
+                    1 => LOSS,
                     _ => DIM,
                 };
                 canvas.text(

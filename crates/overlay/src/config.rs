@@ -92,7 +92,7 @@ pub const DEFAULT_TOML: &str = r#"# Pitot overlay configuration. Changes apply w
 # The Pitot window opens when the overlay starts. With start_in_tray = true, only the tray icon shows; clicking
 # it opens the window.
 # background_opacity sets how opaque the widgets' backgrounds are, from 0 (none) to 100 (opaque); text and
-# graphs stay as they are. At 82 each widget uses its own opacity below. The Pitot window's slider saves it here.
+# graphs stay as they are. At 80 each widget uses its own opacity below. The Pitot window's slider saves it here.
 # text_size sets the widgets' text in percent, from 70 to 150, with the rows, columns, and spacing around it; the
 # widgets keep their width and height, so larger text fits fewer rows. The Pitot window's slider saves it here.
 # check_updates lets the Pitot window of an installed Pitot look for a newer release on GitHub when it opens and
@@ -100,7 +100,7 @@ pub const DEFAULT_TOML: &str = r#"# Pitot overlay configuration. Changes apply w
 [general]
 font = "Segoe UI"
 start_in_tray = false
-background_opacity = 82
+background_opacity = 80
 text_size = 100
 check_updates = true
 
@@ -119,85 +119,85 @@ folder = ""
 
 [widgets.status]
 enabled = true
-x = 24
-y = 24
-opacity = 0.82
+x = 8
+y = 8
+opacity = 0.80
 
 [widgets.inputs]
 enabled = true
 x = 660
-y = 900
+y = 952
 width = 600
 height = 120
 rate_hz = 60.0
-opacity = 0.82
+opacity = 0.80
 
 [widgets.relative]
 enabled = true
-x = 1460
-y = 560
-width = 460
-height = 300
+x = 1456
+y = 520
+width = 456
+height = 396
 rate_hz = 10.0
-opacity = 0.82
+opacity = 0.80
 
 [widgets.standings]
 enabled = true
-x = 24
-y = 260
-width = 760
+x = 8
+y = 100
+width = 744
 height = 560
 rate_hz = 10.0
-opacity = 0.82
+opacity = 0.80
 
 [widgets.fuel]
 enabled = true
-x = 1460
-y = 900
-width = 420
-height = 150
+x = 1456
+y = 924
+width = 456
+height = 148
 rate_hz = 30.0
-opacity = 0.82
+opacity = 0.80
 
 # Other cars' pit stops: standing time, the fuel it allows, and the pit lane loss. See docs/pit.md.
 [widgets.pit]
 enabled = true
-x = 800
-y = 240
+x = 760
+y = 216
 width = 400
 height = 280
 rate_hz = 10.0
-opacity = 0.82
+opacity = 0.80
 
 # The player's time in each sector against their best, the class's best, and the cars ahead and behind.
 [widgets.sectors]
 enabled = true
-x = 800
-y = 24
+x = 760
+y = 8
 width = 400
 height = 200
 rate_hz = 10.0
-opacity = 0.82
+opacity = 0.80
 
 [widgets.wind]
 enabled = true
-x = 1460
-y = 370
-width = 200
-height = 170
+x = 1456
+y = 344
+width = 224
+height = 168
 rate_hz = 10.0
-opacity = 0.82
+opacity = 0.80
 
 # Wear and carcass temperatures are from the last pit stall visit: the sim updates them only there. In replays,
 # surface temperatures from the sim's telemetry files.
 [widgets.tires]
 enabled = true
-x = 1680
-y = 370
-width = 220
-height = 170
+x = 1688
+y = 344
+width = 224
+height = 168
 rate_hz = 10.0
-opacity = 0.82
+opacity = 0.80
 
 # The track map. shape = "circle" places the cars around a circle by lap distance, from the first moment of a
 # session. shape = "outline" draws the track's outline once you have driven one clean lap of it, and keeps it in
@@ -205,12 +205,12 @@ opacity = 0.82
 [widgets.trackmap]
 enabled = true
 shape = "circle"
-x = 1460
-y = 24
-width = 440
-height = 330
+x = 1456
+y = 8
+width = 456
+height = 328
 rate_hz = 10.0
-opacity = 0.82
+opacity = 0.80
 "#;
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -273,14 +273,17 @@ pub fn text_scale(percent: u8) -> f32 {
 }
 
 /// `[general] background_opacity` when the file leaves it out: every widget's background at its own `opacity`.
-pub const DEFAULT_BACKGROUND_OPACITY: u8 = 82;
+pub const DEFAULT_BACKGROUND_OPACITY: u8 = 80;
+
+/// A widget's `opacity` when its table leaves it out: at the default `background_opacity`, its panel's alpha.
+pub const DEFAULT_WIDGET_OPACITY: f32 = 0.80;
 
 /// The highest `[general] background_opacity`: opaque backgrounds.
 pub const MAX_BACKGROUND_OPACITY: u8 = 100;
 
 /// The alpha of a background fill whose own alpha is `base` (a widget's `opacity`, or a band drawn over its panel)
 /// at `[general] background_opacity` = `percent`. At [`DEFAULT_BACKGROUND_OPACITY`] it is `base`; below, it falls
-/// in proportion to 0 at 0; above, it rises in proportion to 1 at 100. A widget at the default `opacity` (0.82)
+/// in proportion to 0 at 0; above, it rises in proportion to 1 at 100. A widget at the default `opacity` (0.80)
 /// gets the percent itself as its panel's alpha. Percents above 100 count as 100.
 pub fn background_alpha(base: f32, percent: u8) -> f32 {
     let base = base.clamp(0.0, 1.0);
@@ -393,7 +396,7 @@ impl Spec {
             width: None,
             height: None,
             rate_hz: None,
-            opacity: 0.82,
+            opacity: DEFAULT_WIDGET_OPACITY,
             options: normalize_options::<NoOptions>,
         }
     }
@@ -1148,22 +1151,63 @@ mod tests {
         );
     }
 
-    /// The first ten widgets' defaults as they were before the registry: on, in this order, at these places,
-    /// sizes, and rates (the rates since raised to at least [`MIN_RATE_HZ`]).
+    /// The default layout fits a 1920 x 1080 monitor 8 px inside its edges, on a 4 px grid, with every widget at
+    /// least 8 px from every other at any text size: nothing overlaps.
+    #[test]
+    fn the_default_layout_fits_full_hd_without_overlaps() {
+        let config = Config::default();
+        // The status widget has no size in the file and grows with the text: 300 x 54 at 100%, so the most it
+        // takes is at the largest text size. The others keep their boxes at every text size.
+        let largest = text_scale(MAX_TEXT_SIZE);
+        let rects: Vec<(&str, i32, i32, i32, i32)> = config
+            .widgets()
+            .filter(|(_, w)| w.enabled)
+            .map(|(name, w)| {
+                let (width, height) = match (w.width, w.height) {
+                    (Some(width), Some(height)) => (width as i32, height as i32),
+                    _ => (
+                        (300.0 * largest).ceil() as i32,
+                        (54.0 * largest).ceil() as i32,
+                    ),
+                };
+                (name, w.x, w.y, width, height)
+            })
+            .collect();
+        for &(name, x, y, w, h) in &rects {
+            assert!(x >= 8 && y >= 8, "{name} inside the margin");
+            assert!(x + w <= 1912 && y + h <= 1072, "{name} inside the margin");
+            assert!(x % 4 == 0 && y % 4 == 0, "{name} on the grid");
+            if name != "status" {
+                assert!(w % 4 == 0 && h % 4 == 0, "{name} on the grid");
+            }
+        }
+        for (i, a) in rects.iter().enumerate() {
+            for b in &rects[i + 1..] {
+                let apart = a.1 + a.3 + 8 <= b.1
+                    || b.1 + b.3 + 8 <= a.1
+                    || a.2 + a.4 + 8 <= b.2
+                    || b.2 + b.4 + 8 <= a.2;
+                assert!(apart, "{} and {} are at least 8 px apart", a.0, b.0);
+            }
+        }
+    }
+
+    /// The first ten widgets' defaults: on, in this order, in the default layout, at these rates (raised to at
+    /// least [`MIN_RATE_HZ`]).
     #[test]
     fn the_first_widgets_keep_their_defaults() {
         type Defaults = (&'static str, i32, i32, Option<(u32, u32)>, Option<f32>);
         let before: [Defaults; 10] = [
-            ("status", 24, 24, None, None),
-            ("inputs", 660, 900, Some((600, 120)), Some(60.0)),
-            ("relative", 1460, 560, Some((460, 300)), Some(10.0)),
-            ("standings", 24, 260, Some((760, 560)), Some(10.0)),
-            ("fuel", 1460, 900, Some((420, 150)), Some(30.0)),
-            ("pit", 800, 240, Some((400, 280)), Some(10.0)),
-            ("sectors", 800, 24, Some((400, 200)), Some(10.0)),
-            ("wind", 1460, 370, Some((200, 170)), Some(10.0)),
-            ("tires", 1680, 370, Some((220, 170)), Some(10.0)),
-            ("trackmap", 1460, 24, Some((440, 330)), Some(10.0)),
+            ("status", 8, 8, None, None),
+            ("inputs", 660, 952, Some((600, 120)), Some(60.0)),
+            ("relative", 1456, 520, Some((456, 396)), Some(10.0)),
+            ("standings", 8, 100, Some((744, 560)), Some(10.0)),
+            ("fuel", 1456, 924, Some((456, 148)), Some(30.0)),
+            ("pit", 760, 216, Some((400, 280)), Some(10.0)),
+            ("sectors", 760, 8, Some((400, 200)), Some(10.0)),
+            ("wind", 1456, 344, Some((224, 168)), Some(10.0)),
+            ("tires", 1688, 344, Some((224, 168)), Some(10.0)),
+            ("trackmap", 1456, 8, Some((456, 328)), Some(10.0)),
         ];
         let config = Config::default();
         let names: Vec<&str> = config.widgets().map(|(name, _)| name).take(10).collect();
@@ -1178,7 +1222,7 @@ mod tests {
             assert_eq!((w.x, w.y, w.monitor), (x, y, None), "{name}");
             assert_eq!((w.width, w.height), size.unzip(), "{name}");
             assert_eq!(w.rate_hz, rate_hz, "{name}");
-            assert_eq!(w.opacity, 0.82, "{name}");
+            assert_eq!(w.opacity, DEFAULT_WIDGET_OPACITY, "{name}");
         }
         let shape: toml::Table = "shape = \"circle\"".parse().expect("table");
         assert_eq!(widget(&config, "trackmap").options, shape);
@@ -1223,7 +1267,7 @@ mod tests {
                 "[widgets.wind]\nenabled = false",
             )
             .replace("shape = \"circle\"", "shape = \"outline\"")
-            .replace("x = 1460\ny = 560", "x = 1300\ny = 500\nmonitor = 2");
+            .replace("x = 1456\ny = 520", "x = 1300\ny = 500\nmonitor = 2");
         let config = Config::parse(&older).expect("parses");
         assert!(!widget(&config, "wind").enabled);
         assert_eq!(
@@ -1313,11 +1357,11 @@ mod tests {
     fn missing_fields_keep_defaults() {
         let config = Config::parse("[widgets.fuel]\nx = 10\nmonitor = 2\n").expect("parses");
         let fuel = widget(&config, "fuel");
-        assert_eq!((fuel.x, fuel.y), (10, 900), "y keeps the fuel default");
-        assert_eq!(fuel.width, Some(420));
+        assert_eq!((fuel.x, fuel.y), (10, 924), "y keeps the fuel default");
+        assert_eq!(fuel.width, Some(456));
         assert_eq!(fuel.monitor, Some(2));
         assert!(fuel.enabled);
-        assert_eq!(fuel.opacity, 0.82);
+        assert_eq!(fuel.opacity, DEFAULT_WIDGET_OPACITY);
         assert_eq!(
             widget(&config, "relative"),
             widget(&Config::default(), "relative")
@@ -1463,7 +1507,7 @@ mod tests {
             .zip(placed.lines())
             .filter(|(a, b)| a != b)
             .collect();
-        assert_eq!(changed, [("x = 24", "x = 1200"), ("y = 260", "y = -40")]);
+        assert_eq!(changed, [("x = 8", "x = 1200"), ("y = 100", "y = -40")]);
         assert_eq!(DEFAULT_TOML.lines().count(), placed.lines().count());
 
         let commented = "[widgets.fuel]\nx = 5 # left edge\ny = 6\n";
@@ -1518,7 +1562,7 @@ mod tests {
         let relative = Config::parse(&sized).expect("parses");
         let relative = widget(&relative, "relative");
         assert_eq!((relative.width, relative.height), (Some(520), Some(410)));
-        assert_eq!((relative.x, relative.y), (1460, 560), "the place stays");
+        assert_eq!((relative.x, relative.y), (1456, 520), "the place stays");
         let changed: Vec<(&str, &str)> = DEFAULT_TOML
             .lines()
             .zip(sized.lines())
@@ -1527,8 +1571,8 @@ mod tests {
         assert_eq!(
             changed,
             [
-                ("width = 460", "width = 520"),
-                ("height = 300", "height = 410")
+                ("width = 456", "width = 520"),
+                ("height = 396", "height = 410")
             ]
         );
         assert_eq!(DEFAULT_TOML.lines().count(), sized.lines().count());
@@ -1670,7 +1714,7 @@ mod tests {
                 .expect("parses")
                 .general
                 .background_opacity,
-            82,
+            80,
             "left out"
         );
         let config = Config::parse("[general]\nbackground_opacity = 0\n").expect("parses");
@@ -1697,7 +1741,7 @@ mod tests {
     #[test]
     fn background_opacity_maps_onto_each_widgets_own() {
         // At the default every background keeps its own alpha exactly, so nothing changes for existing files.
-        for base in [0.0, 0.3, 0.6, 0.82, 1.0] {
+        for base in [0.0, 0.3, 0.6, 0.8, 1.0] {
             assert_eq!(background_alpha(base, DEFAULT_BACKGROUND_OPACITY), base);
             assert_eq!(background_alpha(base, 0), 0.0, "{base}: none at 0");
             assert!(
@@ -1706,21 +1750,21 @@ mod tests {
             );
         }
         // A panel at the default `opacity` gets the percent itself.
-        for percent in [0u8, 10, 41, 82, 90, 100] {
-            let alpha = background_alpha(0.82, percent);
+        for percent in [0u8, 10, 40, 80, 90, 100] {
+            let alpha = background_alpha(DEFAULT_WIDGET_OPACITY, percent);
             assert!(
                 (alpha - f32::from(percent) / 100.0).abs() < 1e-6,
                 "{percent}: {alpha}"
             );
         }
         // Halfway down halves a band's own alpha; halfway up closes half the gap to opaque.
-        assert!((background_alpha(0.6, 41) - 0.3).abs() < 1e-6);
-        assert!((background_alpha(0.6, 91) - 0.8).abs() < 1e-6);
+        assert!((background_alpha(0.6, 40) - 0.3).abs() < 1e-6);
+        assert!((background_alpha(0.6, 90) - 0.8).abs() < 1e-6);
         // Rising with the percent, and clamped at both ends.
         let alphas: Vec<f32> = (0..=100).map(|p| background_alpha(0.5, p)).collect();
         assert!(alphas.windows(2).all(|w| w[0] <= w[1]), "monotonic");
         assert_eq!(background_alpha(0.5, 200), background_alpha(0.5, 100));
-        assert_eq!(background_alpha(1.5, 82), 1.0);
+        assert_eq!(background_alpha(1.5, 80), 1.0);
         assert_eq!(background_alpha(-0.5, 100), 1.0);
     }
 
@@ -1741,11 +1785,11 @@ mod tests {
             .collect();
         assert_eq!(
             changed,
-            [("background_opacity = 82", "background_opacity = 40")]
+            [("background_opacity = 80", "background_opacity = 40")]
         );
         assert_eq!(DEFAULT_TOML.lines().count(), edited.lines().count());
         assert_eq!(
-            with_background_opacity(&edited, 82).expect("edited"),
+            with_background_opacity(&edited, 80).expect("edited"),
             DEFAULT_TOML,
             "back to the default gives the same file"
         );
@@ -1802,7 +1846,7 @@ mod tests {
             let config = Config::parse(&format!("[general]\ntext_size = {ok}\n")).expect("parses");
             assert_eq!(config.general.text_size, ok);
             assert_eq!(
-                config.general.background_opacity, 82,
+                config.general.background_opacity, DEFAULT_BACKGROUND_OPACITY,
                 "{ok}: others keep defaults"
             );
         }
@@ -1908,7 +1952,7 @@ mod tests {
         assert_eq!(config.general.text_size, 140);
         assert_eq!(
             widget(&config, "relative").width,
-            Some(460),
+            Some(456),
             "the widgets' boxes stay"
         );
         assert!(!path.with_extension("toml.tmp").exists());
@@ -1992,7 +2036,7 @@ mod tests {
         assert_eq!(config.general.background_opacity, 25);
         assert_eq!(
             widget(&config, "fuel").opacity,
-            0.82,
+            DEFAULT_WIDGET_OPACITY,
             "the widgets' own stay"
         );
         assert!(!path.with_extension("toml.tmp").exists());

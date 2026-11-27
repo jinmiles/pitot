@@ -79,20 +79,24 @@ sets it; it can also be edited here.
 
 ```toml
 # background_opacity sets how opaque the widgets' backgrounds are, from 0 (none) to 100 (opaque); text and
-# graphs stay as they are. At 82 each widget uses its own opacity below. The Pitot window's slider saves it here.
+# graphs stay as they are. At 80 each widget uses its own opacity below. The Pitot window's slider saves it here.
 [general]
-background_opacity = 82
+background_opacity = 80
 ```
 
-- `background_opacity`: a whole number from 0 to 100. Left out, it is 82, which draws every widget as before the
-  setting existed.
+- `background_opacity`: a whole number from 0 to 100. Left out, it is 80, at which every widget's panel is drawn
+  at its own `opacity` (0.80 by default). Files written before 80 was the default keep their 82 and 0.82, which
+  now draws panels a little more opaque than the default (0.84).
+- Text has a shadow one pixel down and right that grows as backgrounds fade: none on an opaque panel, light at
+  80, and strong with no background at all, so text stays readable over a bright scene
+  ([design language](design-language.md#legibility)).
 - Only backgrounds change: each widget's panel, the standings' class header bands, and the tire widget's corner
   blocks. Text, numbers, graphs and their bar tracks, lines, badges and chips, class colour bars, the highlights
   that mark the player's row (relative, standings, pit stops) and the current sector, the track map's road and
   car dots, and the tire temperature swatches stay as they are.
-- Each background keeps its own alpha as a base: the widget's `opacity` (0.82 by default) for its panel, and the
+- Each background keeps its own alpha as a base: the widget's `opacity` (0.80 by default) for its panel, and the
   band's own for a band drawn over the panel (the standings' header bands use the widget's `opacity`, at least
-  0.6). At 82 every background is drawn at its base. Below 82 it fades in proportion, to nothing at 0; above 82
+  0.6). At 80 every background is drawn at its base. Below 80 it fades in proportion, to nothing at 0; above 80
   it rises in proportion to opaque at 100. A panel at the default `opacity` therefore has the percent as its
   opacity: 50 draws it at 0.50, 100 at 1.0. A widget given its own `opacity` keeps its difference from the others
   between the ends.
@@ -290,7 +294,7 @@ At every sim disconnect and at exit, the line also carries the data path's count
 font = "Segoe UI"
 monitor = 1  # every widget's monitor, counted as below; leave out for the primary monitor
 start_in_tray = false  # true: do not open the Pitot window at start
-background_opacity = 82  # every widget's background, 0 (none) to 100 (opaque); 82 is each widget's opacity
+background_opacity = 80  # every widget's background, 0 (none) to 100 (opaque); 80 is each widget's opacity
 text_size = 100  # every widget's text and the rows and columns around it, 70 to 150 percent
 check_updates = true  # false: the Pitot window does not look for updates
 
@@ -298,11 +302,11 @@ check_updates = true  # false: the Pitot window does not look for updates
 enabled = true
 monitor = 1     # count from the left, 0 is the leftmost; leave out for [general] monitor
 x = 660         # physical pixels from the monitor's top-left corner
-y = 900
+y = 952
 width = 600
 height = 120
 rate_hz = 60.0  # updates per second, 10 to 120; leave out for the widget's own rate
-opacity = 0.82  # background opacity, 0 to 1, at the default background_opacity
+opacity = 0.80  # background opacity, 0 to 1, at the default background_opacity
 ```
 
 The widgets, their names, and their pages are listed in [widgets.md](widgets.md). Widgets added after the first ten

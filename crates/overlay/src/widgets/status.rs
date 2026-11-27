@@ -7,7 +7,7 @@ use crate::config::NoOptions;
 use crate::pipeline::{Display, View};
 use crate::render::{Align, Canvas, Color, Rect};
 
-use super::{Build, MAX_LAYERS, Redraw, Register, Widget};
+use super::{Build, MAX_LAYERS, Redraw, Register, Widget, design, palette};
 
 const WIDTH: u32 = 300;
 const HEIGHT: u32 = 54;
@@ -27,7 +27,7 @@ pub struct StatusWidget {
 
 impl Default for StatusWidget {
     fn default() -> Self {
-        Self::new(0.82)
+        Self::new(crate::config::DEFAULT_WIDGET_OPACITY)
     }
 }
 
@@ -110,27 +110,27 @@ impl Widget for StatusWidget {
         let (w, h) = (self.width as f32, self.height as f32);
         canvas.fill_background(
             Rect::new(0.0, 0.0, w, h),
-            Color::rgb(0x10_1418, self.opacity),
+            Color::rgb(palette::SURFACE, self.opacity),
         );
         let accent = match self.display {
-            Display::Driving => Color::rgb(0x3D_D68C, 1.0),
-            Display::Idle | Display::Replay => Color::rgb(0xF2_C14E, 1.0),
-            Display::Disconnected => Color::rgb(0x8A_9099, 1.0),
+            Display::Driving => Color::rgb(palette::GAIN, 1.0),
+            Display::Idle | Display::Replay => Color::rgb(palette::CAUTION, 1.0),
+            Display::Disconnected => Color::rgb(palette::FAINT, 1.0),
         };
-        canvas.fill(Rect::new(0.0, 0.0, 4.0, h), accent);
+        canvas.fill_rounded(Rect::new(design::PAD / 2.0, 4.0, 4.0, h - 8.0), accent);
         canvas.text(
             "PITOT",
             Rect::new(14.0, 4.0, 120.0, 22.0),
-            14.0,
+            design::BODY,
             Align::Left,
-            Color::WHITE,
+            Color::rgb(palette::TEXT, 1.0),
         );
         canvas.text(
             &self.line,
             Rect::new(14.0, 26.0, w - 20.0, 22.0),
-            12.0,
+            design::LABEL,
             Align::Left,
-            Color::rgb(0xD0_D4DA, 1.0),
+            Color::rgb(palette::DIM, 1.0),
         );
     }
 

@@ -12,7 +12,7 @@ use crate::config::{NoOptions, WidgetConfig};
 use crate::pipeline::{InputSample, View};
 use crate::render::{Canvas, Color, Rect};
 
-use super::{Build, LayerSpec, MAX_LAYERS, Redraw, Register, Widget};
+use super::{Build, LayerSpec, MAX_LAYERS, Redraw, Register, Widget, palette};
 
 /// The line of one input through the samples `range` of the trace: from the sample before the first (or the first,
 /// at the ring's start) to the last, `level` giving each sample's height from 0 to 1.
@@ -46,19 +46,21 @@ const BAR_GAP: f32 = 4.0;
 const PEDALS_WIDTH: u32 = 52;
 /// Largest steering wheel icon, in pixels.
 const WHEEL_MAX: u32 = 72;
-const PAD: u32 = 6;
+/// The design's padding ([`super::design::PAD`]) in whole pixels.
+const PAD: u32 = 8;
 /// A second of trace beside the pedal bars and a small wheel.
 const MIN_SIZE: (u32, u32) = (240, 60);
 /// Trace line width.
 const LINE: f32 = 2.5;
 
-const THROTTLE: Color = Color::rgb(0x3D_D68C, 1.0);
-const BRAKE: Color = Color::rgb(0xF0_524F, 1.0);
-const ABS: Color = Color::rgb(0xFF_D23F, 1.0);
-const CLUTCH: Color = Color::rgb(0x4E_A6F2, 1.0);
-const STEERING: Color = Color::rgb(0xC8_CCD2, 0.8);
-const WHEEL: Color = Color::rgb(0xF0_F2F5, 1.0);
-const WHEEL_MARK: Color = Color::rgb(0xFF_8A3D, 1.0);
+const THROTTLE: Color = Color::rgb(palette::THROTTLE, 1.0);
+const BRAKE: Color = Color::rgb(palette::BRAKE, 1.0);
+const ABS: Color = Color::rgb(palette::CAUTION, 1.0);
+const CLUTCH: Color = Color::rgb(palette::CLUTCH, 1.0);
+const STEERING: Color = Color::rgb(palette::DIM, 0.9);
+const WHEEL: Color = Color::rgb(palette::TEXT, 1.0);
+/// The wheel's top: the player's steering, in the player's color.
+const WHEEL_MARK: Color = Color::rgb(palette::PLAYER, 1.0);
 const GRID: Color = Color::rgb(0xFF_FFFF, 0.08);
 const TRACK: Color = Color::rgb(0xFF_FFFF, 0.10);
 
@@ -214,7 +216,7 @@ impl InputTraceWidget {
         let (w, h) = (self.width as f32, self.height as f32);
         canvas.fill_background(
             Rect::new(0.0, 0.0, w, h),
-            Color::rgb(0x10_1418, self.opacity),
+            Color::rgb(palette::SURFACE, self.opacity),
         );
         let t = self.trace;
         for level in [0.25, 0.5, 0.75] {
@@ -225,9 +227,9 @@ impl InputTraceWidget {
         let s = &self.latest;
         for (n, (level, color)) in pedal_bars(s).into_iter().enumerate() {
             let x = bars.x + BAR_GAP + n as f32 * (BAR_W + BAR_GAP);
-            canvas.fill(Rect::new(x, bars.y, BAR_W, bars.h), TRACK);
+            canvas.fill_rounded(Rect::new(x, bars.y, BAR_W, bars.h), TRACK);
             let fill = level.clamp(0.0, 1.0) * bars.h;
-            canvas.fill(Rect::new(x, bars.y + bars.h - fill, BAR_W, fill), color);
+            canvas.fill_rounded(Rect::new(x, bars.y + bars.h - fill, BAR_W, fill), color);
         }
         self.draw_wheel(canvas, s.steering);
         if self.missed > 0 {
@@ -478,7 +480,7 @@ mod tests {
         })[1]
             .1;
         assert!(
-            abs.r > 0.9 && abs.g > 0.75 && abs.b < 0.4,
+            abs.r > 0.85 && abs.g > 0.7 && abs.b < abs.g - 0.3,
             "brake turns yellow under ABS"
         );
     }

@@ -20,6 +20,8 @@ use crate::config::{NoOptions, WidgetConfig};
 use crate::pipeline::{Display, Source, TireSample, Vars, View};
 use crate::render::{Align, Canvas, Color, Rect};
 
+use super::design::{BODY, GUTTER, LABEL, PAD};
+use super::palette::{CAUTION, COLD, DIM, GAIN, LOSS, RAISED, SURFACE, TEXT};
 use super::text::FixedText;
 use super::{Build, MAX_LAYERS, Redraw, Register, Widget};
 
@@ -106,12 +108,7 @@ impl PitWatch {
 
 /// Blue when cold, green in the usual window, yellow then red when hot, for carcass temperatures in °C.
 pub(crate) fn temperature_color(celsius: f32) -> u32 {
-    const STOPS: [(f32, u32); 4] = [
-        (50.0, 0x4F_A3FF),
-        (75.0, 0x3D_D68C),
-        (95.0, 0xFF_D24D),
-        (110.0, 0xFF_4D4D),
-    ];
+    const STOPS: [(f32, u32); 4] = [(50.0, COLD), (75.0, GAIN), (95.0, CAUTION), (110.0, LOSS)];
     if celsius.is_nan() || celsius <= STOPS[0].0 {
         return STOPS[0].1;
     }
@@ -135,11 +132,11 @@ fn mix(a: u32, b: u32, t: f32) -> u32 {
 /// White with most of the tread left, yellow at half wear, red when nearly worn through.
 pub(crate) fn wear_color(remaining: f32) -> u32 {
     if remaining >= 0.8 {
-        WHITE
+        TEXT
     } else if remaining >= 0.6 {
         CAUTION
     } else {
-        SHORT
+        LOSS
     }
 }
 
@@ -210,11 +207,12 @@ impl Corner {
     }
 }
 
+/// Writes `value`, or leaves `out` blank when it is not known: the blocks are tables, and a table leaves unknown
+/// values blank.
 fn write_or_dash(out: &mut FixedText, value: Option<f32>, write: impl FnOnce(&mut FixedText, f32)) {
     out.clear();
-    match value {
-        Some(v) => write(out, v),
-        None => out.push("--"),
+    if let Some(v) = value {
+        write(out, v);
     }
 }
 
@@ -404,32 +402,32 @@ impl TiresWidget {
     fn draw_corner(&self, c: usize, canvas: &mut Canvas<'_>) {
         let corner = &self.shown.corners[c];
         let block = self.corner_rect(c);
-        canvas.fill_background(block, Color::rgb(BLOCK, self.opacity));
+        canvas.fill_background(block, Color::rgb(RAISED, self.opacity));
         let cell_w = block.w / ZONES as f32;
         let lines = if block.h >= THREE_LINES_BLOCK { 3.0 } else { 2.0 };
         let row_h = block.h / lines;
         let replay = self.shown.mode == Mode::Replay;
         // Undated values may be from the garage or a stop before the overlay started.
         let strength = if self.shown.dated { 0.85 } else { 0.35 };
-        let ink = if self.shown.dated { BLOCK } else { WHITE };
+        let ink = if self.shown.dated { RAISED } else { TEXT };
         // A line shows its three numbers only when each has room, so a narrow block leaves the line out whole rather
         // than some of its numbers; the swatches' colors still show the temperatures.
         let room = Rect::new(0.0, 0.0, cell_w, row_h);
         let mut fit = |texts: &[FixedText; ZONES]| {
             texts
                 .iter()
-                .all(|t| canvas.fits(t.as_str(), room, 14.0))
+                .all(|t| canvas.fits(t.as_str(), room, BODY))
         };
         let (temps, wear) = (fit(&corner.temps), fit(&corner.wear));
         for z in 0..ZONES {
             let cell = Rect::new(block.x + z as f32 * cell_w, block.y, cell_w, row_h);
             let swatch = Rect::new(cell.x + 1.0, cell.y + 1.0, cell.w - 2.0, cell.h - 2.0);
-            canvas.fill(swatch, Color::rgb(corner.temp_colors[z], strength));
+            canvas.fill_rounded(swatch, Color::rgb(corner.temp_colors[z], strength));
             if temps {
                 canvas.text(
                     corner.temps[z].as_str(),
                     cell,
-                    14.0,
+                    BODY,
                     Align::Center,
                     Color::rgb(ink, 1.0),
                 );
@@ -440,7 +438,7 @@ impl TiresWidget {
                 canvas.text(
                     corner.wear[z].as_str(),
                     cell,
-                    14.0,
+                    BODY,
                     Align::Center,
                     Color::rgb(corner.wear_colors[z], alpha),
                 );
@@ -453,9 +451,9 @@ impl TiresWidget {
         canvas.text(
             corner.distance.as_str(),
             distance,
-            12.0,
+            LABEL,
             Align::Right,
-            Color::rgb(WHITE, 1.0),
+            Color::rgb(TEXT, 1.0),
         );
         let unit = Rect::new(
             distance.x + distance.w + 3.0,
@@ -464,7 +462,7 @@ impl TiresWidget {
             row_h,
         );
         let unit_name = if replay { "kPa" } else { "km" };
-        canvas.text(unit_name, unit, 12.0, Align::Left, Color::rgb(DIM, 1.0));
+        canvas.text(unit_name, unit, LABEL, Align::Left, Color::rgb(DIM, 1.0));
     }
 
     fn draw_header(&self, canvas: &mut Canvas<'_>) {
@@ -479,22 +477,22 @@ impl TiresWidget {
             canvas.text(
                 s.compound.as_str(),
                 Rect::new(x, 0.0, w * 0.32, HEADER_HEIGHT),
-                12.0,
+                LABEL,
                 Align::Left,
-                Color::rgb(WHITE, 1.0),
+                Color::rgb(TEXT, 1.0),
             );
         }
         // A narrow header shows the compound and where the values are from, without the sets and the pit lap.
         let full = w >= FULL_HEADER_WIDTH;
         if full && !s.sets.as_str().is_empty() {
             let label = Rect::new(w * 0.40, 0.0, 30.0, HEADER_HEIGHT);
-            canvas.text("Sets", label, 12.0, Align::Left, dim);
+            canvas.text("Sets", label, LABEL, Align::Left, dim);
             canvas.text(
                 s.sets.as_str(),
                 Rect::new(label.x + label.w, 0.0, w * 0.2, HEADER_HEIGHT),
-                12.0,
+                LABEL,
                 Align::Left,
-                Color::rgb(WHITE, 1.0),
+                Color::rgb(TEXT, 1.0),
             );
         }
         // Where the wear and temperatures are from: the replayed moment, a stop on a known lap, or an unknown
@@ -504,7 +502,7 @@ impl TiresWidget {
             canvas.text(
                 "Replay",
                 right,
-                12.0,
+                LABEL,
                 Align::Right,
                 Color::rgb(CAUTION, 1.0),
             );
@@ -516,27 +514,26 @@ impl TiresWidget {
             canvas.text(
                 s.taken.as_str(),
                 number,
-                12.0,
+                LABEL,
                 Align::Right,
-                Color::rgb(WHITE, 1.0),
+                Color::rgb(TEXT, 1.0),
             );
             canvas.text(
                 "Pit lap",
                 Rect::new(right.x, 0.0, right.w - 29.0, HEADER_HEIGHT),
-                12.0,
+                LABEL,
                 Align::Right,
                 dim,
             );
         } else {
-            canvas.text("Last pit", right, 12.0, Align::Right, dim);
+            canvas.text("Last pit", right, LABEL, Align::Right, dim);
         }
     }
 }
 
-/// Header height and the margins around the tire blocks, in pixels.
+/// Header height and the space between the tire blocks, in pixels.
 const HEADER_HEIGHT: f32 = 22.0;
-const PAD: f32 = 8.0;
-const GAP: f32 = 6.0;
+const GAP: f32 = GUTTER;
 /// Each tire block's temperatures and wear; a temperature without room is left out and its color shows.
 const MIN_SIZE: (u32, u32) = (140, 110);
 /// From this width the header has room for the tire sets and the pit lap beside the compound. A large text size
@@ -545,12 +542,6 @@ const FULL_HEADER_WIDTH: f32 = 200.0;
 /// From this height a tire block shows its third line, the distance or the pressure.
 const THREE_LINES_BLOCK: f32 = 54.0;
 
-const WHITE: u32 = 0xF0_F2F5;
-const DIM: u32 = 0xA0_A6AE;
-const CAUTION: u32 = 0xFF_D24D;
-const SHORT: u32 = 0xFF_6B5E;
-const BACKGROUND: u32 = 0x10_1418;
-const BLOCK: u32 = 0x1C_2229;
 
 /// Compound colors by `TireCompoundType`, as in the standings.
 fn compound_color(compound: &str) -> u32 {
@@ -608,7 +599,7 @@ impl Widget for TiresWidget {
         let (w, h) = (self.width as f32, self.height as f32);
         canvas.fill_background(
             Rect::new(0.0, 0.0, w, h),
-            Color::rgb(BACKGROUND, self.opacity),
+            Color::rgb(SURFACE, self.opacity),
         );
         self.draw_header(canvas);
         for c in 0..CORNERS {
@@ -680,31 +671,29 @@ mod tests {
 
     #[test]
     fn temperatures_run_from_blue_to_red() {
-        assert_eq!(temperature_color(20.0), 0x4F_A3FF);
-        assert_eq!(temperature_color(75.0), 0x3D_D68C);
-        assert_eq!(temperature_color(130.0), 0xFF_4D4D);
-        assert_eq!(temperature_color(f32::NAN), 0x4F_A3FF);
+        assert_eq!(temperature_color(20.0), COLD);
+        assert_eq!(temperature_color(75.0), GAIN);
+        assert_eq!(temperature_color(130.0), LOSS);
+        assert_eq!(temperature_color(f32::NAN), COLD);
         let between = temperature_color(85.0);
-        assert!(
-            between != 0x3D_D68C && between != 0xFF_D24D,
-            "{between:06x}"
-        );
+        assert!(between != GAIN && between != CAUTION, "{between:06x}");
     }
 
     #[test]
     fn compounds_are_named_in_any_case() {
-        assert_eq!(compound_color("Soft"), 0xFF_4D4D);
-        assert_eq!(compound_color("WET"), 0x4F_A3FF);
-        assert_eq!(compound_color("Intermediate"), 0x3D_D68C);
-        assert_eq!(compound_color("Hard"), 0xE8_EAED);
-        assert_eq!(compound_color(""), 0xE8_EAED);
+        use crate::widgets::palette::{COMPOUND_HARD, COMPOUND_INTER, COMPOUND_SOFT, COMPOUND_WET};
+        assert_eq!(compound_color("Soft"), COMPOUND_SOFT);
+        assert_eq!(compound_color("WET"), COMPOUND_WET);
+        assert_eq!(compound_color("Intermediate"), COMPOUND_INTER);
+        assert_eq!(compound_color("Hard"), COMPOUND_HARD);
+        assert_eq!(compound_color(""), COMPOUND_HARD);
     }
 
     #[test]
     fn wear_turns_yellow_then_red() {
-        assert_eq!(wear_color(0.97), WHITE);
+        assert_eq!(wear_color(0.97), TEXT);
         assert_eq!(wear_color(0.7), CAUTION);
-        assert_eq!(wear_color(0.4), SHORT);
+        assert_eq!(wear_color(0.4), LOSS);
     }
 
     #[test]

@@ -123,15 +123,19 @@ that both use GPUI, and left for a later change.
 
 ## Text
 
-- Text is in Segoe UI semibold, one line per call, painted glyph by glyph (`Window::paint_glyph`) from GPUI's
-  glyph atlas, which rasterizes each glyph once per size.
+- Text is in Segoe UI bold, one line per call, painted glyph by glyph (`Window::paint_glyph`) from GPUI's glyph
+  atlas, which rasterizes each glyph once per size. All ten digits of Segoe UI bold have one width, so a number
+  that changes keeps its width and does not move in its column. (In Segoe UI semibold, which the widgets used
+  before, a `1` is 28% narrower than a `0`. Bold and regular are the weights of Segoe UI whose digits all have one
+  width; see [design language](design-language.md).)
 - Numbers (lines made only of digits, signs, separators, `%`, `#`, `k`, `L`, and spaces, up to 24 characters) are
   put together from glyphs measured once per font size: each character is laid out alone by GPUI's text system the
   first time it is drawn at a size, and a line places each glyph where the advances of those before it end. In
-  Segoe UI semibold these characters have no kerning or contextual forms between them: shaped whole by GPUI,
-  every pair and triple of them at the font sizes of every text size gives the same glyphs, each exactly at that
-  position, and the same width (checked when this was written, 233,184 lines). So numbers that change, such as
-  gaps and times, draw without a DirectWrite layout or an allocation.
+  Segoe UI bold these characters have no kerning or contextual forms between them: shaped whole by GPUI,
+  every pair and triple of them at the font sizes of every text size (at display scales of 100, 125, and 150%)
+  gives the same drawn glyphs, each exactly at that position, and the same width (checked when the font was
+  chosen, 1,426,194 lines; GPUI gives no glyph for a trailing space, which draws nothing). So numbers that change,
+  such as gaps and times, draw without a DirectWrite layout or an allocation.
 - Other text is laid out by GPUI's text system (DirectWrite underneath) and kept by the window, per font size,
   while it is drawn in every paint; text not drawn in a paint is let go at its end. GPUI would keep its own layouts
   for a frame too, but finding them again costs a copy of the string and lookups per line, every paint.
@@ -185,7 +189,7 @@ cleared and resolved over the whole window, and each path vertex goes to the GPU
 Every widget is one line of `crates/overlay/src/widgets/list.rs` ([the list](widgets.md)):
 
 ```rust
-wind: WindWidget = Spec::new("Wind", 1460, 370).size(200, 170).rate(10.0).on(),
+wind: WindWidget = Spec::new("Wind", 1456, 344).size(224, 168).rate(10.0).on(),
 ```
 
 `wind` is the module (`widgets/wind.rs`) and the widget's `[widgets.wind]` table; `WindWidget` is the type in that

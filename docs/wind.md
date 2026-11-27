@@ -4,7 +4,7 @@ Shows the wind as one value, its speed in km/h, and, on a dial that turns with t
 relative to it. The direction is shown by the dial's arrow only; it is not written out as a compass point.
 Updates at 10 Hz by default.
 
-- **Dial**: the car's nose is at the top (orange mark). The arrow runs from the side the wind comes from to the
+- **Dial**: the car's nose is at the top (amber mark, the player's color). The arrow runs from the side the wind comes from to the
   side it blows to: pointing down is a headwind, up a tailwind, sideways a crosswind. Its color follows the
   speed: grey below 10 km/h, white below 25, yellow below 40, red above. Below 1 km/h the air counts as calm and
   there is no arrow, and without the car's heading there is none either. The dial's north mark (`N`) and the

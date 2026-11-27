@@ -6,7 +6,7 @@
 [general]
 font = "Segoe UI"
 start_in_tray = true
-background_opacity = 82
+background_opacity = 80
 text_size = 100
 check_updates = false
 
@@ -16,11 +16,11 @@ enabled = false
 [widgets.inputs]
 enabled = true
 x = 660
-y = 900
+y = 952
 width = 600
 height = 120
 rate_hz = 60.0
-opacity = 0.82
+opacity = 0.80
 
 [widgets.relative]
 enabled = false

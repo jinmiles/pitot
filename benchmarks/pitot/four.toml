@@ -7,7 +7,7 @@
 [general]
 font = "Segoe UI"
 start_in_tray = true
-background_opacity = 82
+background_opacity = 80
 text_size = 100
 check_updates = false
 
@@ -17,38 +17,38 @@ enabled = false
 [widgets.inputs]
 enabled = true
 x = 660
-y = 900
+y = 952
 width = 600
 height = 120
 rate_hz = 60.0
-opacity = 0.82
+opacity = 0.80
 
 [widgets.relative]
 enabled = true
-x = 1460
-y = 560
-width = 460
-height = 300
+x = 1456
+y = 520
+width = 456
+height = 396
 rate_hz = 10.0
-opacity = 0.82
+opacity = 0.80
 
 [widgets.standings]
 enabled = true
-x = 24
-y = 260
-width = 760
+x = 8
+y = 100
+width = 744
 height = 560
 rate_hz = 10.0
-opacity = 0.82
+opacity = 0.80
 
 [widgets.fuel]
 enabled = true
-x = 1460
-y = 900
-width = 420
-height = 150
+x = 1456
+y = 924
+width = 456
+height = 148
 rate_hz = 30.0
-opacity = 0.82
+opacity = 0.80
 
 [widgets.pit]
 enabled = false

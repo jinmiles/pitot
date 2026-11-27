@@ -56,7 +56,7 @@ Car rows, left to right:
 - per sector, the car's last time in that sector minus the player's (green when the car was slower, red when
   faster), as many sectors as fit.
 
-The player's row is highlighted. The pace car and spectators are left out. Optional columns are dropped when the
+The player's row has an amber band, and their position and name are amber. The pace car and spectators are left out. Optional columns are dropped when the
 widget is too narrow: sectors first, then the iRating change, interval, places gained, maker, and tires.
 
 The standings show no badges in any session: no `PIT`, `OUT`, or flags, and rows of cars on pit road look like

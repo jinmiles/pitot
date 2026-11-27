@@ -5,7 +5,8 @@ Every widget, in the order the [Pitot window](control-window.md) lists them. The
 once its switch in the Pitot window is turned on, or `enabled = true` is set in its table.
 
 How a widget is added: [Adding a widget](overlay-rendering.md#adding-a-widget). Each new widget adds one row at
-the end of this table (rows added on different branches merge without conflicts).
+the end of this table (rows added on different branches merge without conflicts). Widgets draw in the font and
+colors of the [design language](design-language.md).
 
 | Name | In the Pitot window | On by default | Page |
 |---|---|---|---|

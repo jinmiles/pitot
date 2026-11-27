@@ -6,7 +6,7 @@ and the cars directly ahead and behind in class order. Updated at 10 Hz by defau
 ## Layout
 
 One row per sector of the track (`SplitTimeInfo`), under a header with the column names and the car numbers of
-the two neighbours (`#12`). The row of the sector the player is in is highlighted. A box narrower than 340 px leaves
+the two neighbours (`#12`). The row of the sector the player is in has a lighter band. A box narrower than 340 px leaves
 out the Behind column, and the header shows the car numbers only when a column is at least 64 px wide (at a
 [text size](configuration.md#text-size) of 150, the default box is 267 widget pixels wide: four columns).
 

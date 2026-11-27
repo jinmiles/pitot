@@ -8,7 +8,7 @@
 //! (see `outline`), saved per track in the tracks folder so later sessions have it at once. It is drawn once into
 //! the bottom layer. The dots go on the layer above, which is drawn again only when a dot moved.
 //!
-//! An orange ring marks where the player would rejoin after a stop made now: the player's lap distance moved back by
+//! An amber ring (the player's color) marks where the player would rejoin after a stop made now: the player's lap distance moved back by
 //! the stop's expected loss (pit lane loss plus the service time for the fuel needed, from the pit tracker shared with
 //! the pit widget) at the player's lap time. It shows once the pit lane loss is measured at the track.
 //!
@@ -30,6 +30,8 @@ use crate::pipeline::View;
 use crate::render::{Align, Canvas, Color, Rect};
 
 use super::fuel::{FuelTracker, is_green, laps_to_go};
+use super::design::LABEL;
+use super::palette::{DIM, PLAYER, ROAD, ROAD_EDGE, SURFACE, TEXT, UNKNOWN_CLASS};
 use super::pitstops::{PitTracker, SharedPitTracker, player_index};
 use super::{Build, LayerSpec, MAX_LAYERS, Redraw, Register, Widget};
 use outline::{Builder, Motion, Progress};
@@ -64,16 +66,10 @@ const TURN_STEP: usize = 5;
 /// North up unless a turn draws the track this much larger.
 const NORTH_UP_PREFERENCE: f32 = 1.03;
 /// The pit ring's label.
-const TEXT_SIZE: f32 = 11.0;
+const TEXT_SIZE: f32 = LABEL;
 /// A circle with its pit ring and label, or an outline, still clear of the margins.
 const MIN_SIZE: (u32, u32) = (200, 150);
 
-const BACKGROUND: u32 = 0x10_1418;
-const ROAD: u32 = 0x6A_727E;
-const ROAD_EDGE: u32 = 0x05_0607;
-const WHITE: u32 = 0xF0_F2F5;
-const DIM: u32 = 0xA0_A6AE;
-const PLAYER: u32 = 0xFF_B347;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Kind {
@@ -511,7 +507,7 @@ impl TrackMapWidget {
             self.next.push(Dot {
                 x: snap_half(x),
                 y: snap_half(y),
-                color: info.and_then(|d| d.car_class_color).unwrap_or(WHITE),
+                color: info.and_then(|d| d.car_class_color).unwrap_or(UNKNOWN_CLASS),
                 kind,
             });
         }
@@ -569,7 +565,7 @@ impl TrackMapWidget {
         for &start in &self.ticks[..self.tick_count] {
             across(canvas, start, road / 2.0 + 3.0, 1.5, Color::rgb(DIM, 0.9));
         }
-        across(canvas, 0.0, road * 1.3, 2.5, Color::rgb(WHITE, 1.0));
+        across(canvas, 0.0, road * 1.3, 2.5, Color::rgb(TEXT, 1.0));
     }
 
     fn draw_outline(&self, canvas: &mut Canvas<'_>) {
@@ -609,7 +605,7 @@ impl TrackMapWidget {
                 (a[0] - nx, a[1] - ny),
                 (a[0] + nx, a[1] + ny),
                 2.5,
-                Color::rgb(WHITE, 1.0),
+                Color::rgb(TEXT, 1.0),
             );
         }
     }
@@ -631,7 +627,7 @@ impl TrackMapWidget {
         }
         // The player on top.
         for dot in self.dots.iter().filter(|d| d.kind == Kind::Player) {
-            canvas.fill_circle((dot.x, dot.y), r + 2.5, Color::rgb(WHITE, 1.0));
+            canvas.fill_circle((dot.x, dot.y), r + 2.5, Color::rgb(TEXT, 1.0));
             canvas.fill_circle((dot.x, dot.y), r + 1.0, Color::rgb(PLAYER, 1.0));
         }
     }
@@ -722,7 +718,7 @@ impl Widget for TrackMapWidget {
         if layer == 0 {
             canvas.fill_background(
                 Rect::new(0.0, 0.0, self.width as f32, self.height as f32),
-                Color::rgb(BACKGROUND, self.opacity),
+                Color::rgb(SURFACE, self.opacity),
             );
             match self.shape {
                 MapShape::Circle => self.draw_circle(canvas),

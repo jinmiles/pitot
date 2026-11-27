@@ -19,13 +19,18 @@ use crate::pipeline::View;
 use crate::render::{Align, Canvas, Color, Rect};
 
 use super::classes::{ClassLabel, class_label};
+use super::design::{BODY, LABEL, PAD, divider};
+use super::palette::{
+    BEST, COMPOUND_HARD, COMPOUND_INTER, COMPOUND_MEDIUM, COMPOUND_SOFT, COMPOUND_WET, DIM, GAIN, LOSS, PLAYER,
+    PLAYER_BAND, RAISED, SURFACE, TEXT, UNKNOWN_CLASS, UNKNOWN_LICENSE, ink_on,
+};
 use super::text::FixedText;
 use super::timing::{Gap, RaceClock, SectorClock, SectorStarts};
 use super::trackclock::{SharedTrackClock, TrackClock};
 use super::{Build, MAX_LAYERS, Redraw, Register, Widget};
 
 const ROW_HEIGHT: f32 = 24.0;
-const TEXT_SIZE: f32 = 13.0;
+const TEXT_SIZE: f32 = BODY;
 /// Leaders shown per class, and cars on each side of the player in the player's class, before the rows are filled
 /// (see [`select_rows`]).
 const LEADERS: usize = 3;
@@ -367,15 +372,15 @@ pub(crate) fn tire_color(compound: &str) -> u32 {
             .any(|w| w.eq_ignore_ascii_case(word.as_bytes()))
     };
     if has("wet") || has("rain") {
-        0x4F_A3FF
+        COMPOUND_WET
     } else if has("inter") {
-        0x3D_D68C
+        COMPOUND_INTER
     } else if has("soft") {
-        0xFF_4D4D
+        COMPOUND_SOFT
     } else if has("medium") {
-        0xFF_D24D
+        COMPOUND_MEDIUM
     } else {
-        0xE8_EAED
+        COMPOUND_HARD
     }
 }
 
@@ -782,7 +787,7 @@ fn write_header(
     let (snap, vars) = (view.snapshot(), view.vars());
     let leader = class_entries.first();
     let driver = leader.and_then(|l| info.driver_info.drivers.get(l.car)?.as_ref());
-    header.color = driver.and_then(|d| d.car_class_color).unwrap_or(0xFF_FFFF);
+    header.color = driver.and_then(|d| d.car_class_color).unwrap_or(UNKNOWN_CLASS);
     header.first = first;
     header.name.clear();
     let label = driver.map_or(ClassLabel::Number(Some(class.id)), |d| {
@@ -888,7 +893,7 @@ fn write_car(row: &mut CarRow, entry: &Entry, cx: &RowContext<'_>) {
         .and_then(Option::as_ref);
     row.player = Some(car) == cx.player;
     row.leader = car == cx.leader.car;
-    row.color = driver.and_then(|d| d.car_class_color).unwrap_or(0xFF_FFFF);
+    row.color = driver.and_then(|d| d.car_class_color).unwrap_or(UNKNOWN_CLASS);
     row.position.clear();
     if entry.position != i32::MAX {
         let _ = write!(row.position, "{}", entry.position);
@@ -913,7 +918,7 @@ fn write_car(row: &mut CarRow, entry: &Entry, cx: &RowContext<'_>) {
         driver.and_then(|d| d.license.as_deref()).unwrap_or(""),
         &mut row.license,
     );
-    row.license_color = driver.and_then(|d| d.license_color).unwrap_or(0x80_8080);
+    row.license_color = driver.and_then(|d| d.license_color).unwrap_or(UNKNOWN_LICENSE);
     row.rating.clear();
     if entry.rating > 0.0 {
         let _ = write!(row.rating, "{:.1}k", entry.rating / 1000.0);
@@ -1055,7 +1060,7 @@ impl Columns {
             sector_columns += 1;
         }
         // Lay out from the right edge.
-        let mut x = w - 6.0;
+        let mut x = w - PAD;
         let sectors_x = x - SECTOR_WIDTH * sector_columns as f32;
         x = sectors_x;
         let last = x - LAST_WIDTH;
@@ -1083,7 +1088,7 @@ impl Columns {
         let license = x - 42.0;
         x = license;
         // From the left edge.
-        let position = 8.0;
+        let position = PAD;
         let mut left = position + 24.0;
         let change_x = change.then(|| {
             let at = left;
@@ -1169,13 +1174,6 @@ fn text_cut(canvas: &mut Canvas<'_>, text: &str, rect: Rect, color: Color) {
     }
 }
 
-const WHITE: u32 = 0xF0_F2F5;
-const DIM: u32 = 0xA0_A6AE;
-const GREEN: u32 = 0x3D_D68C;
-const RED: u32 = 0xFF_6B5E;
-const PURPLE: u32 = 0xB4_5CFF;
-const BACKGROUND: u32 = 0x10_1418;
-
 /// Cars a class of `cars` shows: its first `leaders`, and with the player at `player` in it, the cars within
 /// `around` places of the player.
 fn shown_in_class(cars: usize, player: Option<usize>, leaders: usize, around: usize) -> usize {
@@ -1259,17 +1257,18 @@ fn used_rows(rows: &[Row]) -> usize {
 impl StandingsWidget {
     fn draw_header(&self, canvas: &mut Canvas<'_>, y: f32, header: &HeaderRow) {
         let w = self.width as f32;
+        // A band inset from the panel's edges like the player's, with the class's color at its start.
         canvas.fill_background(
-            Rect::new(0.0, y + 1.0, w, ROW_HEIGHT - 2.0),
-            Color::rgb(0x1C_2228, self.opacity.max(0.6)),
+            Rect::new(PAD / 2.0, y + 1.0, w - PAD, ROW_HEIGHT - 2.0),
+            Color::rgb(RAISED, self.opacity.max(0.6)),
         );
-        canvas.fill(
-            Rect::new(0.0, y + 1.0, 4.0, ROW_HEIGHT - 2.0),
+        canvas.fill_rounded(
+            Rect::new(PAD / 2.0, y + 1.0, 4.0, ROW_HEIGHT - 2.0),
             Color::rgb(header.color, 1.0),
         );
-        let white = Color::rgb(WHITE, 1.0);
+        let white = Color::rgb(TEXT, 1.0);
         let dim = Color::rgb(DIM, 1.0);
-        let mut x = 10.0;
+        let mut x = PAD + 4.0;
         let mut segment = |canvas: &mut Canvas<'_>, text: &str, width: f32, color: Color| {
             if !text.is_empty() && x + width <= w {
                 text_in(
@@ -1328,19 +1327,26 @@ impl StandingsWidget {
     fn draw_car(&self, canvas: &mut Canvas<'_>, y: f32, car: &CarRow, cols: &Columns) {
         let w = self.width as f32;
         if car.player {
-            canvas.fill(
-                Rect::new(0.0, y, w, ROW_HEIGHT),
-                Color::rgb(0x2F_6F7A, 0.45),
+            canvas.fill_rounded(
+                Rect::new(PAD / 2.0, y + 1.0, w - PAD, ROW_HEIGHT - 2.0),
+                Color::rgb(PLAYER, PLAYER_BAND),
             );
         }
+        // Rows left out between the class's leaders and the cars around the player.
         if car.break_before {
-            canvas.fill(Rect::new(0.0, y, w, 1.0), Color::rgb(DIM, 0.5));
+            divider(canvas, y, w);
         }
-        let text = Color::rgb(WHITE, 1.0);
+        let text = Color::rgb(TEXT, 1.0);
         let muted = Color::rgb(DIM, 1.0);
+        // The player's position and name in the player's color; their times keep the colors of their meaning.
+        let own = if car.player {
+            Color::rgb(PLAYER, 1.0)
+        } else {
+            text
+        };
         let cell = |x: f32, width: f32| Rect::new(x, y, width, ROW_HEIGHT);
-        canvas.fill(
-            Rect::new(0.0, y + 2.0, 4.0, ROW_HEIGHT - 4.0),
+        canvas.fill_rounded(
+            Rect::new(PAD / 2.0, y + 2.0, 3.0, ROW_HEIGHT - 4.0),
             Color::rgb(car.color, 1.0),
         );
         text_in(
@@ -1349,21 +1355,21 @@ impl StandingsWidget {
             cell(cols.position, 22.0),
             TEXT_SIZE,
             Align::Right,
-            text,
+            own,
         );
         if let Some(x) = cols.change
             && car.change != 0
         {
             let (arrow, color) = if car.change > 0 {
-                ("\u{25B2}", GREEN)
+                ("\u{25B2}", GAIN)
             } else {
-                ("\u{25BC}", RED)
+                ("\u{25BC}", LOSS)
             };
             text_in(
                 canvas,
                 arrow,
                 cell(x + 2.0, 12.0),
-                10.0,
+                LABEL,
                 Align::Center,
                 Color::rgb(color, 1.0),
             );
@@ -1390,10 +1396,10 @@ impl StandingsWidget {
             cell(cols.name.0, cols.name.1),
             TEXT_SIZE,
             Align::Left,
-            text,
+            own,
         );
         if !car.license.as_str().is_empty() {
-            canvas.fill(
+            canvas.fill_rounded(
                 Rect::new(cols.license, y + 4.0, 38.0, ROW_HEIGHT - 8.0),
                 Color::rgb(car.license_color, 0.85),
             );
@@ -1401,9 +1407,9 @@ impl StandingsWidget {
                 canvas,
                 car.license.as_str(),
                 cell(cols.license, 38.0),
-                12.0,
+                LABEL,
                 Align::Center,
-                Color::rgb(BACKGROUND, 1.0),
+                Color::rgb(ink_on(car.license_color), 1.0),
             );
         }
         text_in(
@@ -1418,15 +1424,15 @@ impl StandingsWidget {
             && car.rating_change != 0
         {
             let (arrow, color) = if car.rating_change > 0 {
-                ("\u{25B2}", GREEN)
+                ("\u{25B2}", GAIN)
             } else {
-                ("\u{25BC}", RED)
+                ("\u{25BC}", LOSS)
             };
             text_in(
                 canvas,
                 arrow,
                 cell(x + 4.0, 10.0),
-                9.0,
+                LABEL,
                 Align::Center,
                 Color::rgb(color, 1.0),
             );
@@ -1464,12 +1470,12 @@ impl StandingsWidget {
                 canvas,
                 "GAP",
                 cell(cols.gap, 44.0),
-                11.0,
+                LABEL,
                 Align::Right,
                 muted,
             );
             if let Some(x) = cols.interval {
-                text_in(canvas, "INT", cell(x, 44.0), 11.0, Align::Right, muted);
+                text_in(canvas, "INT", cell(x, 44.0), LABEL, Align::Right, muted);
             }
         } else {
             text_in(
@@ -1500,8 +1506,8 @@ impl StandingsWidget {
             text,
         );
         let underline = match car.mark {
-            LapMark::Class => Some(PURPLE),
-            LapMark::Personal => Some(GREEN),
+            LapMark::Class => Some(BEST),
+            LapMark::Personal => Some(GAIN),
             LapMark::None => None,
         };
         if let Some(color) = underline {
@@ -1516,8 +1522,8 @@ impl StandingsWidget {
         let (sx, count) = cols.sectors;
         for s in 0..count {
             let color = match car.sector_sign[s] {
-                1 => GREEN,
-                -1 => RED,
+                1 => GAIN,
+                -1 => LOSS,
                 _ => DIM,
             };
             text_in(
@@ -1625,7 +1631,7 @@ impl Widget for StandingsWidget {
         // The background ends at the last row in use; below it the widget stays transparent.
         canvas.fill_background(
             Rect::new(0.0, 0.0, w, used_rows(&self.rows) as f32 * ROW_HEIGHT),
-            Color::rgb(BACKGROUND, self.opacity),
+            Color::rgb(SURFACE, self.opacity),
         );
         let cols = Columns::for_width(w, self.sectors.len());
         let area = canvas.area();
